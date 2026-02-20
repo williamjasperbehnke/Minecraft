@@ -204,28 +204,32 @@ void HudRenderer::initIcons() {
         return;
     }
 
-    const char *vs = R"(
+const char *vs = R"(
 #version 330 core
 layout(location=0) in vec2 aPos;
 layout(location=1) in vec2 aUV;
+layout(location=2) in float aLight;
 uniform vec2 uScreen;
 out vec2 vUV;
+out float vLight;
 void main() {
   vec2 ndc = vec2((aPos.x / uScreen.x) * 2.0 - 1.0, 1.0 - (aPos.y / uScreen.y) * 2.0);
   gl_Position = vec4(ndc, 0.0, 1.0);
   vUV = aUV;
+  vLight = aLight;
 }
 )";
 
     const char *fs = R"(
 #version 330 core
 in vec2 vUV;
+in float vLight;
 uniform sampler2D uAtlas;
 out vec4 FragColor;
 void main() {
   vec4 c = texture(uAtlas, vUV);
   if (c.a <= 0.01) discard;
-  FragColor = c;
+  FragColor = vec4(c.rgb * vLight, c.a);
 }
 )";
 
@@ -241,6 +245,9 @@ void main() {
     glEnableVertexAttribArray(1);
     glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(IconVertex),
                           reinterpret_cast<void *>(2 * sizeof(float)));
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, sizeof(IconVertex),
+                          reinterpret_cast<void *>(4 * sizeof(float)));
     iconReady_ = true;
 }
 
@@ -592,6 +599,40 @@ void HudRenderer::render2D(int width, int height, int selectedIndex,
     initIcons();
     verts_.clear();
     iconVerts_.clear();
+    auto appendItemIcon = [&](float x0, float y0, float x1, float y1, const glm::vec4 &uv,
+                              float light) {
+        iconVerts_.push_back({x0, y0, uv.x, uv.y, light});
+        iconVerts_.push_back({x1, y0, uv.z, uv.y, light});
+        iconVerts_.push_back({x1, y1, uv.z, uv.w, light});
+        iconVerts_.push_back({x0, y0, uv.x, uv.y, light});
+        iconVerts_.push_back({x1, y1, uv.z, uv.w, light});
+        iconVerts_.push_back({x0, y1, uv.x, uv.w, light});
+    };
+    auto appendSkewQuad = [&](const glm::vec2 &a, const glm::vec2 &b, const glm::vec2 &c,
+                              const glm::vec2 &d, const glm::vec4 &uv, float light) {
+        iconVerts_.push_back({a.x, a.y, uv.x, uv.y, light});
+        iconVerts_.push_back({b.x, b.y, uv.z, uv.y, light});
+        iconVerts_.push_back({c.x, c.y, uv.z, uv.w, light});
+        iconVerts_.push_back({a.x, a.y, uv.x, uv.y, light});
+        iconVerts_.push_back({c.x, c.y, uv.z, uv.w, light});
+        iconVerts_.push_back({d.x, d.y, uv.x, uv.w, light});
+    };
+    auto appendCubeIcon = [&](float x, float y, float w, float h, const voxel::BlockDef &def) {
+        const glm::vec4 uvTop = atlas.uvRect(def.topTile);
+        const glm::vec4 uvSide = atlas.uvRect(def.sideTile);
+        const glm::vec2 t0{x + w * 0.50f, y + h * 0.10f};
+        const glm::vec2 t1{x + w * 0.84f, y + h * 0.29f};
+        const glm::vec2 t2{x + w * 0.50f, y + h * 0.49f};
+        const glm::vec2 t3{x + w * 0.16f, y + h * 0.29f};
+        const glm::vec2 bL{x + w * 0.16f, y + h * 0.71f};
+        const glm::vec2 bR{x + w * 0.84f, y + h * 0.71f};
+        const glm::vec2 bC{x + w * 0.50f, y + h * 0.90f};
+
+        // Draw order keeps the top crisp where faces meet.
+        appendSkewQuad(t3, t2, bC, bL, uvSide, 0.74f); // left
+        appendSkewQuad(t2, t1, bR, bC, uvSide, 0.90f); // right
+        appendSkewQuad(t0, t1, t2, t3, uvTop, 1.00f);  // top
+    };
 
     const float cx = width * 0.5f;
     const float cy = height * 0.5f;
@@ -640,17 +681,16 @@ void HudRenderer::render2D(int width, int height, int selectedIndex,
         drawRect(x, y0, slot, slot, 0.09f, 0.10f, 0.12f, 0.88f);
         drawRect(x + 2.0f, y0 + 2.0f, slot - 4.0f, slot - 4.0f, 0.16f, 0.17f, 0.20f, 0.76f);
         const voxel::BlockDef &def = registry.get(hotbar[i]);
-        const auto uv = atlas.uvRect(def.topTile);
         const float ix = x + 8.0f;
         const float iy = y0 + 8.0f;
         const float iw = slot - 16.0f;
         const float ih = slot - 16.0f;
-        iconVerts_.push_back({ix, iy, uv.x, uv.y});
-        iconVerts_.push_back({ix + iw, iy, uv.z, uv.y});
-        iconVerts_.push_back({ix + iw, iy + ih, uv.z, uv.w});
-        iconVerts_.push_back({ix, iy, uv.x, uv.y});
-        iconVerts_.push_back({ix + iw, iy + ih, uv.z, uv.w});
-        iconVerts_.push_back({ix, iy + ih, uv.x, uv.w});
+        if (hotbar[i] == voxel::TALL_GRASS || hotbar[i] == voxel::FLOWER) {
+            const glm::vec4 uv = atlas.uvRect(def.sideTile);
+            appendItemIcon(ix, iy, ix + iw, iy + ih, uv, 1.0f);
+        } else {
+            appendCubeIcon(ix, iy, iw, ih, def);
+        }
         if (i == selectedIndex) {
             drawRect(x - 3.0f, y0 - 3.0f, slot + 6.0f, 4.0f, 1.0f, 0.90f, 0.30f, 1.0f);
             drawRect(x - 3.0f, y0 + slot - 1.0f, slot + 6.0f, 4.0f, 1.0f, 0.90f, 0.30f, 1.0f);
@@ -702,17 +742,16 @@ void HudRenderer::render2D(int width, int height, int selectedIndex,
                          0.76f);
 
                 const voxel::BlockDef &def = registry.get(allIds[slotIndex]);
-                const auto uv = atlas.uvRect(def.topTile);
                 const float ix = sx + 7.0f;
                 const float iy = sy + 7.0f;
                 const float iw = invSlot - 14.0f;
                 const float ih = invSlot - 14.0f;
-                iconVerts_.push_back({ix, iy, uv.x, uv.y});
-                iconVerts_.push_back({ix + iw, iy, uv.z, uv.y});
-                iconVerts_.push_back({ix + iw, iy + ih, uv.z, uv.w});
-                iconVerts_.push_back({ix, iy, uv.x, uv.y});
-                iconVerts_.push_back({ix + iw, iy + ih, uv.z, uv.w});
-                iconVerts_.push_back({ix, iy + ih, uv.x, uv.w});
+                if (allIds[slotIndex] == voxel::TALL_GRASS || allIds[slotIndex] == voxel::FLOWER) {
+                    const glm::vec4 uv = atlas.uvRect(def.sideTile);
+                    appendItemIcon(ix, iy, ix + iw, iy + ih, uv, 1.0f);
+                } else {
+                    appendCubeIcon(ix, iy, iw, ih, def);
+                }
 
                 const int count = allCounts[slotIndex];
                 if (count > 0) {
@@ -724,18 +763,17 @@ void HudRenderer::render2D(int width, int height, int selectedIndex,
 
         if (carryingCount > 0 && carryingId != voxel::AIR) {
             const voxel::BlockDef &def = registry.get(carryingId);
-            const auto uv = atlas.uvRect(def.topTile);
             const float dragSize = 34.0f;
             const float dx = cursorX + 10.0f;
             const float dy = cursorY + 8.0f;
             drawRect(dx - 2.0f, dy - 2.0f, dragSize + 4.0f, dragSize + 4.0f, 0.0f, 0.0f, 0.0f,
                      0.45f);
-            iconVerts_.push_back({dx, dy, uv.x, uv.y});
-            iconVerts_.push_back({dx + dragSize, dy, uv.z, uv.y});
-            iconVerts_.push_back({dx + dragSize, dy + dragSize, uv.z, uv.w});
-            iconVerts_.push_back({dx, dy, uv.x, uv.y});
-            iconVerts_.push_back({dx + dragSize, dy + dragSize, uv.z, uv.w});
-            iconVerts_.push_back({dx, dy + dragSize, uv.x, uv.w});
+            if (carryingId == voxel::TALL_GRASS || carryingId == voxel::FLOWER) {
+                const glm::vec4 uv = atlas.uvRect(def.sideTile);
+                appendItemIcon(dx, dy, dx + dragSize, dy + dragSize, uv, 1.0f);
+            } else {
+                appendCubeIcon(dx, dy, dragSize, dragSize, def);
+            }
             slotLabels.push_back(
                 SlotLabel{dx + 2.0f, dy + dragSize - 8.0f, std::to_string(carryingCount)});
             if (!carryingName.empty()) {

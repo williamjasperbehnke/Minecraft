@@ -82,6 +82,7 @@ class HudRenderer {
         float y;
         float u;
         float v;
+        float light;
     };
     std::vector<IconVertex> iconVerts_;
 
