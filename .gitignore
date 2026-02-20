@@ -1,0 +1,47 @@
+# Build outputs
+/build/
+/build-*/
+/bin/
+/lib/
+/out/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+CTestTestfile.cmake
+Testing/
+Makefile
+
+# Generated dependency folders (if created in-source)
+_deps/
+
+# Binaries / libraries
+*.o
+*.obj
+*.so
+*.dylib
+*.dll
+*.a
+*.lib
+*.exe
+
+# Logs
+*.log
+
+# macOS
+.DS_Store
+
+# Editors/IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Runtime save data
+/world/
+/worlds/
+
+# Source assets
+assets/source_sfx/
