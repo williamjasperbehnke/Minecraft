@@ -36,6 +36,8 @@ class HudRenderer {
                   bool showRecipeMenu, const std::vector<game::CraftingSystem::RecipeInfo> &recipes,
                   const std::vector<bool> &recipeCraftable,
                   float recipeScroll, float uiTimeSeconds, const std::string &recipeSearch,
+                  bool showCreativeMenu, const std::vector<voxel::BlockId> &creativeItems,
+                  float creativeScroll, const std::string &creativeSearch,
                   bool recipeCraftableOnly,
                   const std::optional<voxel::BlockId> &recipeIngredientFilter,
                   const game::Inventory::Slot &craftOutput,

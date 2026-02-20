@@ -600,6 +600,9 @@ void HudRenderer::render2D(int width, int height, int selectedIndex,
                            const std::vector<game::CraftingSystem::RecipeInfo> &recipes,
                            const std::vector<bool> &recipeCraftable,
                            float recipeScroll, float uiTimeSeconds, const std::string &recipeSearch,
+                           bool showCreativeMenu,
+                           const std::vector<voxel::BlockId> &creativeItems, float creativeScroll,
+                           const std::string &creativeSearch,
                            bool recipeCraftableOnly,
                            const std::optional<voxel::BlockId> &recipeIngredientFilter,
                            const game::Inventory::Slot &craftOutput,
@@ -759,8 +762,8 @@ void HudRenderer::render2D(int width, int height, int selectedIndex,
     }
 
     drawText(cx - 176.0f * uiScale, y0 + slot + 14.0f * uiScale,
-             "1-9 Select  |  LMB Mine  |  RMB Place  |  E Inventory  |  F2 HUD", 200, 206, 222,
-             255);
+             "1-9 Select  |  LMB Mine  |  RMB Place  |  E Inventory  |  F Creative  |  F2 HUD",
+             200, 206, 222, 255);
 
     if (showInventory) {
         const int cols = game::Inventory::kColumns;
@@ -784,16 +787,24 @@ void HudRenderer::render2D(int width, int height, int selectedIndex,
         const float totalPanelW = invW + craftPanelGap + craftPanelW;
         const float invX = cx - totalPanelW * 0.5f;
         const float craftX = invX + invW + craftPanelGap;
-        const float craftY = invY + (invH - craftGridW) * 0.5f;
+        const float trashGap = 10.0f * uiScale;
+        const float craftRegionH = craftGridW + trashGap + craftSlot;
+        const float craftY =
+            (craftGrid == game::CraftingSystem::kGridSizeTable)
+                ? invY
+                : (invY + (invH - craftRegionH) * 0.5f);
         const float craftOutX = craftX + craftGridW + 44.0f * uiScale;
         const float craftOutY = craftY + (craftGridW - craftSlot) * 0.5f;
 
         drawRect(invX - 10.0f * uiScale, invY - 26.0f * uiScale, invW + 20.0f * uiScale,
                  invH + 36.0f * uiScale, 0.03f, 0.04f, 0.05f, 0.72f);
         drawText(invX, invY - 18.0f * uiScale, "Inventory", 244, 246, 252, 255);
-        drawRect(craftX - 10.0f * uiScale, craftY - 28.0f * uiScale,
+        const float craftBorderTopPad =
+            (craftGrid == game::CraftingSystem::kGridSizeTable) ? 26.0f * uiScale : 28.0f * uiScale;
+        const float craftBorderBottomPad = 8.0f * uiScale;
+        drawRect(craftX - 10.0f * uiScale, craftY - craftBorderTopPad,
                  (craftOutX + craftSlot) - craftX + 20.0f * uiScale,
-                 craftGridW + 36.0f * uiScale, 0.03f, 0.04f, 0.05f, 0.72f);
+                 craftGridW + craftBorderTopPad + craftBorderBottomPad, 0.03f, 0.04f, 0.05f, 0.72f);
         drawText(craftX, craftY - 20.0f * uiScale,
                  usingCraftingTable ? "Crafting Table (3x3)" : "Crafting (2x2)", 244, 246, 252,
                  255);
@@ -838,6 +849,9 @@ void HudRenderer::render2D(int width, int height, int selectedIndex,
         }
 
         drawSlotFrame(craftOutX, craftOutY, craftSlot);
+        const int craftOutputIndex = game::Inventory::kSlotCount +
+                                     static_cast<int>(craftInput.size());
+        const int trashIndex = craftOutputIndex + 1;
         if (craftOutput.id != voxel::AIR && craftOutput.count > 0) {
             const voxel::BlockDef &def = registry.get(craftOutput.id);
             const float ix = craftOutX + 8.0f * uiScale;
@@ -855,9 +869,28 @@ void HudRenderer::render2D(int width, int height, int selectedIndex,
             slotLabels.push_back(SlotLabel{craftOutX + 5.0f, craftOutY + craftSlot - 13.0f,
                                            std::to_string(craftOutput.count)});
         }
-        if (hoveredSlotIndex == game::Inventory::kSlotCount +
-                                    static_cast<int>(craftInput.size())) {
+        if (hoveredSlotIndex == craftOutputIndex) {
             drawHoverOutline(craftOutX, craftOutY, craftSlot);
+        }
+
+        const float trashX = craftX - 10.0f * uiScale;
+        const float invBorderBottomY = invY + invH + 10.0f * uiScale;
+        const float trashY = invBorderBottomY - craftSlot - 2.0f;
+        drawRect(trashX - 2.0f, trashY - 2.0f, craftSlot + 4.0f, craftSlot + 4.0f, 0.60f, 0.22f,
+                 0.22f, 0.78f);
+        drawSlotFrame(trashX, trashY, craftSlot);
+        drawRect(trashX + 8.0f * uiScale, trashY + 10.0f * uiScale, craftSlot - 16.0f * uiScale,
+                 5.0f * uiScale, 0.55f, 0.18f, 0.18f, 0.95f);
+        drawRect(trashX + 14.0f * uiScale, trashY + 15.0f * uiScale, craftSlot - 28.0f * uiScale,
+                 19.0f * uiScale, 0.78f, 0.24f, 0.24f, 0.95f);
+        drawRect(trashX + 18.0f * uiScale, trashY + 18.0f * uiScale, 2.0f * uiScale,
+                 12.0f * uiScale, 0.92f, 0.82f, 0.82f, 0.85f);
+        drawRect(trashX + 23.0f * uiScale, trashY + 18.0f * uiScale, 2.0f * uiScale,
+                 12.0f * uiScale, 0.92f, 0.82f, 0.82f, 0.85f);
+        drawRect(trashX + 28.0f * uiScale, trashY + 18.0f * uiScale, 2.0f * uiScale,
+                 12.0f * uiScale, 0.92f, 0.82f, 0.82f, 0.85f);
+        if (hoveredSlotIndex == trashIndex) {
+            drawHoverOutline(trashX, trashY, craftSlot);
         }
 
         for (int row = 0; row < rows; ++row) {
@@ -914,6 +947,106 @@ void HudRenderer::render2D(int width, int height, int selectedIndex,
                 const float nameY = dy - 13.0f * uiScale;
                 drawText(dx + 1.0f, nameY + 1.0f, carryingName, 16, 18, 22, 220);
                 drawText(dx, nameY, carryingName, 238, 242, 250, 255);
+            }
+        }
+
+        if (showCreativeMenu) {
+            const float panelHeaderH = 34.0f * uiScale;
+            const float panelBodyH = 220.0f * uiScale;
+            const float panelH = panelHeaderH + panelBodyH;
+            const float panelX = invX;
+            const float panelY = invY - panelH - 44.0f * uiScale;
+            const float panelW = totalPanelW;
+            drawRect(panelX, panelY, panelW, panelH, 0.03f, 0.04f, 0.05f, 0.78f);
+            drawText(panelX + 10.0f * uiScale, panelY + 10.0f * uiScale, "Creative", 244, 246, 252,
+                     255);
+            drawText(panelX + panelW - 36.0f * uiScale, panelY + 9.0f * uiScale, "F: Close", 182,
+                     190, 206, 255);
+
+            const float searchX = panelX + 88.0f * uiScale;
+            const float searchY = panelY + 6.0f * uiScale;
+            const float searchW = panelW - 126.0f * uiScale;
+            const float searchH = 22.0f * uiScale;
+            drawRect(searchX, searchY, searchW, searchH, 0.06f, 0.08f, 0.10f, 0.95f);
+            drawRect(searchX + 1.0f, searchY + 1.0f, searchW - 2.0f, searchH - 2.0f, 0.12f, 0.14f,
+                     0.18f, 0.95f);
+            const bool blinkOn = (static_cast<int>(std::floor(uiTimeSeconds * 2.0f)) % 2) == 0;
+            const std::string searchText =
+                creativeSearch.empty() ? "Search items..." : creativeSearch;
+            drawText(searchX + 6.0f * uiScale, searchY + 7.0f * uiScale,
+                     searchText + (blinkOn ? "_" : ""), creativeSearch.empty() ? 168 : 232,
+                     creativeSearch.empty() ? 176 : 238, creativeSearch.empty() ? 190 : 248, 255);
+
+            const float contentX = panelX + 10.0f * uiScale;
+            const float contentY = panelY + panelHeaderH;
+            const float contentW = panelW - 28.0f * uiScale;
+            const float contentH = panelBodyH - 10.0f * uiScale;
+            drawRect(contentX, contentY, contentW, contentH, 0.09f, 0.10f, 0.12f, 0.70f);
+
+            const float cell = 40.0f * uiScale;
+            const float cellGap = 8.0f * uiScale;
+            const int columns =
+                std::max(1, std::min(9, static_cast<int>((contentW + cellGap) / (cell + cellGap))));
+            const float usedW =
+                static_cast<float>(columns) * cell + static_cast<float>(columns - 1) * cellGap;
+            const float gridInset = std::max(0.0f, (contentW - usedW) * 0.5f);
+            const float rowStride = cell + cellGap;
+            const int rowsCount =
+                (static_cast<int>(creativeItems.size()) + columns - 1) / columns;
+            const float totalContentH =
+                static_cast<float>(rowsCount) * cell +
+                static_cast<float>(std::max(0, rowsCount - 1)) * cellGap;
+            const float maxScroll = std::max(0.0f, totalContentH - contentH);
+            const float scroll = std::clamp(creativeScroll, 0.0f, maxScroll);
+
+            for (std::size_t i = 0; i < creativeItems.size(); ++i) {
+                const int row = static_cast<int>(i) / columns;
+                const int col = static_cast<int>(i) % columns;
+                const float sx = contentX + gridInset + static_cast<float>(col) * (cell + cellGap);
+                const float sy = contentY + static_cast<float>(row) * rowStride - scroll;
+                if (sy + cell < contentY || sy > (contentY + contentH)) {
+                    continue;
+                }
+
+                drawRect(sx + 2.0f, sy + 2.0f, cell, cell, 0.0f, 0.0f, 0.0f, 0.32f);
+                drawRect(sx, sy, cell, cell, 0.09f, 0.10f, 0.12f, 0.88f);
+                drawRect(sx + 2.0f, sy + 2.0f, cell - 4.0f, cell - 4.0f, 0.16f, 0.17f, 0.20f,
+                         0.76f);
+
+                const voxel::BlockId id = creativeItems[i];
+                const voxel::BlockDef &def = registry.get(id);
+                if (isFlatItemId(id)) {
+                    const float ix = sx + 7.0f * uiScale;
+                    const float iy = sy + 7.0f * uiScale;
+                    const float is = cell - 14.0f * uiScale;
+                    const glm::vec4 uv = atlas.uvRect(def.sideTile);
+                    appendItemIcon(ix, iy, ix + is, iy + is, uv, 1.0f);
+                } else {
+                    const float cubeInset = 4.0f * uiScale;
+                    appendCubeIcon(sx + cubeInset, sy + cubeInset, cell - 2.0f * cubeInset,
+                                   cell - 2.0f * cubeInset, def);
+                }
+                if (cursorX >= sx && cursorX <= (sx + cell) && cursorY >= sy && cursorY <= (sy + cell)) {
+                    recipeHoverTipText = game::blockName(id);
+                    recipeHoverTipX = cursorX + 12.0f * uiScale;
+                    recipeHoverTipY = cursorY - 8.0f * uiScale;
+                }
+            }
+
+            const float trackX = panelX + panelW - 12.0f * uiScale;
+            const float trackY = contentY;
+            const float trackH = contentH;
+            drawRect(trackX, trackY, 4.0f * uiScale, trackH, 0.14f, 0.16f, 0.18f, 0.95f);
+            if (maxScroll > 0.0f) {
+                const float thumbH = std::max(22.0f * uiScale, trackH * (contentH / totalContentH));
+                const float thumbTravel = std::max(0.0f, trackH - thumbH);
+                const float t = scroll / maxScroll;
+                const float thumbY = trackY + t * thumbTravel;
+                drawRect(trackX - 2.0f * uiScale, thumbY, 8.0f * uiScale, thumbH, 0.30f, 0.72f, 0.95f,
+                         0.95f);
+            } else {
+                drawRect(trackX - 2.0f * uiScale, trackY, 8.0f * uiScale, trackH, 0.24f, 0.28f, 0.33f,
+                         0.85f);
             }
         }
 

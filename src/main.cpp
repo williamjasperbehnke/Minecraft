@@ -796,6 +796,8 @@ WorldSelection runTitleMenu(GLFWwindow *window, gfx::HudRenderer &hud) {
 constexpr int kCraftInputCount = game::CraftingSystem::kInputCount;
 constexpr int kCraftOutputSlot = game::CraftingSystem::kOutputSlotIndex;
 constexpr int kUiSlotCount = game::CraftingSystem::kUiSlotCount;
+constexpr int kTrashSlot = kUiSlotCount;
+constexpr int kUiSlotCountWithTrash = kTrashSlot + 1;
 
 int inventorySlotAtCursor(double mx, double my, int width, int height, bool showInventory,
                           float hudScale, int craftingGridSize) {
@@ -865,7 +867,12 @@ int inventorySlotAtCursor(double mx, double my, int width, int height, bool show
 
     // Crafting panel: 2x2 inventory or 3x3 crafting table.
     const float craftX = invX + invW + craftPanelGap;
-    const float craftY = invY + (invH - craftGridW) * 0.5f;
+    const float trashGap = 10.0f * uiScale;
+    const float craftRegionH = craftGridW + trashGap + craftSlot;
+    const float craftY =
+        (craftGrid == game::CraftingSystem::kGridSizeTable)
+            ? invY
+            : (invY + (invH - craftRegionH) * 0.5f);
     for (int r = 0; r < craftGrid; ++r) {
         for (int c = 0; c < craftGrid; ++c) {
             const int idx = game::Inventory::kSlotCount + r * craftGrid + c;
@@ -877,8 +884,13 @@ int inventorySlotAtCursor(double mx, double my, int width, int height, bool show
     const float outX = craftX + craftGridW + 44.0f * uiScale;
     const float outY = craftY + (craftGridW - craftSlot) * 0.5f;
     considerSlot(kCraftOutputSlot, outX, outY, craftSlot);
+    const float trashX = craftX - 10.0f * uiScale;
+    const float invBorderBottomY = invY + invH + 10.0f * uiScale;
+    const float trashY = invBorderBottomY - craftSlot - 2.0f;
+    considerSlot(kTrashSlot, trashX, trashY, craftSlot);
     const float snapRadius = 9.0f * uiScale;
-    if (nearestSlot >= 0 && nearestSlot < kUiSlotCount && nearestDist2 <= snapRadius * snapRadius) {
+    if (nearestSlot >= 0 && nearestSlot < kUiSlotCountWithTrash &&
+        nearestDist2 <= snapRadius * snapRadius) {
         return nearestSlot;
     }
     return -1;
@@ -1032,11 +1044,153 @@ int recipeRowAtCursor(double mx, double my, const RecipeMenuLayout &layout, floa
     return -1;
 }
 
+struct CreativeMenuLayout {
+    float panelX = 0.0f;
+    float panelY = 0.0f;
+    float panelW = 0.0f;
+    float panelH = 0.0f;
+    float contentX = 0.0f;
+    float contentY = 0.0f;
+    float contentW = 0.0f;
+    float contentH = 0.0f;
+    float searchX = 0.0f;
+    float searchY = 0.0f;
+    float searchW = 0.0f;
+    float searchH = 0.0f;
+    int columns = 1;
+    float cell = 0.0f;
+    float cellGap = 0.0f;
+    float gridInset = 0.0f;
+    float rowStride = 0.0f;
+    float maxScroll = 0.0f;
+    float trackX = 0.0f;
+    float trackY = 0.0f;
+    float trackW = 0.0f;
+    float trackH = 0.0f;
+    float thumbH = 0.0f;
+};
+
+CreativeMenuLayout computeCreativeMenuLayout(int width, int height, float hudScale,
+                                             int craftingGridSize, std::size_t itemCount) {
+    const float cx = width * 0.5f;
+    const float uiScale = std::clamp(hudScale, 0.8f, 1.8f);
+    const float y0 = height - 90.0f * uiScale;
+    const int cols = game::Inventory::kColumns;
+    const int rows = game::Inventory::kRows - 1;
+    const float invSlot = 48.0f * uiScale;
+    const float invGap = 10.0f * uiScale;
+    const float invW = cols * invSlot + (cols - 1) * invGap;
+    const float invH = rows * invSlot + (rows - 1) * invGap;
+    const int craftGrid = std::clamp(craftingGridSize, game::CraftingSystem::kGridSizeInventory,
+                                     game::CraftingSystem::kGridSizeTable);
+    const float craftSlot = invSlot;
+    const float craftGap = invGap;
+    const float craftGridW =
+        static_cast<float>(craftGrid) * craftSlot + static_cast<float>(craftGrid - 1) * craftGap;
+    const float craftPanelGap = 26.0f * uiScale;
+    const float craftPanelW = craftGridW + 44.0f * uiScale + craftSlot;
+    const float totalPanelW = invW + craftPanelGap + craftPanelW;
+    const float invX = cx - totalPanelW * 0.5f;
+    const float invY = y0 - 44.0f * uiScale - invH;
+
+    const float panelHeaderH = 34.0f * uiScale;
+    const float panelBodyH = 220.0f * uiScale;
+    const float panelH = panelHeaderH + panelBodyH;
+    const float panelY = invY - panelH - 44.0f * uiScale;
+    const float panelW = totalPanelW;
+
+    const float searchX = invX + 88.0f * uiScale;
+    const float searchY = panelY + 6.0f * uiScale;
+    const float searchW = panelW - 126.0f * uiScale;
+    const float searchH = 22.0f * uiScale;
+
+    const float contentX = invX + 10.0f * uiScale;
+    const float contentY = panelY + panelHeaderH;
+    const float contentW = panelW - 28.0f * uiScale;
+    const float contentH = panelBodyH - 10.0f * uiScale;
+
+    const float cell = 40.0f * uiScale;
+    const float cellGap = 8.0f * uiScale;
+    const int columns =
+        std::max(1, std::min(9, static_cast<int>((contentW + cellGap) / (cell + cellGap))));
+    const float usedW =
+        static_cast<float>(columns) * cell + static_cast<float>(columns - 1) * cellGap;
+    const float gridInset = std::max(0.0f, (contentW - usedW) * 0.5f);
+    const float rowStride = cell + cellGap;
+    const int rowsCount = (static_cast<int>(itemCount) + columns - 1) / columns;
+    const float totalContentH = static_cast<float>(rowsCount) * cell +
+                                static_cast<float>(std::max(0, rowsCount - 1)) * cellGap;
+    const float maxScroll = std::max(0.0f, totalContentH - contentH);
+
+    const float trackX = invX + panelW - 12.0f * uiScale;
+    const float trackY = contentY;
+    const float trackW = 8.0f * uiScale;
+    const float trackH = contentH;
+    const float thumbH =
+        (maxScroll > 0.0f) ? std::max(22.0f * uiScale, trackH * (contentH / totalContentH)) : trackH;
+
+    return CreativeMenuLayout{
+        invX, panelY, panelW, panelH, contentX, contentY, contentW, contentH, searchX, searchY,
+        searchW, searchH, columns, cell, cellGap, gridInset, rowStride, maxScroll, trackX, trackY,
+        trackW, trackH, thumbH,
+    };
+}
+
+int creativeItemAtCursor(double mx, double my, const CreativeMenuLayout &layout, float scroll,
+                         std::size_t itemCount) {
+    if (mx < (layout.contentX + layout.gridInset) ||
+        mx > (layout.contentX + layout.contentW - layout.gridInset) || my < layout.contentY ||
+        my > (layout.contentY + layout.contentH)) {
+        return -1;
+    }
+    const int rowsCount = (static_cast<int>(itemCount) + layout.columns - 1) / layout.columns;
+    for (int row = 0; row < rowsCount; ++row) {
+        const float sy = layout.contentY + static_cast<float>(row) * layout.rowStride - scroll;
+        if (sy + layout.cell < layout.contentY || sy > (layout.contentY + layout.contentH)) {
+            continue;
+        }
+        for (int col = 0; col < layout.columns; ++col) {
+            const int idx = row * layout.columns + col;
+            if (idx >= static_cast<int>(itemCount)) {
+                break;
+            }
+            const float sx =
+                layout.contentX + layout.gridInset + static_cast<float>(col) * (layout.cell + layout.cellGap);
+            if (mx >= sx && mx <= (sx + layout.cell) && my >= sy && my <= (sy + layout.cell)) {
+                return idx;
+            }
+        }
+    }
+    return -1;
+}
+
 std::string toLowerAscii(std::string s) {
     for (char &c : s) {
         c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     }
     return s;
+}
+
+const std::vector<voxel::BlockId> &creativeCatalog() {
+    static const std::vector<voxel::BlockId> kItems = {
+        voxel::GRASS,        voxel::DIRT,        voxel::STONE,        voxel::SAND,
+        voxel::WATER,        voxel::WOOD,        voxel::LEAVES,       voxel::SPRUCE_WOOD,
+        voxel::SPRUCE_LEAVES, voxel::BIRCH_WOOD, voxel::BIRCH_LEAVES, voxel::CACTUS,
+        voxel::SANDSTONE,    voxel::GRAVEL,      voxel::CLAY,         voxel::SNOW_BLOCK,
+        voxel::ICE,          voxel::COAL_ORE,    voxel::COPPER_ORE,   voxel::IRON_ORE,
+        voxel::GOLD_ORE,     voxel::DIAMOND_ORE, voxel::EMERALD_ORE,  voxel::TALL_GRASS,
+        voxel::FLOWER,       voxel::TORCH,       voxel::CRAFTING_TABLE, voxel::OAK_PLANKS,
+        voxel::SPRUCE_PLANKS, voxel::BIRCH_PLANKS, voxel::STICK,
+    };
+    return kItems;
+}
+
+bool creativeItemMatchesSearch(voxel::BlockId id, const std::string &search) {
+    const std::string needle = toLowerAscii(search);
+    if (needle.empty()) {
+        return true;
+    }
+    return toLowerAscii(game::blockName(id)).find(needle) != std::string::npos;
 }
 
 bool recipeMatchesSearch(const game::CraftingSystem::RecipeInfo &recipe, const std::string &search) {
@@ -1681,6 +1835,8 @@ int main() {
             game::CraftingSystem::State crafting;
             float recipeMenuScroll = 0.0f;
             std::string recipeSearchText;
+            float creativeMenuScroll = 0.0f;
+            std::string creativeSearchText;
             std::optional<voxel::BlockId> recipeIngredientFilter;
             bool recipeCraftableOnly = false;
             int craftingGridSize = game::CraftingSystem::kGridSizeInventory;
@@ -1712,10 +1868,16 @@ int main() {
             voxel::BlockId lastInventoryLeftClickId = voxel::AIR;
             bool recaptureMouseAfterInventoryClose = false;
             bool recipeMenuVisible = false;
+            bool creativeMenuVisible = false;
             bool recipeScrollDragging = false;
+            bool creativeScrollDragging = false;
             float recipeScrollGrabOffsetY = 0.0f;
+            float creativeScrollGrabOffsetY = 0.0f;
             bool recipeSearchFocused = false;
+            bool creativeSearchFocused = false;
             int lastRecipeFillIndex = -1;
+            bool prevCreativeMenuToggle = false;
+            bool prevCreativeSearchBackspace = false;
 
             float lastTime = static_cast<float>(glfwGetTime());
             float titleAccum = 0.0f;
@@ -1868,7 +2030,9 @@ int main() {
 
                 const bool invToggleDown = glfwGetKey(window, GLFW_KEY_E) == GLFW_PRESS;
                 const bool suppressInventoryToggle =
-                    recipeMenuVisible && recipeSearchFocused && !menuOpen && !pauseMenuOpen;
+                    ((recipeMenuVisible && recipeSearchFocused) ||
+                     (creativeMenuVisible && creativeSearchFocused)) &&
+                    !menuOpen && !pauseMenuOpen;
                 if (invToggleDown && !prevInventoryToggle && !menuOpen && !pauseMenuOpen &&
                     !suppressInventoryToggle) {
                     const bool openingInventory = !inventoryVisible;
@@ -1884,10 +2048,15 @@ int main() {
                         usingCraftingTable = false;
                         craftingGridSize = game::CraftingSystem::kGridSizeInventory;
                         recipeMenuVisible = false;
+                        creativeMenuVisible = false;
                         recipeMenuScroll = 0.0f;
+                        creativeMenuScroll = 0.0f;
                         recipeScrollDragging = false;
+                        creativeScrollDragging = false;
                         recipeSearchFocused = false;
+                        creativeSearchFocused = false;
                         recipeSearchText.clear();
+                        creativeSearchText.clear();
                         recipeIngredientFilter.reset();
                         recipeCraftableOnly = false;
                         gRecipeSearchText = nullptr;
@@ -1906,12 +2075,17 @@ int main() {
 
                 const bool recipeToggleDown = glfwGetKey(window, GLFW_KEY_R) == GLFW_PRESS;
                 if (recipeToggleDown && !prevRecipeMenuToggle && inventoryVisible && !menuOpen &&
-                    !pauseMenuOpen && !(recipeMenuVisible && recipeSearchFocused)) {
+                    !pauseMenuOpen && !(recipeMenuVisible && recipeSearchFocused) &&
+                    !(creativeMenuVisible && creativeSearchFocused)) {
                     recipeMenuVisible = !recipeMenuVisible;
                     if (recipeMenuVisible) {
-                        recipeSearchFocused = true;
-                        gRecipeSearchText = &recipeSearchText;
-                        glfwSetCharCallback(window, onRecipeSearchCharInput);
+                        creativeMenuVisible = false;
+                        creativeScrollDragging = false;
+                        creativeSearchFocused = false;
+                        creativeSearchText.clear();
+                        recipeSearchFocused = false;
+                        gRecipeSearchText = nullptr;
+                        glfwSetCharCallback(window, nullptr);
                     } else {
                         recipeMenuScroll = 0.0f;
                         recipeScrollDragging = false;
@@ -1925,19 +2099,57 @@ int main() {
                 }
                 prevRecipeMenuToggle = recipeToggleDown;
 
+                const bool creativeToggleDown = glfwGetKey(window, GLFW_KEY_F) == GLFW_PRESS;
+                if (creativeToggleDown && !prevCreativeMenuToggle && !menuOpen && !pauseMenuOpen &&
+                    !(creativeMenuVisible && creativeSearchFocused) &&
+                    !(recipeMenuVisible && recipeSearchFocused)) {
+                    if (!inventoryVisible) {
+                        inventoryVisible = true;
+                        usingCraftingTable =
+                            isLookingAtCraftingTable(world, camera, debugCfg.raycastDistance);
+                        craftingGridSize = usingCraftingTable ? game::CraftingSystem::kGridSizeTable
+                                                              : game::CraftingSystem::kGridSizeInventory;
+                        craftingSystem.updateOutput(crafting, craftingGridSize);
+                        glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+                        glfwSetCursor(window, arrowCursor);
+                    }
+                    creativeMenuVisible = !creativeMenuVisible;
+                    if (creativeMenuVisible) {
+                        recipeMenuVisible = false;
+                        recipeScrollDragging = false;
+                        recipeSearchFocused = false;
+                        recipeSearchText.clear();
+                        recipeIngredientFilter.reset();
+                        recipeCraftableOnly = false;
+                        creativeSearchFocused = false;
+                        gRecipeSearchText = nullptr;
+                        glfwSetCharCallback(window, nullptr);
+                    } else {
+                        creativeMenuScroll = 0.0f;
+                        creativeScrollDragging = false;
+                        creativeSearchFocused = false;
+                        creativeSearchText.clear();
+                        gRecipeSearchText = nullptr;
+                        glfwSetCharCallback(window, nullptr);
+                    }
+                }
+                prevCreativeMenuToggle = creativeToggleDown;
+
                 const bool recipeBackspace = glfwGetKey(window, GLFW_KEY_BACKSPACE) == GLFW_PRESS;
                 if (recipeMenuVisible && recipeBackspace && !prevRecipeSearchBackspace &&
                     !recipeSearchText.empty()) {
                     recipeSearchText.pop_back();
                 }
                 prevRecipeSearchBackspace = recipeBackspace;
+                if (creativeMenuVisible && recipeBackspace && !prevCreativeSearchBackspace &&
+                    !creativeSearchText.empty()) {
+                    creativeSearchText.pop_back();
+                }
+                prevCreativeSearchBackspace = recipeBackspace;
 
                 std::vector<int> filteredRecipeIndices;
                 std::vector<unsigned char> recipeCraftableCache;
                 std::vector<unsigned char> recipeCraftableComputed;
-                filteredRecipeIndices.reserve(craftingSystem.recipeInfos().size());
-                recipeCraftableCache.assign(craftingSystem.recipeInfos().size(), 0);
-                recipeCraftableComputed.assign(craftingSystem.recipeInfos().size(), 0);
                 const int recipeFilterActiveInputs =
                     game::CraftingSystem::activeInputCount(craftingGridSize);
                 auto isRecipeCraftableNow = [&](int index) {
@@ -1960,40 +2172,56 @@ int main() {
                     recipeCraftableCache[index] = craftable ? 1 : 0;
                     return craftable;
                 };
-                std::vector<int> filteredPlankRecipeIndices;
-                filteredPlankRecipeIndices.reserve(3);
-                int plankInsertPos = -1;
-                for (int i = 0; i < static_cast<int>(craftingSystem.recipeInfos().size()); ++i) {
-                    const auto &recipe = craftingSystem.recipeInfos()[i];
-                    const bool matchesSearch = recipeMatchesSearch(recipe, recipeSearchText);
-                    const bool matchesIngredient =
-                        !recipeIngredientFilter.has_value() ||
-                        recipeUsesIngredient(recipe, recipeIngredientFilter.value());
-                    const bool matchesCraftable = !recipeCraftableOnly || isRecipeCraftableNow(i);
-                    if (matchesSearch && matchesIngredient && matchesCraftable) {
-                        const bool isPlanksFamily = (recipe.outputId == voxel::OAK_PLANKS ||
-                                                     recipe.outputId == voxel::SPRUCE_PLANKS ||
-                                                     recipe.outputId == voxel::BIRCH_PLANKS);
-                        if (isPlanksFamily) {
-                            if (plankInsertPos < 0) {
-                                plankInsertPos = static_cast<int>(filteredRecipeIndices.size());
+
+                if (recipeMenuVisible) {
+                    filteredRecipeIndices.reserve(craftingSystem.recipeInfos().size());
+                    recipeCraftableCache.assign(craftingSystem.recipeInfos().size(), 0);
+                    recipeCraftableComputed.assign(craftingSystem.recipeInfos().size(), 0);
+                    std::vector<int> filteredPlankRecipeIndices;
+                    filteredPlankRecipeIndices.reserve(3);
+                    int plankInsertPos = -1;
+                    for (int i = 0; i < static_cast<int>(craftingSystem.recipeInfos().size()); ++i) {
+                        const auto &recipe = craftingSystem.recipeInfos()[i];
+                        const bool matchesSearch = recipeMatchesSearch(recipe, recipeSearchText);
+                        const bool matchesIngredient =
+                            !recipeIngredientFilter.has_value() ||
+                            recipeUsesIngredient(recipe, recipeIngredientFilter.value());
+                        const bool matchesCraftable = !recipeCraftableOnly || isRecipeCraftableNow(i);
+                        if (matchesSearch && matchesIngredient && matchesCraftable) {
+                            const bool isPlanksFamily = (recipe.outputId == voxel::OAK_PLANKS ||
+                                                         recipe.outputId == voxel::SPRUCE_PLANKS ||
+                                                         recipe.outputId == voxel::BIRCH_PLANKS);
+                            if (isPlanksFamily) {
+                                if (plankInsertPos < 0) {
+                                    plankInsertPos = static_cast<int>(filteredRecipeIndices.size());
+                                }
+                                filteredPlankRecipeIndices.push_back(i);
+                                continue;
                             }
-                            filteredPlankRecipeIndices.push_back(i);
-                            continue;
+                            filteredRecipeIndices.push_back(i);
                         }
-                        filteredRecipeIndices.push_back(i);
+                    }
+                    if (!filteredPlankRecipeIndices.empty()) {
+                        const int cycle = static_cast<int>(std::floor(std::max(0.0f, now) * 0.6f));
+                        const int pick = filteredPlankRecipeIndices
+                            [cycle % static_cast<int>(filteredPlankRecipeIndices.size())];
+                        const int insertPos =
+                            (plankInsertPos < 0 ||
+                             plankInsertPos > static_cast<int>(filteredRecipeIndices.size()))
+                                ? static_cast<int>(filteredRecipeIndices.size())
+                                : plankInsertPos;
+                        filteredRecipeIndices.insert(filteredRecipeIndices.begin() + insertPos, pick);
                     }
                 }
-                if (!filteredPlankRecipeIndices.empty()) {
-                    const int cycle = static_cast<int>(std::floor(std::max(0.0f, now) * 0.6f));
-                    const int pick =
-                        filteredPlankRecipeIndices[cycle % static_cast<int>(filteredPlankRecipeIndices.size())];
-                    const int insertPos =
-                        (plankInsertPos < 0 ||
-                         plankInsertPos > static_cast<int>(filteredRecipeIndices.size()))
-                            ? static_cast<int>(filteredRecipeIndices.size())
-                            : plankInsertPos;
-                    filteredRecipeIndices.insert(filteredRecipeIndices.begin() + insertPos, pick);
+
+                std::vector<voxel::BlockId> filteredCreativeItems;
+                if (creativeMenuVisible) {
+                    filteredCreativeItems.reserve(creativeCatalog().size());
+                    for (voxel::BlockId id : creativeCatalog()) {
+                        if (creativeItemMatchesSearch(id, creativeSearchText)) {
+                            filteredCreativeItems.push_back(id);
+                        }
+                    }
                 }
 
                 if (recipeMenuVisible && inventoryVisible && !menuOpen && !pauseMenuOpen) {
@@ -2073,6 +2301,7 @@ int main() {
                     if (!leftNow) {
                         recipeScrollDragging = false;
                     }
+                    creativeSearchFocused = false;
                     gRecipeSearchText = recipeSearchFocused ? &recipeSearchText : nullptr;
                     glfwSetCharCallback(window,
                                         recipeSearchFocused ? onRecipeSearchCharInput : nullptr);
@@ -2087,8 +2316,80 @@ int main() {
                         recipeMenuScroll = t * recipeLayout.maxScroll;
                     }
                     recipeMenuScroll = std::clamp(recipeMenuScroll, 0.0f, recipeLayout.maxScroll);
+                } else if (creativeMenuVisible && inventoryVisible && !menuOpen && !pauseMenuOpen) {
+                    int winW = 1;
+                    int winH = 1;
+                    glfwGetWindowSize(window, &winW, &winH);
+                    double mx = 0.0;
+                    double my = 0.0;
+                    glfwGetCursorPos(window, &mx, &my);
+                    const bool leftNow =
+                        glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+                    creativeMenuScroll -= gRecipeMenuScrollDelta * (34.0f * debugCfg.hudScale);
+                    const CreativeMenuLayout creativeLayout =
+                        computeCreativeMenuLayout(winW, winH, debugCfg.hudScale, craftingGridSize,
+                                                  filteredCreativeItems.size());
+
+                    if (leftNow && !prevLeft) {
+                        creativeSearchFocused = mx >= creativeLayout.searchX &&
+                                                mx <= (creativeLayout.searchX + creativeLayout.searchW) &&
+                                                my >= creativeLayout.searchY &&
+                                                my <= (creativeLayout.searchY + creativeLayout.searchH);
+                    }
+                    if (leftNow && !prevLeft) {
+                        const bool onTrack = mx >= (creativeLayout.trackX - 6.0f) &&
+                                             mx <= (creativeLayout.trackX + creativeLayout.trackW + 6.0f) &&
+                                             my >= creativeLayout.trackY &&
+                                             my <= (creativeLayout.trackY + creativeLayout.trackH);
+                        if (onTrack) {
+                            const float thumbTravel =
+                                std::max(0.0f, creativeLayout.trackH - creativeLayout.thumbH);
+                            const float thumbY =
+                                creativeLayout.trackY +
+                                ((creativeLayout.maxScroll > 0.0f)
+                                     ? (creativeMenuScroll / creativeLayout.maxScroll) * thumbTravel
+                                     : 0.0f);
+                            const bool onThumb = my >= thumbY && my <= (thumbY + creativeLayout.thumbH);
+                            if (onThumb) {
+                                creativeScrollDragging = true;
+                                creativeScrollGrabOffsetY = static_cast<float>(my) - thumbY;
+                            } else if (creativeLayout.maxScroll > 0.0f) {
+                                const float t = std::clamp(
+                                    static_cast<float>((my - creativeLayout.trackY -
+                                                        creativeLayout.thumbH * 0.5f) /
+                                                       std::max(1.0f, thumbTravel)),
+                                    0.0f, 1.0f);
+                                creativeMenuScroll = t * creativeLayout.maxScroll;
+                            }
+                        }
+                    }
+                    if (!leftNow) {
+                        creativeScrollDragging = false;
+                    }
+                    recipeSearchFocused = false;
+                    gRecipeSearchText = creativeSearchFocused ? &creativeSearchText : nullptr;
+                    glfwSetCharCallback(window,
+                                        creativeSearchFocused ? onRecipeSearchCharInput : nullptr);
+                    if (creativeScrollDragging && creativeLayout.maxScroll > 0.0f) {
+                        const float thumbTravel =
+                            std::max(0.0f, creativeLayout.trackH - creativeLayout.thumbH);
+                        const float thumbY = std::clamp(
+                            static_cast<float>(my) - creativeScrollGrabOffsetY, creativeLayout.trackY,
+                            creativeLayout.trackY + thumbTravel);
+                        const float t =
+                            (thumbTravel > 0.0f) ? (thumbY - creativeLayout.trackY) / thumbTravel
+                                                 : 0.0f;
+                        creativeMenuScroll = t * creativeLayout.maxScroll;
+                    }
+                    creativeMenuScroll =
+                        std::clamp(creativeMenuScroll, 0.0f, creativeLayout.maxScroll);
                 } else {
                     recipeScrollDragging = false;
+                    creativeScrollDragging = false;
+                    recipeSearchFocused = false;
+                    creativeSearchFocused = false;
+                    gRecipeSearchText = nullptr;
+                    glfwSetCharCallback(window, nullptr);
                 }
                 gRecipeMenuScrollDelta = 0.0f;
 
@@ -2124,6 +2425,10 @@ int main() {
 
                     if (hoveredId != voxel::AIR) {
                         recipeMenuVisible = true;
+                        creativeMenuVisible = false;
+                        creativeScrollDragging = false;
+                        creativeSearchFocused = false;
+                        creativeSearchText.clear();
                         recipeMenuScroll = 0.0f;
                         recipeSearchFocused = false;
                         recipeIngredientFilter = hoveredId;
@@ -2306,6 +2611,23 @@ int main() {
                     };
 
                     bool handledRecipeClick = false;
+                    bool handledCreativeClick = false;
+                    bool handledTrashClick = false;
+                    if (creativeMenuVisible && (left && !prevInventoryLeft || right && !prevInventoryRight)) {
+                        const CreativeMenuLayout creativeLayout =
+                            computeCreativeMenuLayout(winW, winH, debugCfg.hudScale, craftingGridSize,
+                                                      filteredCreativeItems.size());
+                        const int creativeIndex = creativeItemAtCursor(
+                            mx, my, creativeLayout, creativeMenuScroll, filteredCreativeItems.size());
+                        if (creativeIndex >= 0 &&
+                            creativeIndex < static_cast<int>(filteredCreativeItems.size())) {
+                            const voxel::BlockId id = filteredCreativeItems[creativeIndex];
+                            const int addCount = (left && !prevInventoryLeft) ? game::Inventory::kMaxStack
+                                                                               : 1;
+                            inventory.add(id, addCount);
+                            handledCreativeClick = true;
+                        }
+                    }
                     if (recipeMenuVisible && left && !prevInventoryLeft) {
                         const RecipeMenuLayout recipeLayout =
                             computeRecipeMenuLayout(winW, winH, debugCfg.hudScale, craftingGridSize,
@@ -2355,8 +2677,18 @@ int main() {
                         }
                     }
 
+                    if (slotIndex == kTrashSlot &&
+                        ((left && !prevInventoryLeft) || (right && !prevInventoryRight))) {
+                        if (carriedSlot.id != voxel::AIR && carriedSlot.count > 0) {
+                            carriedSlot = {};
+                        }
+                        handledTrashClick = true;
+                    }
+
                     game::Inventory::Slot *clickedSlot =
-                        handledRecipeClick ? nullptr : slotFromUiIndex(slotIndex);
+                        (handledRecipeClick || handledCreativeClick || handledTrashClick)
+                            ? nullptr
+                            : slotFromUiIndex(slotIndex);
 
                     if (!handledRecipeClick && slotIndex == kCraftOutputSlot) {
                         if (left && !prevInventoryLeft && crafting.output.id != voxel::AIR &&
@@ -2394,7 +2726,8 @@ int main() {
                                 }
                             }
                         }
-                    } else if (!handledRecipeClick && clickedSlot != nullptr) {
+                    } else if (!handledRecipeClick && !handledCreativeClick && !handledTrashClick &&
+                               clickedSlot != nullptr) {
                         auto *dst = clickedSlot;
                         if (slotIndex >= game::Inventory::kSlotCount) {
                             lastRecipeFillIndex = -1;
@@ -2500,7 +2833,7 @@ int main() {
                         if (slotIndex >= game::Inventory::kSlotCount) {
                             craftingSystem.updateOutput(crafting, craftingGridSize);
                         }
-                    } else if (!handledRecipeClick) {
+                    } else if (!handledRecipeClick && !handledCreativeClick && !handledTrashClick) {
                         const bool outsideClick =
                             (left && !prevInventoryLeft) || (right && !prevInventoryRight);
                         if (outsideClick && carriedSlot.id != voxel::AIR && carriedSlot.count > 0) {
@@ -2966,12 +3299,14 @@ int main() {
                 if (hudVisible) {
                     std::vector<game::CraftingSystem::RecipeInfo> visibleRecipes;
                     std::vector<bool> visibleRecipeCraftable;
-                    visibleRecipes.reserve(filteredRecipeIndices.size());
-                    visibleRecipeCraftable.reserve(filteredRecipeIndices.size());
-                    for (int idx : filteredRecipeIndices) {
-                        const auto &recipe = craftingSystem.recipeInfos()[idx];
-                        visibleRecipes.push_back(recipe);
-                        visibleRecipeCraftable.push_back(isRecipeCraftableNow(idx));
+                    if (recipeMenuVisible) {
+                        visibleRecipes.reserve(filteredRecipeIndices.size());
+                        visibleRecipeCraftable.reserve(filteredRecipeIndices.size());
+                        for (int idx : filteredRecipeIndices) {
+                            const auto &recipe = craftingSystem.recipeInfos()[idx];
+                            visibleRecipes.push_back(recipe);
+                            visibleRecipeCraftable.push_back(isRecipeCraftableNow(idx));
+                        }
                     }
                     std::string lookedAt = "Looking: (none)";
                     if (currentHit.has_value()) {
@@ -3007,8 +3342,9 @@ int main() {
                                  hoveredInventorySlot, debugCfg.hudScale, crafting.input,
                                  craftingGridSize, usingCraftingTable, recipeMenuVisible,
                                  visibleRecipes, visibleRecipeCraftable, recipeMenuScroll,
-                                 static_cast<float>(glfwGetTime()),
-                                 recipeSearchText, recipeCraftableOnly, recipeIngredientFilter,
+                                 static_cast<float>(glfwGetTime()), recipeSearchText,
+                                 creativeMenuVisible, filteredCreativeItems, creativeMenuScroll,
+                                 creativeSearchText, recipeCraftableOnly, recipeIngredientFilter,
                                  crafting.output,
                                  (carriedSlot.id == voxel::AIR || carriedSlot.count <= 0)
                                      ? ""
