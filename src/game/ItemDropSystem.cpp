@@ -272,8 +272,8 @@ void ItemDropSystem::render(const glm::mat4 &proj, const glm::mat4 &view,
         model = glm::translate(model, center);
         model = glm::rotate(model, ang, glm::vec3(0.0f, 1.0f, 0.0f));
 
-        const bool plantItem =
-            (item.id == voxel::TALL_GRASS || item.id == voxel::FLOWER || voxel::isTorch(item.id));
+        const bool plantItem = (item.id == voxel::STICK || item.id == voxel::TALL_GRASS ||
+                                item.id == voxel::FLOWER || voxel::isTorch(item.id));
         if (plantItem) {
             appendPlantSprite(model, uvSide);
             continue;

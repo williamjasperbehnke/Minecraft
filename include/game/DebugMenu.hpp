@@ -21,6 +21,7 @@ struct DebugConfig {
     float fov = 75.0f;
     float moveSpeed = 15.0f;
     float mouseSensitivity = 0.1f;
+    float hudScale = 1.5f;
     float raycastDistance = 8.0f;
     int loadRadius = 8;
     int unloadRadius = 10;

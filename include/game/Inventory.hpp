@@ -10,8 +10,8 @@ class Inventory {
   public:
     static constexpr int kHotbarSize = 9;
     static constexpr int kColumns = 9;
-    static constexpr int kRows = 4;
-    static constexpr int kSlotCount = 36;
+    static constexpr int kRows = 5;
+    static constexpr int kSlotCount = 45;
     static constexpr int kMaxStack = 64;
 
     struct Slot {

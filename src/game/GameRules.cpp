@@ -64,6 +64,16 @@ const char *blockName(voxel::BlockId id) {
     case voxel::TORCH_WALL_POS_Z:
     case voxel::TORCH_WALL_NEG_Z:
         return "Torch";
+    case voxel::CRAFTING_TABLE:
+        return "Crafting Table";
+    case voxel::OAK_PLANKS:
+        return "Oak Planks";
+    case voxel::SPRUCE_PLANKS:
+        return "Spruce Planks";
+    case voxel::BIRCH_PLANKS:
+        return "Birch Planks";
+    case voxel::STICK:
+        return "Stick";
     default:
         return "Block";
     }
@@ -91,7 +101,12 @@ float breakSeconds(voxel::BlockId id) {
     case voxel::WOOD:
     case voxel::SPRUCE_WOOD:
     case voxel::BIRCH_WOOD:
+    case voxel::OAK_PLANKS:
+    case voxel::SPRUCE_PLANKS:
+    case voxel::BIRCH_PLANKS:
     case voxel::CACTUS:
+    case voxel::CRAFTING_TABLE:
+    case voxel::STICK:
         return 0.58f;
     case voxel::COAL_ORE:
     case voxel::COPPER_ORE:
@@ -115,7 +130,6 @@ AudioSystem::SoundProfile soundProfileForBlock(voxel::BlockId id) {
     using Profile = AudioSystem::SoundProfile;
     switch (id) {
     case voxel::GRASS:
-        return Profile::Dirt;
     case voxel::DIRT:
     case voxel::CLAY:
         return Profile::Dirt;
@@ -131,7 +145,12 @@ AudioSystem::SoundProfile soundProfileForBlock(voxel::BlockId id) {
     case voxel::WOOD:
     case voxel::SPRUCE_WOOD:
     case voxel::BIRCH_WOOD:
+    case voxel::OAK_PLANKS:
+    case voxel::SPRUCE_PLANKS:
+    case voxel::BIRCH_PLANKS:
+    case voxel::STICK:
     case voxel::CACTUS:
+    case voxel::CRAFTING_TABLE:
     case voxel::TORCH:
     case voxel::TORCH_WALL_POS_X:
     case voxel::TORCH_WALL_NEG_X:

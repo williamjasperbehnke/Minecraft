@@ -62,7 +62,7 @@ const char *moonPhaseName(float t01) {
 }
 
 bool isStepControl(int id) {
-    return id >= 0 && id <= 6;
+    return id == 0 || id == 1 || id == 2 || id == 3 || id == 4 || id == 5 || id == 6 || id == 15;
 }
 
 bool isToggleControl(int id) {
@@ -85,6 +85,8 @@ const char *controlLabel(int id) {
         return "Mouse Sensitivity";
     case 4:
         return "Raycast Distance";
+    case 15:
+        return "HUD Scale";
     case 5:
         return "Load Radius";
     case 6:
@@ -361,6 +363,9 @@ void DebugMenu::adjustControl(DebugConfig &cfg, int idx, int dir) const {
     case 4:
         cfg.raycastDistance = std::clamp(cfg.raycastDistance + dir * 1.0f, 2.0f, 24.0f);
         break;
+    case 15:
+        cfg.hudScale = std::clamp(cfg.hudScale + dir * 0.1f, 0.8f, 1.8f);
+        break;
     case 5:
         cfg.loadRadius = std::clamp(cfg.loadRadius + dir, 2, 16);
         cfg.unloadRadius = std::max(cfg.unloadRadius, cfg.loadRadius + 1);
@@ -413,7 +418,7 @@ void DebugMenu::update(GLFWwindow *window, DebugConfig &cfg, const world::WorldD
     visibleRows_.clear();
     switch (selectedTab_) {
     case 0:
-        visibleRows_ = {0, 1, 2, 3, 4};
+        visibleRows_ = {0, 1, 2, 3, 4, 15};
         break;
     case 1:
         visibleRows_ = {5, 6, 7, 9};
@@ -698,6 +703,8 @@ void DebugMenu::render(int width, int height) {
     drawValue(3, panelX_ + 336.0f, value);
     std::snprintf(value, sizeof(value), "%.1f", lastCfg_.raycastDistance);
     drawValue(4, panelX_ + 336.0f, value);
+    std::snprintf(value, sizeof(value), "%.2f", lastCfg_.hudScale);
+    drawValue(15, panelX_ + 336.0f, value);
     std::snprintf(value, sizeof(value), "%d", lastCfg_.loadRadius);
     drawValue(5, panelX_ + 336.0f, value);
     std::snprintf(value, sizeof(value), "%d", lastCfg_.unloadRadius);

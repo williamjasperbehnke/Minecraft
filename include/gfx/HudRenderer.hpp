@@ -1,5 +1,6 @@
 #pragma once
 
+#include "game/CraftingSystem.hpp"
 #include "game/Inventory.hpp"
 #include "gfx/TextureAtlas.hpp"
 #include "voxel/Block.hpp"
@@ -28,6 +29,16 @@ class HudRenderer {
                   const std::array<voxel::BlockId, game::Inventory::kSlotCount> &allIds,
                   const std::array<int, game::Inventory::kSlotCount> &allCounts, bool showInventory,
                   voxel::BlockId carryingId, int carryingCount, float cursorX, float cursorY,
+                  int hoveredSlotIndex, float hudScale,
+                  const std::array<game::Inventory::Slot, game::CraftingSystem::kInputCount>
+                      &craftInput,
+                  int craftingGridSize, bool usingCraftingTable,
+                  bool showRecipeMenu, const std::vector<game::CraftingSystem::RecipeInfo> &recipes,
+                  const std::vector<bool> &recipeCraftable,
+                  float recipeScroll, float uiTimeSeconds, const std::string &recipeSearch,
+                  bool recipeCraftableOnly,
+                  const std::optional<voxel::BlockId> &recipeIngredientFilter,
+                  const game::Inventory::Slot &craftOutput,
                   const std::string &carryingName, const std::string &selectedName,
                   const std::string &lookedAtText, const std::string &modeText,
                   const std::string &compassText, const std::string &coordText,

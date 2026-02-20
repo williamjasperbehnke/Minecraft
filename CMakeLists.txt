@@ -59,8 +59,10 @@ add_library(voxel_lib
   src/gfx/HudRenderer.cpp
   src/game/Camera.cpp
   src/game/AudioSystem.cpp
+  src/game/CraftingSystem.cpp
   src/game/GameRules.cpp
   src/game/PlayerController.cpp
+  src/game/Recipe.cpp
   src/game/ItemDropSystem.cpp
   src/game/Inventory.cpp
   src/game/DebugMenu.cpp
@@ -109,8 +111,10 @@ if(CLANG_TIDY_EXE)
             src/gfx/HudRenderer.cpp
             src/game/Camera.cpp
             src/game/AudioSystem.cpp
+            src/game/CraftingSystem.cpp
             src/game/GameRules.cpp
             src/game/PlayerController.cpp
+            src/game/Recipe.cpp
             src/game/ItemDropSystem.cpp
             src/game/Inventory.cpp
             src/game/DebugMenu.cpp
@@ -137,11 +141,13 @@ if(CLANG_FORMAT_EXE)
             ${CMAKE_SOURCE_DIR}/include/gfx/TextureAtlas.hpp
             ${CMAKE_SOURCE_DIR}/include/game/AudioSystem.hpp
             ${CMAKE_SOURCE_DIR}/include/game/Camera.hpp
+            ${CMAKE_SOURCE_DIR}/include/game/CraftingSystem.hpp
             ${CMAKE_SOURCE_DIR}/include/game/DebugMenu.hpp
             ${CMAKE_SOURCE_DIR}/include/game/GameRules.hpp
             ${CMAKE_SOURCE_DIR}/include/game/Inventory.hpp
             ${CMAKE_SOURCE_DIR}/include/game/ItemDropSystem.hpp
             ${CMAKE_SOURCE_DIR}/include/game/PlayerController.hpp
+            ${CMAKE_SOURCE_DIR}/include/game/Recipe.hpp
             ${CMAKE_SOURCE_DIR}/include/voxel/Block.hpp
             ${CMAKE_SOURCE_DIR}/include/voxel/Chunk.hpp
             ${CMAKE_SOURCE_DIR}/include/voxel/ChunkIO.hpp
@@ -157,11 +163,13 @@ if(CLANG_FORMAT_EXE)
             ${CMAKE_SOURCE_DIR}/src/gfx/TextureAtlas.cpp
             ${CMAKE_SOURCE_DIR}/src/game/AudioSystem.cpp
             ${CMAKE_SOURCE_DIR}/src/game/Camera.cpp
+            ${CMAKE_SOURCE_DIR}/src/game/CraftingSystem.cpp
             ${CMAKE_SOURCE_DIR}/src/game/DebugMenu.cpp
             ${CMAKE_SOURCE_DIR}/src/game/GameRules.cpp
             ${CMAKE_SOURCE_DIR}/src/game/Inventory.cpp
             ${CMAKE_SOURCE_DIR}/src/game/ItemDropSystem.cpp
             ${CMAKE_SOURCE_DIR}/src/game/PlayerController.cpp
+            ${CMAKE_SOURCE_DIR}/src/game/Recipe.cpp
             ${CMAKE_SOURCE_DIR}/src/main.cpp
             ${CMAKE_SOURCE_DIR}/src/voxel/Chunk.cpp
             ${CMAKE_SOURCE_DIR}/src/voxel/ChunkIO.cpp
@@ -184,11 +192,13 @@ if(CLANG_FORMAT_EXE)
             ${CMAKE_SOURCE_DIR}/include/gfx/TextureAtlas.hpp
             ${CMAKE_SOURCE_DIR}/include/game/AudioSystem.hpp
             ${CMAKE_SOURCE_DIR}/include/game/Camera.hpp
+            ${CMAKE_SOURCE_DIR}/include/game/CraftingSystem.hpp
             ${CMAKE_SOURCE_DIR}/include/game/DebugMenu.hpp
             ${CMAKE_SOURCE_DIR}/include/game/GameRules.hpp
             ${CMAKE_SOURCE_DIR}/include/game/Inventory.hpp
             ${CMAKE_SOURCE_DIR}/include/game/ItemDropSystem.hpp
             ${CMAKE_SOURCE_DIR}/include/game/PlayerController.hpp
+            ${CMAKE_SOURCE_DIR}/include/game/Recipe.hpp
             ${CMAKE_SOURCE_DIR}/include/voxel/Block.hpp
             ${CMAKE_SOURCE_DIR}/include/voxel/Chunk.hpp
             ${CMAKE_SOURCE_DIR}/include/voxel/ChunkIO.hpp
@@ -204,11 +214,13 @@ if(CLANG_FORMAT_EXE)
             ${CMAKE_SOURCE_DIR}/src/gfx/TextureAtlas.cpp
             ${CMAKE_SOURCE_DIR}/src/game/AudioSystem.cpp
             ${CMAKE_SOURCE_DIR}/src/game/Camera.cpp
+            ${CMAKE_SOURCE_DIR}/src/game/CraftingSystem.cpp
             ${CMAKE_SOURCE_DIR}/src/game/DebugMenu.cpp
             ${CMAKE_SOURCE_DIR}/src/game/GameRules.cpp
             ${CMAKE_SOURCE_DIR}/src/game/Inventory.cpp
             ${CMAKE_SOURCE_DIR}/src/game/ItemDropSystem.cpp
             ${CMAKE_SOURCE_DIR}/src/game/PlayerController.cpp
+            ${CMAKE_SOURCE_DIR}/src/game/Recipe.cpp
             ${CMAKE_SOURCE_DIR}/src/main.cpp
             ${CMAKE_SOURCE_DIR}/src/voxel/Chunk.cpp
             ${CMAKE_SOURCE_DIR}/src/voxel/ChunkIO.cpp

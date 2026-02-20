@@ -38,6 +38,11 @@ constexpr BlockId TORCH_WALL_POS_X = 27;
 constexpr BlockId TORCH_WALL_NEG_X = 28;
 constexpr BlockId TORCH_WALL_POS_Z = 29;
 constexpr BlockId TORCH_WALL_NEG_Z = 30;
+constexpr BlockId CRAFTING_TABLE = 31;
+constexpr BlockId OAK_PLANKS = 32;
+constexpr BlockId SPRUCE_PLANKS = 33;
+constexpr BlockId BIRCH_PLANKS = 34;
+constexpr BlockId STICK = 35;
 
 inline bool isTorch(BlockId id) {
     return id == TORCH || id == TORCH_WALL_POS_X || id == TORCH_WALL_NEG_X ||
@@ -91,6 +96,11 @@ class BlockRegistry {
         defs_[TORCH_WALL_NEG_X] = {true, true, 31, 31, 31};
         defs_[TORCH_WALL_POS_Z] = {true, true, 31, 31, 31};
         defs_[TORCH_WALL_NEG_Z] = {true, true, 31, 31, 31};
+        defs_[CRAFTING_TABLE] = {true, false, 42, 43, 44};
+        defs_[OAK_PLANKS] = {true, false, 45, 45, 45};
+        defs_[SPRUCE_PLANKS] = {true, false, 46, 46, 46};
+        defs_[BIRCH_PLANKS] = {true, false, 47, 47, 47};
+        defs_[STICK] = {false, true, 48, 48, 48};
     }
 
     void set(BlockId id, BlockDef def) {
