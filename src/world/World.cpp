@@ -8,7 +8,23 @@
 #include <vector>
 
 namespace world {
-namespace {} // namespace
+namespace {
+
+int chunkDistance(ChunkCoord a, ChunkCoord b) {
+    return std::max(std::abs(a.x - b.x), std::abs(a.z - b.z));
+}
+
+std::int64_t packChunkCoord(int x, int z) {
+    return (static_cast<std::int64_t>(x) << 32) |
+           static_cast<std::uint32_t>(static_cast<std::int32_t>(z));
+}
+
+ChunkCoord unpackChunkCoord(std::int64_t packed) {
+    return ChunkCoord{static_cast<int>(packed >> 32),
+                      static_cast<int>(static_cast<std::int32_t>(packed & 0xFFFFFFFF))};
+}
+
+} // namespace
 
 World::World(const gfx::TextureAtlas &atlas, std::filesystem::path saveRoot, std::uint32_t seed)
     : atlas_(atlas), gen_(seed), io_(std::move(saveRoot), WorldGen::kGeneratorVersion) {
@@ -74,8 +90,20 @@ void World::enqueueLoadIfNeeded(ChunkCoord cc) {
     it = chunks_.find(ChunkCoord{cc.x, cc.z - 1});
     if (it != chunks_.end())
         job.nz = it->second.chunk;
+    it = chunks_.find(ChunkCoord{cc.x + 1, cc.z + 1});
+    if (it != chunks_.end())
+        job.pxpz = it->second.chunk;
+    it = chunks_.find(ChunkCoord{cc.x + 1, cc.z - 1});
+    if (it != chunks_.end())
+        job.pxnz = it->second.chunk;
+    it = chunks_.find(ChunkCoord{cc.x - 1, cc.z + 1});
+    if (it != chunks_.end())
+        job.nxpz = it->second.chunk;
+    it = chunks_.find(ChunkCoord{cc.x - 1, cc.z - 1});
+    if (it != chunks_.end())
+        job.nxnz = it->second.chunk;
 
-    workerJobs_.push(std::move(job));
+    scheduleWorkerJob(std::move(job));
 }
 
 void World::enqueueRemesh(ChunkCoord cc, bool force) {
@@ -109,7 +137,23 @@ void World::enqueueRemesh(ChunkCoord cc, bool force) {
     nit = chunks_.find(ChunkCoord{cc.x, cc.z - 1});
     if (nit != chunks_.end())
         job.nz = nit->second.chunk;
+    nit = chunks_.find(ChunkCoord{cc.x + 1, cc.z + 1});
+    if (nit != chunks_.end())
+        job.pxpz = nit->second.chunk;
+    nit = chunks_.find(ChunkCoord{cc.x + 1, cc.z - 1});
+    if (nit != chunks_.end())
+        job.pxnz = nit->second.chunk;
+    nit = chunks_.find(ChunkCoord{cc.x - 1, cc.z + 1});
+    if (nit != chunks_.end())
+        job.nxpz = nit->second.chunk;
+    nit = chunks_.find(ChunkCoord{cc.x - 1, cc.z - 1});
+    if (nit != chunks_.end())
+        job.nxnz = nit->second.chunk;
 
+    scheduleWorkerJob(std::move(job));
+}
+
+void World::scheduleWorkerJob(WorkerJob job) {
     workerJobs_.push(std::move(job));
 }
 
@@ -117,6 +161,19 @@ void World::setStreamingRadii(int loadRadius, int unloadRadius) {
     std::lock_guard<std::mutex> lock(chunksMutex_);
     loadRadius_ = std::clamp(loadRadius, 2, 16);
     unloadRadius_ = std::clamp(std::max(unloadRadius, loadRadius_ + 1), 3, 20);
+}
+
+void World::setSmoothLighting(bool enabled) {
+    if (smoothLighting_.load(std::memory_order_relaxed) == enabled) {
+        return;
+    }
+    smoothLighting_.store(enabled, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lock(chunksMutex_);
+    for (const auto &[cc, entry] : chunks_) {
+        if (entry.chunk) {
+            enqueueRemesh(cc, true);
+        }
+    }
 }
 
 WorldDebugStats World::debugStats() const {
@@ -137,9 +194,22 @@ WorldDebugStats World::debugStats() const {
     return stats;
 }
 
+std::vector<ChunkCoord> World::loadedChunkCoords() const {
+    std::lock_guard<std::mutex> lock(chunksMutex_);
+    std::vector<ChunkCoord> out;
+    out.reserve(chunks_.size());
+    for (const auto &[cc, entry] : chunks_) {
+        if (entry.chunk) {
+            out.push_back(cc);
+        }
+    }
+    return out;
+}
+
 void World::updateStream(const glm::vec3 &playerPos) {
     const int pChunkX = floorDiv(static_cast<int>(std::floor(playerPos.x)), voxel::Chunk::SX);
     const int pChunkZ = floorDiv(static_cast<int>(std::floor(playerPos.z)), voxel::Chunk::SZ);
+    playerChunkPacked_.store(packChunkCoord(pChunkX, pChunkZ), std::memory_order_relaxed);
 
     std::lock_guard<std::mutex> lock(chunksMutex_);
 
@@ -179,6 +249,10 @@ void World::updateStream(const glm::vec3 &playerPos) {
         enqueueRemesh(ChunkCoord{cc.x - 1, cc.z}, true);
         enqueueRemesh(ChunkCoord{cc.x, cc.z + 1}, true);
         enqueueRemesh(ChunkCoord{cc.x, cc.z - 1}, true);
+        enqueueRemesh(ChunkCoord{cc.x + 1, cc.z + 1}, true);
+        enqueueRemesh(ChunkCoord{cc.x + 1, cc.z - 1}, true);
+        enqueueRemesh(ChunkCoord{cc.x - 1, cc.z + 1}, true);
+        enqueueRemesh(ChunkCoord{cc.x - 1, cc.z - 1}, true);
     }
 }
 
@@ -206,6 +280,10 @@ void World::uploadReadyMeshes() {
             enqueueRemesh(ChunkCoord{result.coord.x - 1, result.coord.z}, true);
             enqueueRemesh(ChunkCoord{result.coord.x, result.coord.z + 1}, true);
             enqueueRemesh(ChunkCoord{result.coord.x, result.coord.z - 1}, true);
+            enqueueRemesh(ChunkCoord{result.coord.x + 1, result.coord.z + 1}, true);
+            enqueueRemesh(ChunkCoord{result.coord.x + 1, result.coord.z - 1}, true);
+            enqueueRemesh(ChunkCoord{result.coord.x - 1, result.coord.z + 1}, true);
+            enqueueRemesh(ChunkCoord{result.coord.x - 1, result.coord.z - 1}, true);
         } else {
             pendingRemesh_.erase(result.coord);
         }
@@ -278,7 +356,8 @@ voxel::BlockId World::getBlock(int wx, int wy, int wz) const {
 
 bool World::isSolidBlock(int wx, int wy, int wz) const {
     const voxel::BlockId id = getBlock(wx, wy, wz);
-    if (id == voxel::AIR || id == voxel::WATER || id == voxel::TALL_GRASS || id == voxel::FLOWER) {
+    if (id == voxel::AIR || id == voxel::WATER || id == voxel::TALL_GRASS ||
+        id == voxel::FLOWER || voxel::isTorch(id)) {
         return false;
     }
     return blockRegistry_.get(id).solid;
@@ -314,24 +393,54 @@ bool World::setBlock(int wx, int wy, int wz, voxel::BlockId id) {
         return false;
     }
 
+    const voxel::BlockId prevId = it->second.chunk->get(lx, wy, lz);
+    if (prevId == id) {
+        return true;
+    }
     it->second.chunk->set(lx, wy, lz, id);
-    enqueueRemesh(cc, false);
+    enqueueRemesh(cc, true);
 
-    if (lx == 0)
-        enqueueRemesh(ChunkCoord{cc.x - 1, cc.z}, true);
-    if (lx == voxel::Chunk::SX - 1)
-        enqueueRemesh(ChunkCoord{cc.x + 1, cc.z}, true);
-    if (lz == 0)
-        enqueueRemesh(ChunkCoord{cc.x, cc.z - 1}, true);
-    if (lz == voxel::Chunk::SZ - 1)
-        enqueueRemesh(ChunkCoord{cc.x, cc.z + 1}, true);
+    // Lighting/faces can change across chunk seams even when the edited block is
+    // not on a border, so always refresh direct neighbors.
+    enqueueRemesh(ChunkCoord{cc.x - 1, cc.z}, true);
+    enqueueRemesh(ChunkCoord{cc.x + 1, cc.z}, true);
+    enqueueRemesh(ChunkCoord{cc.x, cc.z - 1}, true);
+    enqueueRemesh(ChunkCoord{cc.x, cc.z + 1}, true);
+    enqueueRemesh(ChunkCoord{cc.x - 1, cc.z - 1}, true);
+    enqueueRemesh(ChunkCoord{cc.x - 1, cc.z + 1}, true);
+    enqueueRemesh(ChunkCoord{cc.x + 1, cc.z - 1}, true);
+    enqueueRemesh(ChunkCoord{cc.x + 1, cc.z + 1}, true);
+
+    // Torch light can cross chunk boundaries even when the modified block is
+    // not on an edge, so refresh direct neighbors for correct seam lighting.
+    if (voxel::isTorch(prevId) || voxel::isTorch(id)) {
+        // Also refresh second ring for torch add/remove to prevent stale light
+        // when cached neighbor meshes are one propagation step behind.
+        enqueueRemesh(ChunkCoord{cc.x - 2, cc.z}, true);
+        enqueueRemesh(ChunkCoord{cc.x + 2, cc.z}, true);
+        enqueueRemesh(ChunkCoord{cc.x, cc.z - 2}, true);
+        enqueueRemesh(ChunkCoord{cc.x, cc.z + 2}, true);
+    }
 
     return true;
 }
 
 void World::workerLoop() {
     while (running_.load()) {
-        auto maybeJob = workerJobs_.waitPop();
+        auto maybeJob = workerJobs_.waitPopBest([this](const WorkerJob &a, const WorkerJob &b) {
+            const ChunkCoord center =
+                unpackChunkCoord(playerChunkPacked_.load(std::memory_order_relaxed));
+            const int da = chunkDistance(a.coord, center);
+            const int db = chunkDistance(b.coord, center);
+            if (da != db) {
+                return da < db;
+            }
+            // On equal distance, remesh is more visible than background loads.
+            if (a.type != b.type) {
+                return a.type == JobType::Remesh;
+            }
+            return false;
+        });
         if (!maybeJob.has_value()) {
             break;
         }
@@ -351,12 +460,13 @@ void World::workerLoop() {
             if (!job.chunkSnapshot) {
                 continue;
             }
-            const voxel::ChunkMesher::NeighborChunks neighbors{job.px.get(), job.nx.get(),
-                                                               job.pz.get(), job.nz.get()};
+            const voxel::ChunkMesher::NeighborChunks neighbors{
+                job.px.get(),   job.nx.get(),   job.pz.get(),   job.nz.get(),
+                job.pxpz.get(), job.pxnz.get(), job.nxpz.get(), job.nxnz.get()};
 
             const gfx::CpuMesh mesh = voxel::ChunkMesher::buildFaceCulled(
                 *job.chunkSnapshot, atlas_, blockRegistry_, glm::ivec2(job.coord.x, job.coord.z),
-                neighbors);
+                neighbors, smoothLighting_.load(std::memory_order_relaxed));
             completed_.push(WorkerResult{job.coord, nullptr, mesh, false});
         }
     }

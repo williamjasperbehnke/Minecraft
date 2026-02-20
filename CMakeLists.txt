@@ -65,6 +65,7 @@ add_library(voxel_lib
   src/game/Inventory.cpp
   src/game/DebugMenu.cpp
   src/voxel/Chunk.cpp
+  src/voxel/LightingSolver.cpp
   src/voxel/ChunkMesher.cpp
   src/voxel/Raycaster.cpp
   src/voxel/ChunkIO.cpp

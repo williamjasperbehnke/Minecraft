@@ -1,9 +1,9 @@
 #pragma once
 
 #include <condition_variable>
+#include <deque>
 #include <mutex>
 #include <optional>
-#include <queue>
 
 namespace core {
 
@@ -12,19 +12,26 @@ template <typename T> class ThreadQueue {
     void push(T item) {
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            queue_.push(std::move(item));
+            queue_.push_back(std::move(item));
         }
         cv_.notify_one();
     }
 
-    std::optional<T> waitPop() {
+    template <typename Better>
+    std::optional<T> waitPopBest(Better better) {
         std::unique_lock<std::mutex> lock(mutex_);
         cv_.wait(lock, [&]() { return stopped_ || !queue_.empty(); });
         if (stopped_ && queue_.empty()) {
             return std::nullopt;
         }
-        T out = std::move(queue_.front());
-        queue_.pop();
+        auto bestIt = queue_.begin();
+        for (auto it = std::next(queue_.begin()); it != queue_.end(); ++it) {
+            if (better(*it, *bestIt)) {
+                bestIt = it;
+            }
+        }
+        T out = std::move(*bestIt);
+        queue_.erase(bestIt);
         return out;
     }
 
@@ -34,7 +41,7 @@ template <typename T> class ThreadQueue {
             return false;
         }
         out = std::move(queue_.front());
-        queue_.pop();
+        queue_.pop_front();
         return true;
     }
 
@@ -47,7 +54,7 @@ template <typename T> class ThreadQueue {
     }
 
   private:
-    std::queue<T> queue_;
+    std::deque<T> queue_;
     std::mutex mutex_;
     std::condition_variable cv_;
     bool stopped_ = false;

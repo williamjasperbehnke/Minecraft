@@ -25,6 +25,14 @@ struct DebugConfig {
     int loadRadius = 8;
     int unloadRadius = 10;
     RenderMode renderMode = RenderMode::Textured;
+    bool showChunkBorders = false;
+    bool overrideTime = false;
+    bool smoothLighting = true;
+    bool showClouds = true;
+    bool showStars = true;
+    bool showFog = false;
+    float timeOfDay01 = 0.25f;
+    float moonPhase01 = 0.0f;
 };
 
 class DebugMenu {
@@ -57,11 +65,23 @@ class DebugMenu {
                   unsigned char b, unsigned char a);
     void initRenderer();
     void applyClick(float mx, float my, DebugConfig &cfg);
+    bool hitStepButton(float mx, float my, int &idx, int &dir) const;
+    void adjustControl(DebugConfig &cfg, int idx, int dir) const;
     static const char *renderModeName(RenderMode mode);
 
     bool open_ = false;
     std::vector<int> keysDown_;
     bool prevMouseLeft_ = false;
+    bool draggingTimeSlider_ = false;
+    bool draggingMoonSlider_ = false;
+    bool draggingScrollThumb_ = false;
+    int heldButtonRow_ = -1;
+    int heldButtonDir_ = 0;
+    double nextButtonRepeatTime_ = 0.0;
+    float scrollGrabOffsetY_ = 0.0f;
+    float scrollOffset_ = 0.0f;
+    float contentHeight_ = 0.0f;
+    float viewHeight_ = 0.0f;
     float mouseX_ = 0.0f;
     float mouseY_ = 0.0f;
     float panelX_ = 20.0f;
@@ -70,8 +90,10 @@ class DebugMenu {
     float panelH_ = 560.0f;
 
     std::vector<float> rowY_;
+    std::vector<int> visibleRows_;
     std::vector<std::string> infoLines_;
     DebugConfig lastCfg_{};
+    int selectedTab_ = 0;
 
     bool rendererReady_ = false;
     unsigned int vao_ = 0;

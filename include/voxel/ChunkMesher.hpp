@@ -16,11 +16,15 @@ class ChunkMesher {
         const Chunk *nx = nullptr;
         const Chunk *pz = nullptr;
         const Chunk *nz = nullptr;
+        const Chunk *pxpz = nullptr;
+        const Chunk *pxnz = nullptr;
+        const Chunk *nxpz = nullptr;
+        const Chunk *nxnz = nullptr;
     };
 
     static gfx::CpuMesh buildFaceCulled(const Chunk &chunk, const gfx::TextureAtlas &atlas,
                                         const BlockRegistry &registry, glm::ivec2 chunkXZ,
-                                        const NeighborChunks &neighbors);
+                                        const NeighborChunks &neighbors, bool smoothLighting);
 };
 
 } // namespace voxel

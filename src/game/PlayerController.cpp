@@ -44,16 +44,18 @@ float approach(float current, float target, float maxDelta) {
 
 } // namespace
 
-void PlayerController::setFromCamera(const glm::vec3 &cameraPos, const world::World &world) {
+void PlayerController::setFromCamera(const glm::vec3 &cameraPos, const world::World &world,
+                                     bool resolveIntersections) {
     feetPos_ = cameraPos - glm::vec3(0.0f, kEyeOffset, 0.0f);
     velocity_ = glm::vec3(0.0f);
     grounded_ = false;
     inWater_ = false;
-    jumpHeld_ = false;
     initialized_ = true;
 
-    for (int i = 0; i < 8 && intersectsSolid(world, feetPos_); ++i) {
-        feetPos_.y += 1.0f;
+    if (resolveIntersections) {
+        for (int i = 0; i < 8 && intersectsSolid(world, feetPos_); ++i) {
+            feetPos_.y += 1.0f;
+        }
     }
 }
 
@@ -219,8 +221,6 @@ void PlayerController::update(GLFWwindow *window, const world::World &world, con
         velocity_.y -= kGravity * dt;
         velocity_.y = std::max(velocity_.y, -55.0f);
     }
-    jumpHeld_ = jumpDown;
-
     moveAxis(world, 0, velocity_.x * dt);
     grounded_ = false; // Recomputed by vertical collision resolution below.
     moveAxis(world, 1, velocity_.y * dt);

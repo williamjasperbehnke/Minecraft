@@ -9,6 +9,7 @@ Inventory::Inventory() {
     add(voxel::WOOD, 24);
     add(voxel::LEAVES, 24);
     add(voxel::WATER, 16);
+    add(voxel::TORCH, 64);
 }
 
 bool Inventory::add(voxel::BlockId id, int count) {

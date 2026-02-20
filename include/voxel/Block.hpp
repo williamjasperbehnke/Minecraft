@@ -33,6 +33,21 @@ constexpr BlockId CACTUS = 22;
 constexpr BlockId SANDSTONE = 23;
 constexpr BlockId TALL_GRASS = 24;
 constexpr BlockId FLOWER = 25;
+constexpr BlockId TORCH = 26;
+constexpr BlockId TORCH_WALL_POS_X = 27;
+constexpr BlockId TORCH_WALL_NEG_X = 28;
+constexpr BlockId TORCH_WALL_POS_Z = 29;
+constexpr BlockId TORCH_WALL_NEG_Z = 30;
+
+inline bool isTorch(BlockId id) {
+    return id == TORCH || id == TORCH_WALL_POS_X || id == TORCH_WALL_NEG_X ||
+           id == TORCH_WALL_POS_Z || id == TORCH_WALL_NEG_Z;
+}
+
+inline bool isWallTorch(BlockId id) {
+    return id == TORCH_WALL_POS_X || id == TORCH_WALL_NEG_X || id == TORCH_WALL_POS_Z ||
+           id == TORCH_WALL_NEG_Z;
+}
 
 struct BlockDef {
     bool solid = false;
@@ -71,6 +86,11 @@ class BlockRegistry {
         defs_[SANDSTONE] = {true, false, 28, 28, 28};
         defs_[TALL_GRASS] = {true, true, 29, 29, 29};
         defs_[FLOWER] = {true, true, 30, 30, 30};
+        defs_[TORCH] = {true, true, 31, 31, 31};
+        defs_[TORCH_WALL_POS_X] = {true, true, 31, 31, 31};
+        defs_[TORCH_WALL_NEG_X] = {true, true, 31, 31, 31};
+        defs_[TORCH_WALL_POS_Z] = {true, true, 31, 31, 31};
+        defs_[TORCH_WALL_NEG_Z] = {true, true, 31, 31, 31};
     }
 
     void set(BlockId id, BlockDef def) {

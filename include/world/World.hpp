@@ -19,6 +19,7 @@
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 namespace world {
 
@@ -51,7 +52,9 @@ class World {
     bool setBlock(int wx, int wy, int wz, voxel::BlockId id);
 
     void setStreamingRadii(int loadRadius, int unloadRadius);
+    void setSmoothLighting(bool enabled);
     WorldDebugStats debugStats() const;
+    std::vector<ChunkCoord> loadedChunkCoords() const;
 
   private:
     enum class JobType { LoadOrGenerate, Remesh };
@@ -64,6 +67,10 @@ class World {
         std::shared_ptr<voxel::Chunk> nx;
         std::shared_ptr<voxel::Chunk> pz;
         std::shared_ptr<voxel::Chunk> nz;
+        std::shared_ptr<voxel::Chunk> pxpz;
+        std::shared_ptr<voxel::Chunk> pxnz;
+        std::shared_ptr<voxel::Chunk> nxpz;
+        std::shared_ptr<voxel::Chunk> nxnz;
     };
 
     struct WorkerResult {
@@ -81,6 +88,7 @@ class World {
 
     void enqueueLoadIfNeeded(ChunkCoord cc);
     void enqueueRemesh(ChunkCoord cc, bool force);
+    void scheduleWorkerJob(WorkerJob job);
     void workerLoop();
 
     static int floorDiv(int a, int b);
@@ -89,6 +97,7 @@ class World {
 
     int loadRadius_ = 8;
     int unloadRadius_ = 10;
+    std::atomic<std::int64_t> playerChunkPacked_{0};
 
     const gfx::TextureAtlas &atlas_;
     voxel::BlockRegistry blockRegistry_;
@@ -106,6 +115,7 @@ class World {
 
     std::thread worker_;
     std::atomic<bool> running_ = true;
+    std::atomic<bool> smoothLighting_{false};
 };
 
 } // namespace world

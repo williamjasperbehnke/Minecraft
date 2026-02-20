@@ -204,7 +204,7 @@ void HudRenderer::initIcons() {
         return;
     }
 
-const char *vs = R"(
+    const char *vs = R"(
 #version 330 core
 layout(location=0) in vec2 aPos;
 layout(location=1) in vec2 aUV;
@@ -592,7 +592,7 @@ void HudRenderer::render2D(int width, int height, int selectedIndex,
                            bool showInventory, voxel::BlockId carryingId, int carryingCount,
                            float cursorX, float cursorY, const std::string &carryingName,
                            const std::string &selectedName, const std::string &lookedAtText,
-                           const std::string &modeText, const std::string &biomeText,
+                           const std::string &modeText, const std::string &compassText,
                            const std::string &coordText, const voxel::BlockRegistry &registry,
                            const TextureAtlas &atlas) {
     init2D();
@@ -685,7 +685,8 @@ void HudRenderer::render2D(int width, int height, int selectedIndex,
         const float iy = y0 + 8.0f;
         const float iw = slot - 16.0f;
         const float ih = slot - 16.0f;
-        if (hotbar[i] == voxel::TALL_GRASS || hotbar[i] == voxel::FLOWER) {
+        if (hotbar[i] == voxel::TALL_GRASS || hotbar[i] == voxel::FLOWER ||
+            voxel::isTorch(hotbar[i])) {
             const glm::vec4 uv = atlas.uvRect(def.sideTile);
             appendItemIcon(ix, iy, ix + iw, iy + ih, uv, 1.0f);
         } else {
@@ -746,7 +747,8 @@ void HudRenderer::render2D(int width, int height, int selectedIndex,
                 const float iy = sy + 7.0f;
                 const float iw = invSlot - 14.0f;
                 const float ih = invSlot - 14.0f;
-                if (allIds[slotIndex] == voxel::TALL_GRASS || allIds[slotIndex] == voxel::FLOWER) {
+                if (allIds[slotIndex] == voxel::TALL_GRASS ||
+                    allIds[slotIndex] == voxel::FLOWER || voxel::isTorch(allIds[slotIndex])) {
                     const glm::vec4 uv = atlas.uvRect(def.sideTile);
                     appendItemIcon(ix, iy, ix + iw, iy + ih, uv, 1.0f);
                 } else {
@@ -768,7 +770,8 @@ void HudRenderer::render2D(int width, int height, int selectedIndex,
             const float dy = cursorY + 8.0f;
             drawRect(dx - 2.0f, dy - 2.0f, dragSize + 4.0f, dragSize + 4.0f, 0.0f, 0.0f, 0.0f,
                      0.45f);
-            if (carryingId == voxel::TALL_GRASS || carryingId == voxel::FLOWER) {
+            if (carryingId == voxel::TALL_GRASS || carryingId == voxel::FLOWER ||
+                voxel::isTorch(carryingId)) {
                 const glm::vec4 uv = atlas.uvRect(def.sideTile);
                 appendItemIcon(dx, dy, dx + dragSize, dy + dragSize, uv, 1.0f);
             } else {
@@ -784,8 +787,7 @@ void HudRenderer::render2D(int width, int height, int selectedIndex,
         }
     }
 
-    // Context info panel (top-left): looked block, mode, biome, and player
-    // coordinates.
+    // Context info panel (top-left): looked block, mode, compass, and player coordinates.
     const float panelX = 14.0f;
     const float panelY = 14.0f;
     const float panelW = 280.0f;
@@ -793,7 +795,7 @@ void HudRenderer::render2D(int width, int height, int selectedIndex,
     drawRect(panelX, panelY, panelW, panelH, 0.03f, 0.04f, 0.05f, 0.58f);
     drawText(panelX + 8.0f, panelY + 8.0f, lookedAtText, 235, 239, 247, 255);
     drawText(panelX + 8.0f, panelY + 22.0f, modeText, 216, 222, 236, 255);
-    drawText(panelX + 8.0f, panelY + 36.0f, biomeText, 216, 222, 236, 255);
+    drawText(panelX + 8.0f, panelY + 36.0f, compassText, 216, 222, 236, 255);
     drawText(panelX + 8.0f, panelY + 50.0f, coordText, 216, 222, 236, 255);
 
     glEnable(GL_BLEND);
@@ -851,7 +853,8 @@ void HudRenderer::renderBreakOverlay(const glm::mat4 &proj, const glm::mat4 &vie
     initCrack();
 
     constexpr int kCrackTileBase = 32;
-    const bool isPlant = (blockId == voxel::TALL_GRASS || blockId == voxel::FLOWER);
+    const bool isPlant =
+        (blockId == voxel::TALL_GRASS || blockId == voxel::FLOWER || voxel::isTorch(blockId));
     // Plants look better with a lighter/faster crack progression.
     const float eased = std::pow(breakProgress, isPlant ? 1.10f : 1.35f);
     const int stage0 = std::min(9, static_cast<int>(std::floor(eased * (isPlant ? 4.0f : 7.0f))));

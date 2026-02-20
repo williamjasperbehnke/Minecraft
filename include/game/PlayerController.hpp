@@ -17,7 +17,8 @@ namespace game {
 
 class PlayerController {
   public:
-    void setFromCamera(const glm::vec3 &cameraPos, const world::World &world);
+    void setFromCamera(const glm::vec3 &cameraPos, const world::World &world,
+                       bool resolveIntersections = true);
     void update(GLFWwindow *window, const world::World &world, const Camera &camera, float dt,
                 bool inputEnabled);
 
@@ -41,7 +42,6 @@ class PlayerController {
     bool initialized_ = false;
     bool grounded_ = false;
     bool inWater_ = false;
-    bool jumpHeld_ = false;
 };
 
 } // namespace game

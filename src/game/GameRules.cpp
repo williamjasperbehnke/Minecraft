@@ -58,39 +58,15 @@ const char *blockName(voxel::BlockId id) {
         return "Tall Grass";
     case voxel::FLOWER:
         return "Flower";
+    case voxel::TORCH:
+    case voxel::TORCH_WALL_POS_X:
+    case voxel::TORCH_WALL_NEG_X:
+    case voxel::TORCH_WALL_POS_Z:
+    case voxel::TORCH_WALL_NEG_Z:
+        return "Torch";
     default:
         return "Block";
     }
-}
-
-std::string biomeHintFromSurface(const world::World &world, const glm::vec3 &pos) {
-    const int wx = static_cast<int>(std::floor(pos.x));
-    const int wz = static_cast<int>(std::floor(pos.z));
-    int topY = 0;
-    voxel::BlockId top = voxel::AIR;
-    for (int y = 127; y >= 0; --y) {
-        const voxel::BlockId id = world.getBlock(wx, y, wz);
-        if (id != voxel::AIR && id != voxel::WATER && id != voxel::LEAVES &&
-            id != voxel::SPRUCE_LEAVES && id != voxel::BIRCH_LEAVES && id != voxel::TALL_GRASS &&
-            id != voxel::FLOWER) {
-            topY = y;
-            top = id;
-            break;
-        }
-    }
-    if (top == voxel::SNOW_BLOCK || top == voxel::ICE) {
-        return "Biome: Snowy/Taiga";
-    }
-    if (top == voxel::SAND || top == voxel::SANDSTONE || top == voxel::CACTUS) {
-        return "Biome: Desert/Badlands";
-    }
-    if (top == voxel::STONE && topY > 88) {
-        return "Biome: Mountains";
-    }
-    if (top == voxel::GRASS) {
-        return "Biome: Plains/Forest/Swamp";
-    }
-    return "Biome: Overworld";
 }
 
 float breakSeconds(voxel::BlockId id) {
@@ -100,6 +76,11 @@ float breakSeconds(voxel::BlockId id) {
     case voxel::BIRCH_LEAVES:
     case voxel::TALL_GRASS:
     case voxel::FLOWER:
+    case voxel::TORCH:
+    case voxel::TORCH_WALL_POS_X:
+    case voxel::TORCH_WALL_NEG_X:
+    case voxel::TORCH_WALL_POS_Z:
+    case voxel::TORCH_WALL_NEG_Z:
         return 0.22f;
     case voxel::DIRT:
     case voxel::SAND:
@@ -151,6 +132,11 @@ AudioSystem::SoundProfile soundProfileForBlock(voxel::BlockId id) {
     case voxel::SPRUCE_WOOD:
     case voxel::BIRCH_WOOD:
     case voxel::CACTUS:
+    case voxel::TORCH:
+    case voxel::TORCH_WALL_POS_X:
+    case voxel::TORCH_WALL_NEG_X:
+    case voxel::TORCH_WALL_POS_Z:
+    case voxel::TORCH_WALL_NEG_Z:
         return Profile::Wood;
     case voxel::LEAVES:
     case voxel::SPRUCE_LEAVES:

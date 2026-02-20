@@ -1,6 +1,7 @@
 #pragma once
 
 #include <glm/mat4x4.hpp>
+#include <glm/vec3.hpp>
 #include <string>
 
 namespace gfx {
@@ -15,6 +16,8 @@ class Shader {
 
     void use() const;
     void setInt(const char *name, int value) const;
+    void setFloat(const char *name, float value) const;
+    void setVec3(const char *name, const glm::vec3 &v) const;
     void setMat4(const char *name, const glm::mat4 &m) const;
 
   private:

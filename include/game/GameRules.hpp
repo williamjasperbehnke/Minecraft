@@ -14,7 +14,6 @@ class World;
 namespace game {
 
 const char *blockName(voxel::BlockId id);
-std::string biomeHintFromSurface(const world::World &world, const glm::vec3 &pos);
 float breakSeconds(voxel::BlockId id);
 AudioSystem::SoundProfile soundProfileForBlock(voxel::BlockId id);
 AudioSystem::SoundProfile footstepProfileForGround(voxel::BlockId id);

@@ -30,7 +30,7 @@ class HudRenderer {
                   voxel::BlockId carryingId, int carryingCount, float cursorX, float cursorY,
                   const std::string &carryingName, const std::string &selectedName,
                   const std::string &lookedAtText, const std::string &modeText,
-                  const std::string &biomeText, const std::string &coordText,
+                  const std::string &compassText, const std::string &coordText,
                   const voxel::BlockRegistry &registry, const TextureAtlas &atlas);
 
     void renderBreakOverlay(const glm::mat4 &proj, const glm::mat4 &view,

@@ -41,6 +41,292 @@ void onFramebufferResize(GLFWwindow * /*window*/, int width, int height) {
     glViewport(0, 0, width, height);
 }
 
+unsigned int compileInlineShader(unsigned int type, const char *src) {
+    const unsigned int shader = glCreateShader(type);
+    glShaderSource(shader, 1, &src, nullptr);
+    glCompileShader(shader);
+    int ok = 0;
+    glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
+    if (!ok) {
+        char log[1024];
+        glGetShaderInfoLog(shader, sizeof(log), nullptr, log);
+        throw std::runtime_error(std::string("Sky shader compile failed: ") + log);
+    }
+    return shader;
+}
+
+unsigned int linkInlineProgram(unsigned int vs, unsigned int fs) {
+    const unsigned int prog = glCreateProgram();
+    glAttachShader(prog, vs);
+    glAttachShader(prog, fs);
+    glLinkProgram(prog);
+    int ok = 0;
+    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    if (!ok) {
+        char log[1024];
+        glGetProgramInfoLog(prog, sizeof(log), nullptr, log);
+        throw std::runtime_error(std::string("Sky shader link failed: ") + log);
+    }
+    return prog;
+}
+
+float hash01(int i, int salt) {
+    const float x = static_cast<float>(i * 92821 + salt * 68917);
+    const float s = std::sin(x * 0.000123f) * 43758.5453f;
+    return s - std::floor(s);
+}
+
+constexpr int kCloudRenderRange = 11;
+constexpr float kCloudCellSize = 16.0f;
+constexpr float kCloudLayerY = 176.0f;
+constexpr float kCloudDriftXSpeed = 0.35f;
+constexpr float kCloudDriftZSpeed = 0.12f;
+constexpr float kCloudQuadRadius = 0.500f;
+constexpr float kCloudShadowRange = kCloudCellSize * static_cast<float>(kCloudRenderRange);
+
+std::string compassTextFromForward(const glm::vec3 &forward) {
+    const float x = forward.x;
+    const float z = forward.z;
+    if (std::abs(x) < 1e-4f && std::abs(z) < 1e-4f) {
+        return "Compass: N";
+    }
+    // 0 rad is North, pi/2 East, pi South, 3pi/2 West.
+    float a = std::atan2(x, -z);
+    if (a < 0.0f) {
+        a += glm::pi<float>() * 2.0f;
+    }
+    const int oct = static_cast<int>(std::floor((a + glm::pi<float>() / 8.0f) /
+                                                 (glm::pi<float>() / 4.0f))) %
+                    8;
+    static const char *kDir[8] = {"N", "NE", "E", "SE", "S", "SW", "W", "NW"};
+    return std::string("Compass: ") + kDir[oct];
+}
+
+class SkyBodyRenderer {
+  public:
+    enum class BodyType { Sun = 0, Moon = 1, Star = 2, Cloud = 3 };
+
+    ~SkyBodyRenderer() {
+        if (glfwGetCurrentContext() == nullptr) {
+            return;
+        }
+        if (vbo_ != 0) {
+            glDeleteBuffers(1, &vbo_);
+        }
+        if (vao_ != 0) {
+            glDeleteVertexArrays(1, &vao_);
+        }
+        if (program_ != 0) {
+            glDeleteProgram(program_);
+        }
+    }
+
+    void draw(const glm::mat4 &proj, const glm::mat4 &view, const glm::vec3 &center,
+              const glm::vec3 &camRight, const glm::vec3 &camUp, float radius,
+              const glm::vec3 &color, float glow, BodyType type, float phase01 = 0.0f) {
+        init();
+        glUseProgram(program_);
+        glUniformMatrix4fv(glGetUniformLocation(program_, "uProj"), 1, GL_FALSE, &proj[0][0]);
+        glUniformMatrix4fv(glGetUniformLocation(program_, "uView"), 1, GL_FALSE, &view[0][0]);
+        glUniform3f(glGetUniformLocation(program_, "uCenter"), center.x, center.y, center.z);
+        glUniform3f(glGetUniformLocation(program_, "uRight"), camRight.x, camRight.y, camRight.z);
+        glUniform3f(glGetUniformLocation(program_, "uUp"), camUp.x, camUp.y, camUp.z);
+        glUniform1f(glGetUniformLocation(program_, "uRadius"), radius);
+        glUniform3f(glGetUniformLocation(program_, "uColor"), color.r, color.g, color.b);
+        glUniform1f(glGetUniformLocation(program_, "uGlow"), glow);
+        int bodyType = 0;
+        switch (type) {
+        case BodyType::Sun:
+            bodyType = 0;
+            break;
+        case BodyType::Moon:
+            bodyType = 1;
+            break;
+        case BodyType::Star:
+            bodyType = 2;
+            break;
+        case BodyType::Cloud:
+            bodyType = 3;
+            break;
+        }
+        glUniform1i(glGetUniformLocation(program_, "uBodyType"), bodyType);
+        glUniform1f(glGetUniformLocation(program_, "uPhase01"), phase01);
+        glBindVertexArray(vao_);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+    }
+
+  private:
+    void init() {
+        if (ready_) {
+            return;
+        }
+        const char *vs = R"(
+#version 330 core
+layout(location = 0) in vec2 aCorner;
+uniform mat4 uProj;
+uniform mat4 uView;
+uniform vec3 uCenter;
+uniform vec3 uRight;
+uniform vec3 uUp;
+uniform float uRadius;
+out vec2 vUV;
+void main() {
+  vec3 worldPos = uCenter + (aCorner.x * uRight + aCorner.y * uUp) * uRadius;
+  vUV = aCorner * 0.5 + 0.5;
+  gl_Position = uProj * uView * vec4(worldPos, 1.0);
+}
+)";
+        const char *fs = R"(
+#version 330 core
+in vec2 vUV;
+uniform vec3 uColor;
+uniform float uGlow;
+uniform int uBodyType;
+uniform float uPhase01;
+out vec4 FragColor;
+void main() {
+  vec2 p = vUV - vec2(0.5);
+  float edge = max(abs(p.x), abs(p.y));
+  if (edge > 0.5) discard;
+  float bodyMask = 1.0 - smoothstep(0.47, 0.50, edge);
+
+  vec3 c = uColor;
+  if (uBodyType == 0) {
+    float core = 1.0 - smoothstep(0.10, 0.40, edge);
+    c = uColor * (0.92 + 0.18 * core) + vec3(uGlow) * (0.25 + 0.75 * core);
+  } else if (uBodyType == 1) {
+    vec2 g = floor(vUV * 8.0);
+    float n = fract(sin(dot(g, vec2(12.9898, 78.233))) * 43758.5453);
+    float crater = step(0.86, n) * 0.11;
+    c = uColor - vec3(crater);
+
+    // Moon phase: 0.0=new, 0.5=full, with waxing/waning side swap.
+    float phase = fract(uPhase01);
+    float illum = 0.5 - 0.5 * cos(phase * 6.28318530718);
+    float side = (phase < 0.5) ? 1.0 : -1.0;
+    float px = p.x * side;
+
+    float lit = 0.0;
+    if (illum >= 0.995) {
+      lit = 1.0;
+    } else if (illum <= 0.005) {
+      lit = 0.0;
+    } else {
+      float terminator = mix(0.50, -0.50, illum);
+      lit = smoothstep(terminator - 0.04, terminator + 0.04, px);
+    }
+    c *= mix(0.16, 1.0, lit);
+  } else if (uBodyType == 2) {
+    float d = length(p) * 2.0;
+    float core = 1.0 - smoothstep(0.05, 0.26, d);
+    float halo = 1.0 - smoothstep(0.10, 0.52, d);
+    c = uColor * (0.40 + 0.60 * core) + vec3(uGlow) * halo * 1.7;
+    bodyMask = clamp(core + halo * 0.85, 0.0, 1.0);
+  } else {
+    // Keep cloud tiles uniform so adjacent quads merge without visible seam patterns.
+    c = uColor;
+    bodyMask = 0.82;
+  }
+
+  FragColor = vec4(c, bodyMask);
+}
+)";
+        program_ = linkInlineProgram(compileInlineShader(GL_VERTEX_SHADER, vs),
+                                     compileInlineShader(GL_FRAGMENT_SHADER, fs));
+
+        const float quad[12] = {
+            -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f,
+        };
+        glGenVertexArrays(1, &vao_);
+        glGenBuffers(1, &vbo_);
+        glBindVertexArray(vao_);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo_);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_STATIC_DRAW);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), nullptr);
+        ready_ = true;
+    }
+
+    bool ready_ = false;
+    unsigned int program_ = 0;
+    unsigned int vao_ = 0;
+    unsigned int vbo_ = 0;
+};
+
+class ChunkBorderRenderer {
+  public:
+    ~ChunkBorderRenderer() {
+        if (glfwGetCurrentContext() == nullptr) {
+            return;
+        }
+        if (vbo_ != 0) {
+            glDeleteBuffers(1, &vbo_);
+        }
+        if (vao_ != 0) {
+            glDeleteVertexArrays(1, &vao_);
+        }
+        if (program_ != 0) {
+            glDeleteProgram(program_);
+        }
+    }
+
+    void draw(const glm::mat4 &proj, const glm::mat4 &view, const std::vector<glm::vec3> &verts) {
+        if (verts.empty()) {
+            return;
+        }
+        init();
+        glUseProgram(program_);
+        glUniformMatrix4fv(glGetUniformLocation(program_, "uProj"), 1, GL_FALSE, &proj[0][0]);
+        glUniformMatrix4fv(glGetUniformLocation(program_, "uView"), 1, GL_FALSE, &view[0][0]);
+        glBindVertexArray(vao_);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo_);
+        glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(verts.size() * sizeof(glm::vec3)),
+                     verts.data(), GL_DYNAMIC_DRAW);
+        glDrawArrays(GL_LINES, 0, static_cast<GLsizei>(verts.size()));
+    }
+
+  private:
+    void init() {
+        if (ready_) {
+            return;
+        }
+        const char *vs = R"(
+#version 330 core
+layout(location = 0) in vec3 aPos;
+uniform mat4 uProj;
+uniform mat4 uView;
+void main() {
+  gl_Position = uProj * uView * vec4(aPos, 1.0);
+}
+)";
+        const char *fs = R"(
+#version 330 core
+out vec4 FragColor;
+void main() {
+  FragColor = vec4(1.0, 0.88, 0.20, 0.90);
+}
+)";
+        program_ = linkInlineProgram(compileInlineShader(GL_VERTEX_SHADER, vs),
+                                     compileInlineShader(GL_FRAGMENT_SHADER, fs));
+
+        glGenVertexArrays(1, &vao_);
+        glGenBuffers(1, &vbo_);
+        glBindVertexArray(vao_);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo_);
+        glBufferData(GL_ARRAY_BUFFER, 0, nullptr, GL_DYNAMIC_DRAW);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), nullptr);
+        ready_ = true;
+    }
+
+    bool ready_ = false;
+    unsigned int program_ = 0;
+    unsigned int vao_ = 0;
+    unsigned int vbo_ = 0;
+};
+
 struct WorldEntry {
     std::string name;
     std::filesystem::path path;
@@ -302,7 +588,8 @@ void savePlayerData(const std::filesystem::path &worldDir, const glm::vec3 &came
     }
 
     out << "VXP2\n";
-    out << std::fixed << std::setprecision(3) << cameraPos.x << ' ' << cameraPos.y << ' '
+    out << std::fixed << std::setprecision(std::numeric_limits<float>::max_digits10) << cameraPos.x
+        << ' ' << cameraPos.y << ' '
         << cameraPos.z << '\n';
     out << std::clamp(selectedSlot, 0, game::Inventory::kHotbarSize - 1) << '\n';
     out << (ghostMode ? 1 : 0) << '\n';
@@ -561,6 +848,101 @@ bool placeCellIntersectsPlayer(const glm::ivec3 &placeCell, const glm::vec3 &cam
     return overlapX && overlapY && overlapZ;
 }
 
+bool isCollisionSolidPlacement(voxel::BlockId id) {
+    return !(id == voxel::AIR || id == voxel::WATER || id == voxel::TALL_GRASS ||
+             id == voxel::FLOWER || voxel::isTorch(id));
+}
+
+voxel::BlockId torchIdForPlacementNormal(const glm::ivec3 &normal) {
+    if (normal.y == 1) {
+        return voxel::TORCH;
+    }
+    if (normal.x == 1) {
+        return voxel::TORCH_WALL_POS_X;
+    }
+    if (normal.x == -1) {
+        return voxel::TORCH_WALL_NEG_X;
+    }
+    if (normal.z == 1) {
+        return voxel::TORCH_WALL_POS_Z;
+    }
+    if (normal.z == -1) {
+        return voxel::TORCH_WALL_NEG_Z;
+    }
+    return voxel::AIR;
+}
+
+glm::ivec3 torchOutwardNormal(voxel::BlockId id) {
+    switch (id) {
+    case voxel::TORCH_WALL_POS_X:
+        return {1, 0, 0};
+    case voxel::TORCH_WALL_NEG_X:
+        return {-1, 0, 0};
+    case voxel::TORCH_WALL_POS_Z:
+        return {0, 0, 1};
+    case voxel::TORCH_WALL_NEG_Z:
+        return {0, 0, -1};
+    default:
+        return {0, 0, 0};
+    }
+}
+
+bool torchHasSupport(const world::World &world, const glm::ivec3 &cell, voxel::BlockId id) {
+    if (!voxel::isTorch(id)) {
+        return true;
+    }
+    if (id == voxel::TORCH) {
+        return world.isSolidBlock(cell.x, cell.y - 1, cell.z);
+    }
+    const glm::ivec3 outward = torchOutwardNormal(id);
+    const glm::ivec3 support = cell - outward;
+    return world.isSolidBlock(support.x, support.y, support.z);
+}
+
+bool isSupportPlant(voxel::BlockId id) {
+    return id == voxel::TALL_GRASS || id == voxel::FLOWER;
+}
+
+bool plantHasSupport(const world::World &world, const glm::ivec3 &cell, voxel::BlockId id) {
+    if (!isSupportPlant(id)) {
+        return true;
+    }
+    return world.isSolidBlock(cell.x, cell.y - 1, cell.z);
+}
+
+void dropUnsupportedPlantsAround(world::World &world, game::ItemDropSystem &itemDrops,
+                                 const glm::ivec3 &changedCell) {
+    const glm::ivec3 above = changedCell + glm::ivec3(0, 1, 0);
+    const voxel::BlockId id = world.getBlock(above.x, above.y, above.z);
+    if (!isSupportPlant(id) || plantHasSupport(world, above, id)) {
+        return;
+    }
+    if (world.setBlock(above.x, above.y, above.z, voxel::AIR)) {
+        itemDrops.spawn(id, glm::vec3(above) + glm::vec3(0.5f, 0.02f, 0.5f), 1);
+    }
+}
+
+void dropUnsupportedTorchesAround(world::World &world, game::ItemDropSystem &itemDrops,
+                                  const glm::ivec3 &changedCell) {
+    constexpr std::array<glm::ivec3, 6> kDirs = {
+        glm::ivec3{1, 0, 0}, glm::ivec3{-1, 0, 0}, glm::ivec3{0, 1, 0},
+        glm::ivec3{0, -1, 0}, glm::ivec3{0, 0, 1}, glm::ivec3{0, 0, -1},
+    };
+    for (const glm::ivec3 &d : kDirs) {
+        const glm::ivec3 n = changedCell + d;
+        const voxel::BlockId nid = world.getBlock(n.x, n.y, n.z);
+        if (!voxel::isTorch(nid)) {
+            continue;
+        }
+        if (torchHasSupport(world, n, nid)) {
+            continue;
+        }
+        if (world.setBlock(n.x, n.y, n.z, voxel::AIR)) {
+            itemDrops.spawn(voxel::TORCH, glm::vec3(n) + glm::vec3(0.5f, 0.2f, 0.5f), 1);
+        }
+    }
+}
+
 int pauseMenuButtonAtCursor(double mx, double my, int width, int height) {
     const float cx = static_cast<float>(width) * 0.5f;
     const float cy = static_cast<float>(height) * 0.5f;
@@ -800,6 +1182,7 @@ int main() {
             game::DebugConfig debugCfg;
             debugCfg.moveSpeed = camera.moveSpeed();
             debugCfg.mouseSensitivity = camera.mouseSensitivity();
+            bool lastSmoothLighting = debugCfg.smoothLighting;
 
             bool prevLeft = false;
             bool prevRight = false;
@@ -821,8 +1204,14 @@ int main() {
             if (loadPlayerData(worldSelection.path, loadedCameraPos, selectedBlockIndex, ghostMode,
                                inventory)) {
                 camera.setPosition(loadedCameraPos);
-                pendingSpawnResolve = !ghostMode;
+                if (!ghostMode) {
+                    pendingSpawnResolve = true;
+                }
             }
+            auto saveCurrentPlayer = [&]() {
+                savePlayerData(worldSelection.path, camera.position(), selectedBlockIndex, ghostMode,
+                               inventory);
+            };
             camera.resetMouseLook(window);
             bool prevInventoryLeft = false;
             bool prevInventoryRight = false;
@@ -833,6 +1222,10 @@ int main() {
 
             float lastTime = static_cast<float>(glfwGetTime());
             float titleAccum = 0.0f;
+            float dayClockSeconds = 120.0f;
+            constexpr float kDayLengthSeconds = 900.0f;
+            SkyBodyRenderer skyBodyRenderer;
+            ChunkBorderRenderer chunkBorderRenderer;
             world::WorldDebugStats stats{};
             bool wasMenuOpen = false;
             std::optional<glm::ivec3> miningBlock;
@@ -867,6 +1260,10 @@ int main() {
                 camera.setMoveSpeed(debugCfg.moveSpeed);
                 camera.setMouseSensitivity(debugCfg.mouseSensitivity);
                 world.setStreamingRadii(debugCfg.loadRadius, debugCfg.unloadRadius);
+                if (debugCfg.smoothLighting != lastSmoothLighting) {
+                    world.setSmoothLighting(debugCfg.smoothLighting);
+                    lastSmoothLighting = debugCfg.smoothLighting;
+                }
 
                 const bool wantCursorNormal = blockInput;
                 const int currentCursorMode = glfwGetInputMode(window, GLFW_CURSOR);
@@ -890,12 +1287,13 @@ int main() {
                 }
 
                 if (pendingSpawnResolve) {
-                    const glm::vec3 spawnPos = camera.position();
-                    const int swx = static_cast<int>(std::floor(spawnPos.x));
-                    const int swz = static_cast<int>(std::floor(spawnPos.z));
+                    const int swx = static_cast<int>(std::floor(loadedCameraPos.x));
+                    const int swz = static_cast<int>(std::floor(loadedCameraPos.z));
                     if (world.isChunkLoadedAt(swx, swz)) {
-                        playerController.setFromCamera(spawnPos, world);
+                        // Restore exact saved position on reload (no collision adjustment).
+                        playerController.setFromCamera(loadedCameraPos, world, false);
                         camera.setPosition(playerController.cameraPosition());
+                        loadedCameraPos = camera.position();
                         pendingSpawnResolve = false;
                     }
                 }
@@ -905,13 +1303,25 @@ int main() {
                         camera.handleKeyboard(window, dt);
                     }
                 } else {
-                    playerController.update(window, world, camera, dt, !blockInput);
-                    camera.setPosition(playerController.cameraPosition());
+                    if (!pendingSpawnResolve) {
+                        playerController.update(window, world, camera, dt, !blockInput);
+                        camera.setPosition(playerController.cameraPosition());
+                    }
                 }
 
                 world.updateStream(camera.position());
                 world.uploadReadyMeshes();
                 stats = world.debugStats();
+                if (debugCfg.overrideTime) {
+                    dayClockSeconds =
+                        std::clamp(debugCfg.timeOfDay01, 0.0f, 1.0f) * kDayLengthSeconds;
+                } else {
+                    dayClockSeconds += dt;
+                    if (dayClockSeconds >= kDayLengthSeconds) {
+                        dayClockSeconds = std::fmod(dayClockSeconds, kDayLengthSeconds);
+                    }
+                    debugCfg.timeOfDay01 = dayClockSeconds / kDayLengthSeconds;
+                }
                 mineCooldown = std::max(0.0f, mineCooldown - dt);
                 itemDrops.update(world, camera.position(), dt);
                 for (const auto &pickup : itemDrops.consumePickups()) {
@@ -1003,16 +1413,13 @@ int main() {
                         if (button == 1) {
                             pauseMenuOpen = false;
                         } else if (button == 2) {
-                            savePlayerData(worldSelection.path, camera.position(),
-                                           selectedBlockIndex, ghostMode, inventory);
+                            saveCurrentPlayer();
                         } else if (button == 3) {
-                            savePlayerData(worldSelection.path, camera.position(),
-                                           selectedBlockIndex, ghostMode, inventory);
+                            saveCurrentPlayer();
                             returnToTitle = true;
                             break;
                         } else if (button == 4) {
-                            savePlayerData(worldSelection.path, camera.position(),
-                                           selectedBlockIndex, ghostMode, inventory);
+                            saveCurrentPlayer();
                             glfwSetWindowShouldClose(window, GLFW_TRUE);
                         }
                     }
@@ -1185,7 +1592,10 @@ int main() {
                                 if (targetId == voxel::TALL_GRASS || targetId == voxel::FLOWER) {
                                     dropPos.y = static_cast<float>(target.y) + 0.02f;
                                 }
-                                itemDrops.spawn(targetId, dropPos, 1);
+                                itemDrops.spawn(voxel::isTorch(targetId) ? voxel::TORCH : targetId,
+                                               dropPos, 1);
+                                dropUnsupportedTorchesAround(world, itemDrops, target);
+                                dropUnsupportedPlantsAround(world, itemDrops, target);
                                 audio.playBreak(game::soundProfileForBlock(targetId));
                             }
                             miningProgress = 0.0f;
@@ -1204,15 +1614,44 @@ int main() {
                     const glm::ivec3 camCell(static_cast<int>(std::floor(camPos.x)),
                                              static_cast<int>(std::floor(camPos.y)),
                                              static_cast<int>(std::floor(camPos.z)));
-                    const bool intersectsPlayer =
-                        !ghostMode && placeCellIntersectsPlayer(place, camPos);
-                    if (place != camCell && !intersectsPlayer) {
-                        const auto slot = inventory.hotbarSlot(selectedBlockIndex);
-                        if (slot.id != voxel::AIR && slot.count > 0) {
-                            if (world.setBlock(place.x, place.y, place.z, slot.id)) {
-                                inventory.consumeHotbar(selectedBlockIndex, 1);
-                                audio.playPlace(game::soundProfileForBlock(slot.id));
+                    const auto slot = inventory.hotbarSlot(selectedBlockIndex);
+                    if (slot.id != voxel::AIR && slot.count > 0) {
+                        bool placementAllowed = true;
+                        voxel::BlockId placeId = slot.id;
+
+                        // Only collision-solid blocks are prevented from intersecting the player.
+                        const bool placingCollisionSolid = isCollisionSolidPlacement(slot.id);
+                        if (placingCollisionSolid) {
+                            const bool intersectsPlayer =
+                                !ghostMode && placeCellIntersectsPlayer(place, camPos);
+                            if (place == camCell || intersectsPlayer) {
+                                placementAllowed = false;
                             }
+                        }
+
+                        // Torches must be attached to a solid block face (floor or wall, not ceiling).
+                        if (placementAllowed && slot.id == voxel::TORCH) {
+                            const glm::ivec3 normal = currentHit->normal;
+                            placeId = torchIdForPlacementNormal(normal);
+                            if (placeId == voxel::AIR) {
+                                placementAllowed = false;
+                            } else {
+                                const glm::ivec3 support = place - normal;
+                                if (!world.isSolidBlock(support.x, support.y, support.z)) {
+                                    placementAllowed = false;
+                                }
+                            }
+                        }
+                        // Plants must stand on a solid block.
+                        if (placementAllowed && isSupportPlant(slot.id)) {
+                            if (!world.isSolidBlock(place.x, place.y - 1, place.z)) {
+                                placementAllowed = false;
+                            }
+                        }
+
+                        if (placementAllowed && world.setBlock(place.x, place.y, place.z, placeId)) {
+                            inventory.consumeHotbar(selectedBlockIndex, 1);
+                            audio.playPlace(game::soundProfileForBlock(slot.id));
                         }
                     }
                 }
@@ -1277,8 +1716,118 @@ int main() {
                     glm::perspective(glm::radians(debugCfg.fov), aspect, 0.1f, 500.0f);
                 const glm::mat4 view = camera.view();
 
-                glClearColor(0.52f, 0.75f, 0.98f, 1.0f);
+                const float dayPhase = dayClockSeconds / kDayLengthSeconds;
+                const float sunAngle = dayPhase * (glm::pi<float>() * 2.0f);
+                const float sunHeight = std::sin(sunAngle);
+                const float daylight = glm::smoothstep(-0.10f, 0.20f, sunHeight);
+                const float twilight =
+                    (1.0f - glm::clamp(std::abs(sunHeight) * 3.0f, 0.0f, 1.0f)) *
+                    (0.65f + 0.35f * (1.0f - daylight));
+
+                const glm::vec3 daySky(0.56f, 0.79f, 0.99f);
+                const glm::vec3 duskSky(0.96f, 0.56f, 0.30f);
+                const glm::vec3 nightSky(0.02f, 0.03f, 0.08f);
+                glm::vec3 skyColor = glm::mix(nightSky, daySky, daylight);
+                skyColor = glm::mix(skyColor, duskSky, twilight);
+
+                const glm::vec3 sunDir =
+                    glm::normalize(glm::vec3(std::cos(sunAngle), sunHeight, 0.0f));
+                const glm::vec3 nightTint(0.58f, 0.66f, 0.92f);
+                const glm::vec3 dayTint(1.00f, 1.00f, 1.00f);
+                const glm::vec3 duskTint(1.14f, 0.88f, 0.70f);
+                glm::vec3 skyTint = glm::mix(nightTint, dayTint, daylight);
+                skyTint = glm::mix(skyTint, duskTint, twilight * 0.65f);
+
+                glClearColor(skyColor.r, skyColor.g, skyColor.b, 1.0f);
                 glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+                const glm::vec3 camForward = camera.forward();
+                glm::vec3 camRight = glm::cross(camForward, glm::vec3(0.0f, 1.0f, 0.0f));
+                if (glm::dot(camRight, camRight) < 1e-5f) {
+                    camRight = glm::vec3(1.0f, 0.0f, 0.0f);
+                } else {
+                    camRight = glm::normalize(camRight);
+                }
+                const glm::vec3 camUp = glm::normalize(glm::cross(camRight, camForward));
+                const glm::vec3 skyAnchor = camera.position() + glm::vec3(0.0f, 28.0f, 0.0f);
+                const glm::vec3 sunCenter = skyAnchor + sunDir * 210.0f;
+                const glm::vec3 moonCenter = skyAnchor - sunDir * 210.0f;
+                const float sunVis = glm::smoothstep(-0.06f, 0.16f, sunHeight);
+                const float moonVis = glm::smoothstep(0.08f, -0.16f, sunHeight);
+                const float moonPhase01 = std::clamp(debugCfg.moonPhase01, 0.0f, 1.0f);
+                const glm::vec3 sunColor =
+                    glm::vec3(1.00f, 0.93f, 0.64f) * (0.28f + 0.72f * sunVis);
+                const glm::vec3 moonColor =
+                    glm::vec3(0.79f, 0.85f, 0.96f) * (0.28f + 0.72f * moonVis);
+                const bool sunDominant = sunHeight >= 0.0f;
+                const glm::vec3 celestialDir = sunDominant ? sunDir : -sunDir;
+                const float celestialStrength = sunDominant ? (0.92f * sunVis) : (0.36f * moonVis);
+                auto skyBillboardAxes = [&](const glm::vec3 &center) {
+                    const glm::vec3 toBody = glm::normalize(center - camera.position());
+                    const glm::vec3 worldUp(0.0f, 1.0f, 0.0f);
+                    glm::vec3 right = glm::cross(worldUp, toBody);
+                    if (glm::dot(right, right) < 1e-5f) {
+                        right = glm::vec3(1.0f, 0.0f, 0.0f);
+                    } else {
+                        right = glm::normalize(right);
+                    }
+                    const glm::vec3 up = glm::normalize(glm::cross(toBody, right));
+                    return std::pair<glm::vec3, glm::vec3>{right, up};
+                };
+                const float starVis =
+                    glm::clamp((1.0f - daylight) * (0.65f + 0.35f * moonVis), 0.0f, 1.0f);
+                const float cloudVis =
+                    glm::clamp(0.20f + 0.60f * daylight + 0.25f * twilight, 0.0f, 0.95f);
+                const float cloudLayerY = kCloudLayerY;
+
+                glEnable(GL_BLEND);
+                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                glDisable(GL_DEPTH_TEST);
+                glDepthMask(GL_FALSE);
+
+                if (debugCfg.showStars && starVis > 0.01f) {
+                    constexpr int kStarCount = 140;
+                    for (int i = 0; i < kStarCount; ++i) {
+                        const float az = hash01(i, 13) * (glm::pi<float>() * 2.0f) + dayPhase * 0.35f;
+                        const float el = glm::mix(0.10f, 1.12f, hash01(i, 31));
+                        const float ce = std::cos(el);
+                        glm::vec3 dir(std::cos(az) * ce, std::sin(el), std::sin(az) * ce);
+                        dir = glm::normalize(dir);
+                        if (dir.y < 0.02f) {
+                            continue;
+                        }
+                        const glm::vec3 center = skyAnchor + dir * 235.0f;
+                        const float twinkle =
+                            0.72f + 0.28f * std::sin(now * (2.0f + hash01(i, 53) * 3.0f) +
+                                                     hash01(i, 71) * (glm::pi<float>() * 2.0f));
+                        const float radius = 0.58f + 0.78f * hash01(i, 97);
+                        const glm::vec3 starColor =
+                            glm::mix(glm::vec3(0.72f, 0.80f, 1.00f), glm::vec3(1.0f), hash01(i, 43));
+                        const auto axes = skyBillboardAxes(center);
+                        skyBodyRenderer.draw(proj, view, center, axes.first, axes.second, radius,
+                                             starColor * (0.35f + 0.75f * starVis), 0.10f * twinkle,
+                                             SkyBodyRenderer::BodyType::Star, 0.0f);
+                    }
+                }
+
+                if (sunCenter.y + 16.0f > camera.position().y) {
+                    const auto axes = skyBillboardAxes(sunCenter);
+                    skyBodyRenderer.draw(proj, view, sunCenter, axes.first, axes.second, 16.0f,
+                                         sunColor,
+                                         0.07f + 0.15f * sunVis, SkyBodyRenderer::BodyType::Sun,
+                                         0.0f);
+                }
+                if (moonCenter.y + 14.0f > camera.position().y) {
+                    const auto axes = skyBillboardAxes(moonCenter);
+                    skyBodyRenderer.draw(proj, view, moonCenter, axes.first, axes.second, 14.0f,
+                                         moonColor,
+                                         0.03f + 0.05f * moonVis, SkyBodyRenderer::BodyType::Moon,
+                                         moonPhase01);
+                }
+
+                glDepthMask(GL_TRUE);
+                glEnable(GL_DEPTH_TEST);
+                glDisable(GL_BLEND);
 
                 const bool wireframe = debugCfg.renderMode == game::RenderMode::Wireframe;
                 glPolygonMode(GL_FRONT_AND_BACK, wireframe ? GL_LINE : GL_FILL);
@@ -1286,6 +1835,28 @@ int main() {
                 shader.use();
                 shader.setMat4("uProj", proj);
                 shader.setMat4("uView", view);
+                shader.setFloat("uDaylight", daylight);
+                shader.setVec3("uSkyTint", skyTint);
+                shader.setVec3("uCelestialDir", celestialDir);
+                shader.setFloat("uCelestialStrength", celestialStrength);
+                shader.setVec3("uPlayerPos", camera.position());
+                const float renderEdge = static_cast<float>(debugCfg.loadRadius * voxel::Chunk::SX);
+                const float fogFar = std::max(28.0f, renderEdge - 16.0f);
+                const float fogNear =
+                    std::max(8.0f, fogFar - std::max(52.0f, renderEdge * 0.72f));
+                const glm::vec3 fogColor = glm::mix(skyColor, glm::vec3(0.80f, 0.86f, 0.95f), 0.22f);
+                shader.setVec3("uFogColor", fogColor);
+                shader.setFloat("uFogNear", debugCfg.showFog ? fogNear : 1000000.0f);
+                shader.setFloat("uFogFar", debugCfg.showFog ? fogFar : 1000001.0f);
+                shader.setFloat("uCloudShadowEnabled", debugCfg.showClouds ? 1.0f : 0.0f);
+                shader.setFloat("uCloudShadowTime", now);
+                shader.setFloat("uCloudShadowStrength", 0.32f);
+                shader.setFloat("uCloudShadowDay", sunVis);
+                shader.setFloat("uCloudLayerY", cloudLayerY);
+                shader.setFloat("uCloudShadowRange", kCloudShadowRange);
+                const voxel::BlockId heldId = inventory.hotbarSlot(selectedBlockIndex).id;
+                const float heldTorchStrength = voxel::isTorch(heldId) ? 0.90f : 0.0f;
+                shader.setFloat("uHeldTorchStrength", heldTorchStrength);
                 atlas.bind(0);
                 shader.setInt("uAtlas", 0);
                 shader.setInt("uRenderMode",
@@ -1308,6 +1879,122 @@ int main() {
                     glDepthMask(GL_TRUE);
                     shader.setInt("uAlphaPass", 2);
                     world.draw();
+                }
+
+                if (debugCfg.showClouds && cloudVis > 0.01f) {
+                    constexpr int kRange = kCloudRenderRange;
+                    const float cell = kCloudCellSize;
+                    const float cloudY = cloudLayerY;
+                    const float driftX = now * kCloudDriftXSpeed;
+                    const float driftZ = now * kCloudDriftZSpeed;
+                    auto cloudHashU32 = [](std::uint32_t x) {
+                        x ^= x >> 16u;
+                        x *= 0x7feb352du;
+                        x ^= x >> 15u;
+                        x *= 0x846ca68bu;
+                        x ^= x >> 16u;
+                        return x;
+                    };
+                    auto cloudHash = [cloudHashU32](int x, int z, int salt) {
+                        const auto u32 = [](int v) { return static_cast<std::uint32_t>(v); };
+                        const std::uint32_t h = cloudHashU32(
+                            u32(x) ^ (cloudHashU32(u32(z) + 0x9e3779b9u) +
+                                      u32(salt) * 0x85ebca6bu));
+                        return static_cast<float>(h & 0x00ffffffu) * (1.0f / 16777215.0f);
+                    };
+                    const int centerGX =
+                        static_cast<int>(std::floor((camera.position().x - driftX) / cell));
+                    const int centerGZ =
+                        static_cast<int>(std::floor((camera.position().z - driftZ) / cell));
+                    const glm::vec3 cloudRight(1.0f, 0.0f, 0.0f);
+                    const glm::vec3 cloudUp(0.0f, 0.0f, 1.0f);
+                    const glm::vec3 cloudColor = glm::mix(
+                        glm::vec3(0.80f, 0.86f, 0.92f), glm::vec3(1.00f, 1.00f, 1.00f),
+                        0.42f + 0.45f * daylight);
+
+                    glEnable(GL_BLEND);
+                    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                    glEnable(GL_DEPTH_TEST);
+                    glDepthFunc(GL_LEQUAL);
+                    glDepthMask(GL_FALSE);
+                    for (int gz = -kRange; gz <= kRange; ++gz) {
+                        for (int gx = -kRange; gx <= kRange; ++gx) {
+                            const int gxi = centerGX + gx;
+                            const int gzi = centerGZ + gz;
+                            const int fx = static_cast<int>(std::floor(static_cast<float>(gxi) * 0.5f));
+                            const int fz = static_cast<int>(std::floor(static_cast<float>(gzi) * 0.5f));
+
+                            const float base = cloudHash(fx, fz, 503);
+                            const float nE = cloudHash(fx + 1, fz, 503);
+                            const float nW = cloudHash(fx - 1, fz, 503);
+                            const float nN = cloudHash(fx, fz + 1, 503);
+                            const float nS = cloudHash(fx, fz - 1, 503);
+                            const bool core = base > 0.77f;
+                            const bool fringe =
+                                (base > 0.69f) && (std::max(std::max(nE, nW), std::max(nN, nS)) > 0.78f);
+                            if (!(core || fringe)) {
+                                continue;
+                            }
+
+                            const glm::vec3 center((static_cast<float>(gxi) * cell) + driftX, cloudY,
+                                                   (static_cast<float>(gzi) * cell) + driftZ);
+                            skyBodyRenderer.draw(proj, view, center, cloudRight, cloudUp,
+                                                 cell * kCloudQuadRadius,
+                                                 cloudColor * (0.48f + 0.52f * cloudVis), 0.0f,
+                                                 SkyBodyRenderer::BodyType::Cloud, 0.0f);
+                        }
+                    }
+                    glDepthMask(GL_TRUE);
+                    glDepthFunc(GL_LESS);
+                    glDisable(GL_BLEND);
+                }
+
+                if (debugCfg.showChunkBorders) {
+                    std::vector<glm::vec3> borderVerts;
+                    borderVerts.reserve((voxel::Chunk::SY + 1) * 8 +
+                                        (voxel::Chunk::SX + voxel::Chunk::SZ + 2) * 8);
+                    auto pushEdge = [&](const glm::vec3 &a, const glm::vec3 &b) {
+                        borderVerts.push_back(a);
+                        borderVerts.push_back(b);
+                    };
+                    const int playerChunkX =
+                        static_cast<int>(std::floor(camera.position().x / voxel::Chunk::SX));
+                    const int playerChunkZ =
+                        static_cast<int>(std::floor(camera.position().z / voxel::Chunk::SZ));
+                    const float x0 = static_cast<float>(playerChunkX * voxel::Chunk::SX);
+                    const float x1 = x0 + static_cast<float>(voxel::Chunk::SX);
+                    const float z0 = static_cast<float>(playerChunkZ * voxel::Chunk::SZ);
+                    const float z1 = z0 + static_cast<float>(voxel::Chunk::SZ);
+                    const float yTop = static_cast<float>(voxel::Chunk::SY);
+
+                    // Horizontal perimeter lines at every block height to show chunk edge bands.
+                    for (int y = 0; y <= voxel::Chunk::SY; ++y) {
+                        const float yy = static_cast<float>(y);
+                        pushEdge({x0, yy, z0}, {x1, yy, z0});
+                        pushEdge({x1, yy, z0}, {x1, yy, z1});
+                        pushEdge({x1, yy, z1}, {x0, yy, z1});
+                        pushEdge({x0, yy, z1}, {x0, yy, z0});
+                    }
+                    // Vertical strips on every block boundary along each chunk edge.
+                    for (int lx = 0; lx <= voxel::Chunk::SX; ++lx) {
+                        const float xx = x0 + static_cast<float>(lx);
+                        pushEdge({xx, 0.0f, z0}, {xx, yTop, z0});
+                        pushEdge({xx, 0.0f, z1}, {xx, yTop, z1});
+                    }
+                    for (int lz = 0; lz <= voxel::Chunk::SZ; ++lz) {
+                        const float zz = z0 + static_cast<float>(lz);
+                        pushEdge({x0, 0.0f, zz}, {x0, yTop, zz});
+                        pushEdge({x1, 0.0f, zz}, {x1, yTop, zz});
+                    }
+
+                    glEnable(GL_BLEND);
+                    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                    glEnable(GL_DEPTH_TEST);
+                    glDepthMask(GL_FALSE);
+                    glLineWidth(2.0f);
+                    chunkBorderRenderer.draw(proj, view, borderVerts);
+                    glLineWidth(1.0f);
+                    glDepthMask(GL_TRUE);
                 }
                 itemDrops.render(proj, view, atlas, hudRegistry);
                 std::optional<glm::ivec3> highlightedBlock;
@@ -1354,9 +2041,12 @@ int main() {
                     if (!ghostMode && playerController.inWater()) {
                         modeText = "Mode: Swimming";
                     }
+                    const std::string compassText = compassTextFromForward(camera.forward());
+                    const int bx = static_cast<int>(std::floor(pos.x));
+                    const int by = static_cast<int>(std::floor(pos.y));
+                    const int bz = static_cast<int>(std::floor(pos.z));
                     std::ostringstream coord;
-                    coord << std::fixed << std::setprecision(1) << "XYZ: " << pos.x << ", " << pos.y
-                          << ", " << pos.z;
+                    coord << "XYZ: " << bx << ", " << by << ", " << bz;
                     hud.render2D(winW, winH, selectedBlockIndex, hotbarIds, hotbarCounts, allIds,
                                  allCounts, inventoryVisible, carriedSlot.id, carriedSlot.count,
                                  static_cast<float>(cursorX), static_cast<float>(cursorY),
@@ -1366,8 +2056,7 @@ int main() {
                                  (selectedPlaceBlock == voxel::AIR)
                                      ? "Empty Slot"
                                      : game::blockName(selectedPlaceBlock),
-                                 lookedAt, modeText, game::biomeHintFromSurface(world, pos),
-                                 coord.str(), hudRegistry, atlas);
+                                 lookedAt, modeText, compassText, coord.str(), hudRegistry, atlas);
                 }
                 if (pauseMenuOpen) {
                     double pmx = 0.0;
@@ -1386,8 +2075,7 @@ int main() {
                 }
             }
 
-            savePlayerData(worldSelection.path, camera.position(), selectedBlockIndex, ghostMode,
-                           inventory);
+            saveCurrentPlayer();
             if (returnToTitle && !glfwWindowShouldClose(window)) {
                 glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
                 glfwSetCursor(window, arrowCursor);
