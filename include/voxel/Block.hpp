@@ -131,10 +131,10 @@ struct BlockDef {
 };
 
 // Shared atlas tile ids for furnace rendering across world/UI/item meshes.
-constexpr std::uint16_t TILE_FURNACE_FRONT = 49;
-constexpr std::uint16_t TILE_FURNACE_TOP_BOTTOM = 50;
-constexpr std::uint16_t TILE_FURNACE_SIDE = 56;
-constexpr std::uint16_t TILE_FURNACE_FRONT_LIT = 57;
+constexpr std::uint16_t TILE_FURNACE_FRONT = 40;
+constexpr std::uint16_t TILE_FURNACE_TOP_BOTTOM = 41;
+constexpr std::uint16_t TILE_FURNACE_SIDE = 42;
+constexpr std::uint16_t TILE_FURNACE_FRONT_LIT = 43;
 
 inline std::uint16_t furnaceFrontTile(bool lit) {
     return lit ? TILE_FURNACE_FRONT_LIT : TILE_FURNACE_FRONT;
@@ -179,11 +179,11 @@ class BlockRegistry {
         defs_[TORCH_WALL_NEG_X] = {true, true, 31, 31, 31};
         defs_[TORCH_WALL_POS_Z] = {true, true, 31, 31, 31};
         defs_[TORCH_WALL_NEG_Z] = {true, true, 31, 31, 31};
-        defs_[CRAFTING_TABLE] = {true, false, 42, 43, 44};
-        defs_[OAK_PLANKS] = {true, false, 45, 45, 45};
-        defs_[SPRUCE_PLANKS] = {true, false, 46, 46, 46};
-        defs_[BIRCH_PLANKS] = {true, false, 47, 47, 47};
-        defs_[STICK] = {false, true, 48, 48, 48};
+        defs_[CRAFTING_TABLE] = {true, false, 32, 33, 34};
+        defs_[OAK_PLANKS] = {true, false, 35, 35, 35};
+        defs_[SPRUCE_PLANKS] = {true, false, 36, 36, 36};
+        defs_[BIRCH_PLANKS] = {true, false, 37, 37, 37};
+        defs_[STICK] = {false, true, 38, 38, 38};
         defs_[FURNACE] = {true, false, TILE_FURNACE_SIDE, TILE_FURNACE_TOP_BOTTOM,
                           TILE_FURNACE_TOP_BOTTOM};
         defs_[FURNACE_POS_X] = {true, false, TILE_FURNACE_SIDE, TILE_FURNACE_TOP_BOTTOM,
@@ -202,11 +202,11 @@ class BlockRegistry {
                                     TILE_FURNACE_TOP_BOTTOM};
         defs_[LIT_FURNACE_NEG_Z] = {true, false, TILE_FURNACE_SIDE, TILE_FURNACE_TOP_BOTTOM,
                                     TILE_FURNACE_TOP_BOTTOM};
-        defs_[GLASS] = {true, true, 51, 51, 51};
-        defs_[BRICKS] = {true, false, 52, 52, 52};
-        defs_[IRON_INGOT] = {false, true, 53, 53, 53};
-        defs_[COPPER_INGOT] = {false, true, 54, 54, 54};
-        defs_[GOLD_INGOT] = {false, true, 55, 55, 55};
+        defs_[GLASS] = {true, true, 39, 39, 39};
+        defs_[BRICKS] = {true, false, 44, 44, 44};
+        defs_[IRON_INGOT] = {false, true, 45, 45, 45};
+        defs_[COPPER_INGOT] = {false, true, 46, 46, 46};
+        defs_[GOLD_INGOT] = {false, true, 47, 47, 47};
     }
 
     void set(BlockId id, BlockDef def) {

@@ -15,6 +15,7 @@ class TextureAtlas {
 
     void bind(int unit) const;
     glm::vec4 uvRect(unsigned int tileIndex) const;
+    bool reload(const std::string &path);
 
   private:
     unsigned int tex_ = 0;

@@ -1904,7 +1904,7 @@ void HudRenderer::renderBreakOverlay(const glm::mat4 &proj, const glm::mat4 &vie
     }
     initCrack();
 
-    constexpr int kCrackTileBase = 32;
+    constexpr int kCrackTileBase = 48;
     const bool isPlant =
         (blockId == voxel::TALL_GRASS || blockId == voxel::FLOWER || voxel::isTorch(blockId));
     // Plants look better with a lighter/faster crack progression.

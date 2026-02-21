@@ -9,11 +9,21 @@
 
 namespace gfx {
 
-TextureAtlas::TextureAtlas(const std::string &path, int tileW, int tileH)
-    : tileW_(tileW), tileH_(tileH) {
+namespace {
+
+bool loadImageRgba(const std::string &path, int &width, int &height, unsigned char **data) {
     int channels = 0;
     stbi_set_flip_vertically_on_load(0);
-    unsigned char *data = stbi_load(path.c_str(), &width_, &height_, &channels, 4);
+    *data = stbi_load(path.c_str(), &width, &height, &channels, 4);
+    return *data != nullptr;
+}
+
+} // namespace
+
+TextureAtlas::TextureAtlas(const std::string &path, int tileW, int tileH)
+    : tileW_(tileW), tileH_(tileH) {
+    unsigned char *data = nullptr;
+    const bool loaded = loadImageRgba(path, width_, height_, &data);
 
     glGenTextures(1, &tex_);
     glBindTexture(GL_TEXTURE_2D, tex_);
@@ -23,7 +33,7 @@ TextureAtlas::TextureAtlas(const std::string &path, int tileW, int tileH)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
-    if (data == nullptr) {
+    if (!loaded) {
         // Fallback checker so vertical slice still renders without external assets.
         width_ = 32;
         height_ = 32;
@@ -79,6 +89,38 @@ glm::vec4 TextureAtlas::uvRect(unsigned int tileIndex) const {
     const float v0 = static_cast<float>(ty * tileH_) / static_cast<float>(height_) + insetV;
     const float v1 = static_cast<float>((ty + 1) * tileH_) / static_cast<float>(height_) - insetV;
     return {u0, v0, u1, v1};
+}
+
+bool TextureAtlas::reload(const std::string &path) {
+    unsigned char *data = nullptr;
+    int newW = 0;
+    int newH = 0;
+    if (!loadImageRgba(path, newW, newH, &data)) {
+        return false;
+    }
+    if (newW <= 0 || newH <= 0) {
+        stbi_image_free(data);
+        return false;
+    }
+
+    if (tex_ == 0) {
+        glGenTextures(1, &tex_);
+    }
+    glBindTexture(GL_TEXTURE_2D, tex_);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, newW, newH, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
+    stbi_image_free(data);
+
+    width_ = newW;
+    height_ = newH;
+    cols_ = width_ / tileW_;
+    if (cols_ <= 0) {
+        cols_ = 1;
+    }
+    return true;
 }
 
 } // namespace gfx

@@ -1949,6 +1949,7 @@ int main() {
             bool prevRight = false;
             bool prevHudToggle = false;
             bool prevModeToggle = false;
+            bool prevTextureReloadToggle = false;
             bool prevInventoryToggle = false;
             bool prevPauseToggle = false;
             bool hudVisible = true;
@@ -2223,6 +2224,17 @@ int main() {
                     hudVisible = !hudVisible;
                 }
                 prevHudToggle = hudToggleDown;
+
+                const bool textureReloadDown = glfwGetKey(window, GLFW_KEY_F5) == GLFW_PRESS;
+                if (textureReloadDown && !prevTextureReloadToggle && !menuOpen) {
+                    if (atlas.reload("assets/textures/atlas.png")) {
+                        core::Logger::instance().info("Reloaded texture atlas (F5)");
+                    } else {
+                        core::Logger::instance().warn(
+                            "Failed to reload texture atlas (assets/textures/atlas.png)");
+                    }
+                }
+                prevTextureReloadToggle = textureReloadDown;
 
                 const bool modeToggleDown = glfwGetKey(window, GLFW_KEY_F4) == GLFW_PRESS;
                 if (modeToggleDown && !prevModeToggle && !menuOpen && !inventoryVisible &&
