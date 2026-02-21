@@ -29,6 +29,8 @@ constexpr float kJumpSpeed = 8.4f;
 constexpr float kSwimUpAccel = 26.0f;
 constexpr float kSwimDownAccel = 16.0f;
 constexpr float kSwimDrag = 2.6f;
+constexpr float kSprintMultiplier = 1.60f;
+constexpr float kCrouchMultiplier = 0.45f;
 constexpr float kGroundFrictionMove = 3.1f;
 constexpr float kGroundFrictionIdle = 9.5f;
 constexpr float kIceFriction = 0.55f;
@@ -50,6 +52,9 @@ void PlayerController::setFromCamera(const glm::vec3 &cameraPos, const world::Wo
     velocity_ = glm::vec3(0.0f);
     grounded_ = false;
     inWater_ = false;
+    sprinting_ = false;
+    crouching_ = false;
+    landedImpactSpeed_ = 0.0f;
     initialized_ = true;
 
     if (resolveIntersections) {
@@ -113,6 +118,27 @@ bool PlayerController::intersectsSolid(const world::World &world, const glm::vec
     return false;
 }
 
+bool PlayerController::hasGroundSupport(const world::World &world, const glm::vec3 &feet) const {
+    const float probeY = feet.y - 0.08f;
+    const float s = kHalfWidth - 0.02f;
+    const glm::vec3 probes[5] = {
+        glm::vec3(feet.x, probeY, feet.z),
+        glm::vec3(feet.x - s, probeY, feet.z - s),
+        glm::vec3(feet.x + s, probeY, feet.z - s),
+        glm::vec3(feet.x - s, probeY, feet.z + s),
+        glm::vec3(feet.x + s, probeY, feet.z + s),
+    };
+    for (const glm::vec3 &p : probes) {
+        const int wx = static_cast<int>(std::floor(p.x));
+        const int wy = static_cast<int>(std::floor(p.y));
+        const int wz = static_cast<int>(std::floor(p.z));
+        if (world.isSolidBlock(wx, wy, wz)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void PlayerController::moveAxis(const world::World &world, int axis, float amount) {
     if (amount == 0.0f) {
         return;
@@ -130,11 +156,16 @@ void PlayerController::moveAxis(const world::World &world, int axis, float amoun
             velocity_[axis] = 0.0f;
             break;
         }
+        if (axis != 1 && crouching_ && grounded_ && !inWater_ && !hasGroundSupport(world, feetPos_)) {
+            feetPos_[axis] -= step;
+            velocity_[axis] = 0.0f;
+            break;
+        }
     }
 }
 
 void PlayerController::update(GLFWwindow *window, const world::World &world, const Camera &camera,
-                              float dt, bool inputEnabled) {
+                              float dt, bool inputEnabled, bool allowSprint) {
     if (!initialized_) {
         setFromCamera(camera.position(), world);
     }
@@ -155,6 +186,7 @@ void PlayerController::update(GLFWwindow *window, const world::World &world, con
     glm::vec3 wish(0.0f);
     bool jumpDown = false;
     bool sprint = false;
+    bool crouch = false;
     bool descend = false;
     if (inputEnabled) {
         if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
@@ -166,8 +198,11 @@ void PlayerController::update(GLFWwindow *window, const world::World &world, con
         if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS)
             wish -= right;
         jumpDown = glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS;
-        sprint = glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS;
-        descend = glfwGetKey(window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS;
+        sprint = (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS) ||
+                 (glfwGetKey(window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS);
+        crouch = (glfwGetKey(window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS) ||
+                 (glfwGetKey(window, GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS);
+        descend = crouch;
     }
 
     if (glm::dot(wish, wish) > 1e-6f) {
@@ -180,8 +215,16 @@ void PlayerController::update(GLFWwindow *window, const world::World &world, con
                isWaterAt(world, feetPos_ + glm::vec3(0.0f, 1.45f, 0.0f));
     const bool onIce = grounded_ && !inWater_ && isOnIce(world, feetPos_);
 
+    if (crouch) {
+        sprint = false;
+    }
+    crouching_ = crouch;
+    sprinting_ = allowSprint && sprint && !inWater_ && hasWish;
+    const float moveModifier = (!inWater_ && sprinting_) ? kSprintMultiplier
+                              : (!inWater_ && crouch) ? kCrouchMultiplier
+                                                      : 1.0f;
     const float maxSpeed = (inWater_ ? kSwimSpeed : (grounded_ ? kGroundSpeed : kAirSpeed)) *
-                           ((sprint && !inWater_) ? 1.55f : 1.0f);
+                           moveModifier;
     const float accel =
         inWater_ ? kSwimAccel : (grounded_ ? (onIce ? kIceAccel : kGroundAccel) : kAirAccel);
     const float targetX = wish.x * maxSpeed;
@@ -219,12 +262,19 @@ void PlayerController::update(GLFWwindow *window, const world::World &world, con
             grounded_ = false;
         }
         velocity_.y -= kGravity * dt;
-        velocity_.y = std::max(velocity_.y, -55.0f);
+        velocity_.y = std::max(velocity_.y, -70.0f);
     }
+    const bool wasGrounded = grounded_;
+    const float preVerticalVelocity = velocity_.y;
     moveAxis(world, 0, velocity_.x * dt);
     grounded_ = false; // Recomputed by vertical collision resolution below.
     moveAxis(world, 1, velocity_.y * dt);
     moveAxis(world, 2, velocity_.z * dt);
+
+    landedImpactSpeed_ = 0.0f;
+    if (!inWater_ && !wasGrounded && grounded_ && preVerticalVelocity < 0.0f) {
+        landedImpactSpeed_ = -preVerticalVelocity;
+    }
 }
 
 } // namespace game

@@ -49,6 +49,7 @@ class HudRenderer {
                   const game::Inventory::Slot &craftOutput,
                   const std::string &carryingName, const std::string &selectedName,
                   const std::string &lookedAtText, const std::string &modeText,
+                  float health01, float sprintStamina01,
                   const std::string &compassText, const std::string &coordText,
                   const voxel::BlockRegistry &registry, const TextureAtlas &atlas);
 

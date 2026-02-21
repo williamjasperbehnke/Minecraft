@@ -62,6 +62,7 @@ add_library(voxel_lib
   src/game/CraftingSystem.cpp
   src/game/GameRules.cpp
   src/game/PlayerController.cpp
+  src/game/Player.cpp
   src/game/Recipe.cpp
   src/game/ItemDropSystem.cpp
   src/game/Inventory.cpp
@@ -115,6 +116,7 @@ if(CLANG_TIDY_EXE)
             src/game/CraftingSystem.cpp
             src/game/GameRules.cpp
             src/game/PlayerController.cpp
+            src/game/Player.cpp
             src/game/Recipe.cpp
             src/game/ItemDropSystem.cpp
             src/game/Inventory.cpp
@@ -148,6 +150,7 @@ if(CLANG_FORMAT_EXE)
             ${CMAKE_SOURCE_DIR}/include/game/Inventory.hpp
             ${CMAKE_SOURCE_DIR}/include/game/ItemDropSystem.hpp
             ${CMAKE_SOURCE_DIR}/include/game/PlayerController.hpp
+            ${CMAKE_SOURCE_DIR}/include/game/Player.hpp
             ${CMAKE_SOURCE_DIR}/include/game/Recipe.hpp
             ${CMAKE_SOURCE_DIR}/include/voxel/Block.hpp
             ${CMAKE_SOURCE_DIR}/include/voxel/Chunk.hpp
@@ -170,6 +173,7 @@ if(CLANG_FORMAT_EXE)
             ${CMAKE_SOURCE_DIR}/src/game/Inventory.cpp
             ${CMAKE_SOURCE_DIR}/src/game/ItemDropSystem.cpp
             ${CMAKE_SOURCE_DIR}/src/game/PlayerController.cpp
+            ${CMAKE_SOURCE_DIR}/src/game/Player.cpp
             ${CMAKE_SOURCE_DIR}/src/game/Recipe.cpp
             ${CMAKE_SOURCE_DIR}/src/main.cpp
             ${CMAKE_SOURCE_DIR}/src/voxel/Chunk.cpp
@@ -199,6 +203,7 @@ if(CLANG_FORMAT_EXE)
             ${CMAKE_SOURCE_DIR}/include/game/Inventory.hpp
             ${CMAKE_SOURCE_DIR}/include/game/ItemDropSystem.hpp
             ${CMAKE_SOURCE_DIR}/include/game/PlayerController.hpp
+            ${CMAKE_SOURCE_DIR}/include/game/Player.hpp
             ${CMAKE_SOURCE_DIR}/include/game/Recipe.hpp
             ${CMAKE_SOURCE_DIR}/include/voxel/Block.hpp
             ${CMAKE_SOURCE_DIR}/include/voxel/Chunk.hpp
@@ -221,6 +226,7 @@ if(CLANG_FORMAT_EXE)
             ${CMAKE_SOURCE_DIR}/src/game/Inventory.cpp
             ${CMAKE_SOURCE_DIR}/src/game/ItemDropSystem.cpp
             ${CMAKE_SOURCE_DIR}/src/game/PlayerController.cpp
+            ${CMAKE_SOURCE_DIR}/src/game/Player.cpp
             ${CMAKE_SOURCE_DIR}/src/game/Recipe.cpp
             ${CMAKE_SOURCE_DIR}/src/main.cpp
             ${CMAKE_SOURCE_DIR}/src/voxel/Chunk.cpp

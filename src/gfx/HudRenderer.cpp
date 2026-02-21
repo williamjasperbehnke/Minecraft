@@ -614,6 +614,7 @@ void HudRenderer::render2D(int width, int height, int selectedIndex,
                            const game::Inventory::Slot &craftOutput,
                            const std::string &carryingName, const std::string &selectedName,
                            const std::string &lookedAtText, const std::string &modeText,
+                           float health01, float sprintStamina01,
                            const std::string &compassText, const std::string &coordText,
                            const voxel::BlockRegistry &registry, const TextureAtlas &atlas) {
     init2D();
@@ -793,6 +794,46 @@ void HudRenderer::render2D(int width, int height, int selectedIndex,
         static_cast<float>(hotbar.size()) * slot + static_cast<float>(hotbar.size() - 1) * gap;
     const float x0 = cx - totalW * 0.5f;
     const float y0 = height - 90.0f * uiScale;
+    const float staminaFill = glm::clamp(sprintStamina01, 0.0f, 1.0f);
+    const float healthFill = glm::clamp(health01, 0.0f, 1.0f);
+    const float centerGap = 6.0f * uiScale;
+    const float sideBarW = (totalW - centerGap) * 0.5f;
+    const float staminaBarH = 8.0f * uiScale;
+    const float healthBarX = x0;
+    const float staminaBarX = x0 + sideBarW + centerGap;
+    const float staminaBarY = y0 - (16.0f * uiScale);
+
+    // Health bar
+    drawRect(healthBarX - 1.0f, staminaBarY - 1.0f, sideBarW + 2.0f, staminaBarH + 2.0f,
+             0.02f, 0.03f, 0.04f, 0.95f);
+    drawRect(healthBarX, staminaBarY, sideBarW, staminaBarH, 0.13f, 0.06f, 0.06f, 0.92f);
+    if (healthFill > 0.0f) {
+        const float fillW = sideBarW * healthFill;
+        drawRect(healthBarX, staminaBarY, fillW, staminaBarH, 0.82f, 0.19f, 0.16f, 0.98f);
+        drawRect(healthBarX, staminaBarY, fillW, staminaBarH * 0.45f, 0.96f, 0.44f, 0.38f, 0.74f);
+    }
+    const int healthPct = static_cast<int>(std::round(healthFill * 100.0f));
+    const std::string healthText = std::to_string(healthPct) + "%";
+    const float healthTextX = healthBarX + sideBarW * 0.5f - textWidthPx(healthText) * 0.5f;
+    const float healthTextY = staminaBarY - 11.0f;
+    drawText(healthTextX + 1.0f, healthTextY + 1.0f, healthText, 12, 8, 8, 220);
+    drawText(healthTextX, healthTextY, healthText, 248, 206, 202, 255);
+
+    // Stamina bar
+    drawRect(staminaBarX - 1.0f, staminaBarY - 1.0f, sideBarW + 2.0f, staminaBarH + 2.0f, 0.02f,
+             0.03f, 0.04f, 0.95f);
+    drawRect(staminaBarX, staminaBarY, sideBarW, staminaBarH, 0.14f, 0.10f, 0.06f, 0.92f);
+    if (staminaFill > 0.0f) {
+        const float fillW = sideBarW * staminaFill;
+        drawRect(staminaBarX, staminaBarY, fillW, staminaBarH, 0.88f, 0.54f, 0.12f, 0.98f);
+        drawRect(staminaBarX, staminaBarY, fillW, staminaBarH * 0.45f, 1.00f, 0.78f, 0.28f, 0.78f);
+    }
+    const int staminaPct = static_cast<int>(std::round(staminaFill * 100.0f));
+    const std::string staminaText = std::to_string(staminaPct) + "%";
+    const float staminaTextX = staminaBarX + sideBarW * 0.5f - textWidthPx(staminaText) * 0.5f;
+    const float staminaTextY = staminaBarY - 11.0f;
+    drawText(staminaTextX + 1.0f, staminaTextY + 1.0f, staminaText, 12, 10, 8, 220);
+    drawText(staminaTextX, staminaTextY, staminaText, 245, 224, 178, 255);
     drawRect(x0 - 8.0f * uiScale, y0 - 6.0f * uiScale, totalW + 16.0f * uiScale,
              slot + 12.0f * uiScale, 0.03f, 0.04f, 0.05f, 0.58f);
 
@@ -1746,14 +1787,23 @@ void HudRenderer::render2D(int width, int height, int selectedIndex,
     // Context info panel (top-left): looked block, mode, compass, and player coordinates.
     const float panelX = 14.0f * uiScale;
     const float panelY = 14.0f * uiScale;
-    const float panelW = 280.0f * uiScale;
-    const float panelH = 66.0f * uiScale;
+    const float panelPadX = 8.0f;
+    const float panelPadY = 8.0f;
+    const float lineStep = 14.0f;
+    const float textH = 8.0f;
+    const float maxLineW = std::max(std::max(textWidthPx(lookedAtText), textWidthPx(modeText)),
+                                    std::max(textWidthPx(compassText), textWidthPx(coordText)));
+    const float panelW = maxLineW + panelPadX * 2.0f;
+    const float panelH = panelPadY * 2.0f + textH + lineStep * 3.0f;
     drawRect(panelX, panelY, panelW, panelH, 0.03f, 0.04f, 0.05f, 0.58f);
-    drawText(panelX + 8.0f, panelY + 8.0f, lookedAtText, 235, 239, 247, 255);
-    drawText(panelX + 8.0f, panelY + 22.0f, modeText, 216, 222, 236, 255);
-    drawText(panelX + 8.0f, panelY + 36.0f, compassText, 216, 222, 236, 255);
-    drawText(panelX + 8.0f, panelY + 50.0f, coordText, 216, 222, 236, 255);
-
+    drawText(panelX + panelPadX, panelY + panelPadY + lineStep * 0.0f, lookedAtText, 235, 239, 247,
+             255);
+    drawText(panelX + panelPadX, panelY + panelPadY + lineStep * 1.0f, modeText, 216, 222, 236,
+             255);
+    drawText(panelX + panelPadX, panelY + panelPadY + lineStep * 2.0f, compassText, 216, 222, 236,
+             255);
+    drawText(panelX + panelPadX, panelY + panelPadY + lineStep * 3.0f, coordText, 216, 222, 236,
+             255);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glDisable(GL_DEPTH_TEST);

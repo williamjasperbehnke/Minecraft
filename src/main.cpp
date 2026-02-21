@@ -6,7 +6,7 @@
 #include "game/GameRules.hpp"
 #include "game/Inventory.hpp"
 #include "game/ItemDropSystem.hpp"
-#include "game/PlayerController.hpp"
+#include "game/Player.hpp"
 #include "game/SmeltingSystem.hpp"
 #include "gfx/HudRenderer.hpp"
 #include "gfx/Shader.hpp"
@@ -1956,7 +1956,7 @@ int main() {
             bool inventoryVisible = false;
             bool pauseMenuOpen = false;
             bool ghostMode = true;
-            game::PlayerController playerController;
+            game::Player player;
             game::Inventory inventory;
             game::CraftingSystem craftingSystem;
             game::CraftingSystem::State crafting;
@@ -2146,8 +2146,8 @@ int main() {
                     const int swz = static_cast<int>(std::floor(loadedCameraPos.z));
                     if (world.isChunkLoadedAt(swx, swz)) {
                         // Restore exact saved position on reload (no collision adjustment).
-                        playerController.setFromCamera(loadedCameraPos, world, false);
-                        camera.setPosition(playerController.cameraPosition());
+                        player.setFromCamera(loadedCameraPos, world, false);
+                        camera.setPosition(player.cameraPosition());
                         loadedCameraPos = camera.position();
                         pendingSpawnResolve = false;
                     }
@@ -2159,8 +2159,8 @@ int main() {
                     }
                 } else {
                     if (!pendingSpawnResolve) {
-                        playerController.update(window, world, camera, dt, !blockInput);
-                        camera.setPosition(playerController.cameraPosition());
+                        player.update(window, world, camera, dt, !blockInput);
+                        camera.setPosition(player.cameraPosition());
                     }
                 }
 
@@ -2241,9 +2241,9 @@ int main() {
                     !pauseMenuOpen) {
                     ghostMode = !ghostMode;
                     if (!ghostMode) {
-                        playerController.setFromCamera(camera.position(), world);
+                        player.setFromCamera(camera.position(), world);
                     } else {
-                        camera.setPosition(playerController.cameraPosition());
+                        camera.setPosition(player.cameraPosition());
                     }
                 }
                 prevModeToggle = modeToggleDown;
@@ -3842,8 +3842,8 @@ int main() {
                 const float horizDist = glm::length(stepDelta);
                 const float horizSpeed = horizDist / std::max(dt, 1e-4f);
                 if (!ghostMode && !blockInput) {
-                    const bool groundedNow = playerController.grounded();
-                    const bool inWaterNow = playerController.inWater();
+                    const bool groundedNow = player.grounded();
+                    const bool inWaterNow = player.inWater();
 
                     if (groundedNow && !inWaterNow) {
                         stepDistanceAccum += horizDist;
@@ -4253,9 +4253,15 @@ int main() {
                     }
                     const voxel::BlockId selectedPlaceBlock =
                         inventory.hotbarSlot(selectedBlockIndex).id;
-                    std::string modeText = ghostMode ? "Mode: Ghost" : "Mode: Grounded";
-                    if (!ghostMode && playerController.inWater()) {
-                        modeText = "Mode: Swimming";
+                    std::string modeText = "Walking";
+                    if (ghostMode) {
+                        modeText = "Mode: Ghost";
+                    } else if (player.inWater()) {
+                        modeText = "Swimming";
+                    } else if (player.sprinting()) {
+                        modeText = "Sprinting";
+                    } else if (player.crouching()) {
+                        modeText = "Crouching";
                     }
                     const std::string compassText = compassTextFromForward(camera.forward());
                     const int bx = static_cast<int>(std::floor(pos.x));
@@ -4286,7 +4292,8 @@ int main() {
                                  (selectedPlaceBlock == voxel::AIR)
                                      ? "Empty Slot"
                                      : game::blockName(selectedPlaceBlock),
-                                 lookedAt, modeText, compassText, coord.str(), hudRegistry, atlas);
+                                 lookedAt, modeText, player.health01(), player.sprintStamina01(),
+                                 compassText, coord.str(), hudRegistry, atlas);
                 }
                 if (pauseMenuOpen) {
                     double pmx = 0.0;
