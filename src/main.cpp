@@ -1226,8 +1226,7 @@ MapOverlayLayout computeMapOverlayLayout(int width, int height, float zoom) {
     const float gridY = panelY + innerPad + 18.0f;
     const float gridW = panelW - innerPad * 2.0f;
     const float gridH = panelH - innerPad * 2.0f - 24.0f;
-    // Keep world-map sampling density bounded; very small cells create too many quads.
-    const float cell = std::clamp(4.0f * zoom, 4.0f, 14.0f);
+    const float cell = std::clamp(4.0f * zoom, 2.0f, 14.0f);
     return {panelX, panelY, panelW, panelH, gridX, gridY, gridW, gridH, cell};
 }
 

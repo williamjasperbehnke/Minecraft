@@ -617,8 +617,7 @@ void HudRenderer::renderMapOverlay(int width, int height, const game::MapSystem 
     const float gridY = panelY + innerPad + 18.0f;
     const float gridW = panelW - innerPad * 2.0f;
     const float gridH = panelH - innerPad * 2.0f - 24.0f;
-    // Keep world-map sampling density bounded; very small cells create too many quads.
-    const float cell = std::clamp(4.0f * zoom, 4.0f, 14.0f);
+    const float cell = std::clamp(4.0f * zoom, 2.0f, 14.0f);
     const int drawCols = std::max(1, static_cast<int>(std::ceil(gridW / cell)));
     const int drawRows = std::max(1, static_cast<int>(std::ceil(gridH / cell)));
     const float centerIx = (static_cast<float>(drawCols) - 1.0f) * 0.5f;
@@ -774,6 +773,9 @@ void HudRenderer::renderMapOverlay(int width, int height, const game::MapSystem 
                              9.0f;
 
     drawText(panelX + 10.0f, panelY + 10.0f, "World Map", 240, 244, 252, 255);
+    const std::string zoomText =
+        "Zoom: " + std::to_string(static_cast<int>(std::round(zoom * 100.0f))) + "%";
+    drawText(panelX + 96.0f, panelY + 10.0f, zoomText, 208, 216, 232, 255);
     drawText(panelX + panelW - 196.0f, panelY + 10.0f, "M: Close  +/-: Zoom", 192, 200, 214, 255);
 
     if (waypointEditorOpen) {

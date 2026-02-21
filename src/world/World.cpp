@@ -10,6 +10,11 @@
 namespace world {
 namespace {
 
+constexpr unsigned int kMinWorkerThreads = 2u;
+constexpr unsigned int kMaxWorkerThreads = 8u;
+constexpr int kMaxUnloadsPerUpdate = 2;
+constexpr int kMaxUploadsPerFrame = 2;
+
 int chunkDistance(ChunkCoord a, ChunkCoord b) {
     return std::max(std::abs(a.x - b.x), std::abs(a.z - b.z));
 }
@@ -32,7 +37,14 @@ World::FurnaceCoordKey makeFurnaceKey(int x, int y, int z) {
 
 World::World(const gfx::TextureAtlas &atlas, std::filesystem::path saveRoot, std::uint32_t seed)
     : atlas_(atlas), gen_(seed), io_(std::move(saveRoot), WorldGen::kGeneratorVersion) {
-    worker_ = std::thread([this]() { workerLoop(); });
+    const unsigned int hardwareThreads = std::max(1u, std::thread::hardware_concurrency());
+    const unsigned int workerCount =
+        std::clamp(hardwareThreads > 1 ? hardwareThreads - 1 : 1u, kMinWorkerThreads,
+                   kMaxWorkerThreads);
+    workers_.reserve(workerCount);
+    for (unsigned int i = 0; i < workerCount; ++i) {
+        workers_.emplace_back([this]() { workerLoop(); });
+    }
 }
 
 World::~World() {
@@ -40,8 +52,10 @@ World::~World() {
     workerJobs_.stop();
     completed_.stop();
 
-    if (worker_.joinable()) {
-        worker_.join();
+    for (std::thread &t : workers_) {
+        if (t.joinable()) {
+            t.join();
+        }
     }
 
     std::lock_guard<std::mutex> lock(chunksMutex_);
@@ -187,6 +201,7 @@ void World::setStreamingRadii(int loadRadius, int unloadRadius) {
     std::lock_guard<std::mutex> lock(chunksMutex_);
     loadRadius_ = std::clamp(loadRadius, 2, 16);
     unloadRadius_ = std::clamp(std::max(unloadRadius, loadRadius_ + 1), 3, 20);
+    streamDirty_.store(true, std::memory_order_relaxed);
 }
 
 void World::setSmoothLighting(bool enabled) {
@@ -235,7 +250,15 @@ std::vector<ChunkCoord> World::loadedChunkCoords() const {
 void World::updateStream(const glm::vec3 &playerPos) {
     const int pChunkX = floorDiv(static_cast<int>(std::floor(playerPos.x)), voxel::Chunk::SX);
     const int pChunkZ = floorDiv(static_cast<int>(std::floor(playerPos.z)), voxel::Chunk::SZ);
-    playerChunkPacked_.store(packChunkCoord(pChunkX, pChunkZ), std::memory_order_relaxed);
+    const std::int64_t packed = packChunkCoord(pChunkX, pChunkZ);
+    playerChunkPacked_.store(packed, std::memory_order_relaxed);
+    const bool streamDirty = streamDirty_.load(std::memory_order_relaxed);
+    const std::int64_t lastPacked = lastStreamChunkPacked_.load(std::memory_order_relaxed);
+    if (!streamDirty && lastPacked == packed) {
+        return;
+    }
+    lastStreamChunkPacked_.store(packed, std::memory_order_relaxed);
+    streamDirty_.store(false, std::memory_order_relaxed);
 
     std::lock_guard<std::mutex> lock(chunksMutex_);
 
@@ -244,6 +267,14 @@ void World::updateStream(const glm::vec3 &playerPos) {
             const ChunkCoord cc{pChunkX + dx, pChunkZ + dz};
             enqueueLoadIfNeeded(cc);
         }
+    }
+
+    // Ensure loaded chunks without mesh are eventually meshed.
+    for (const auto &[cc, entry] : chunks_) {
+        if (!entry.chunk || entry.mesh) {
+            continue;
+        }
+        enqueueRemesh(cc, false);
     }
 
     std::vector<ChunkCoord> toUnload;
@@ -258,7 +289,22 @@ void World::updateStream(const glm::vec3 &playerPos) {
         }
     }
 
+    auto enqueueNeighborRingRemesh = [this](ChunkCoord cc) {
+        enqueueRemesh(ChunkCoord{cc.x + 1, cc.z}, true);
+        enqueueRemesh(ChunkCoord{cc.x - 1, cc.z}, true);
+        enqueueRemesh(ChunkCoord{cc.x, cc.z + 1}, true);
+        enqueueRemesh(ChunkCoord{cc.x, cc.z - 1}, true);
+        enqueueRemesh(ChunkCoord{cc.x + 1, cc.z + 1}, true);
+        enqueueRemesh(ChunkCoord{cc.x + 1, cc.z - 1}, true);
+        enqueueRemesh(ChunkCoord{cc.x - 1, cc.z + 1}, true);
+        enqueueRemesh(ChunkCoord{cc.x - 1, cc.z - 1}, true);
+    };
+
+    int unloadsProcessed = 0;
     for (const ChunkCoord cc : toUnload) {
+        if (unloadsProcessed >= kMaxUnloadsPerUpdate) {
+            break;
+        }
         auto it = chunks_.find(cc);
         if (it == chunks_.end()) {
             continue;
@@ -301,6 +347,17 @@ void World::updateStream(const glm::vec3 &playerPos) {
         pendingRemesh_.erase(cc);
 
         // Unloading a chunk exposes border faces on neighboring chunks.
+        enqueueNeighborRingRemesh(cc);
+        ++unloadsProcessed;
+    }
+    if (unloadsProcessed < static_cast<int>(toUnload.size())) {
+        // Continue streaming work next frame even if player remains in the same chunk.
+        streamDirty_.store(true, std::memory_order_relaxed);
+    }
+}
+
+void World::uploadReadyMeshes() {
+    auto enqueueNeighborRingRemesh = [this](ChunkCoord cc) {
         enqueueRemesh(ChunkCoord{cc.x + 1, cc.z}, true);
         enqueueRemesh(ChunkCoord{cc.x - 1, cc.z}, true);
         enqueueRemesh(ChunkCoord{cc.x, cc.z + 1}, true);
@@ -309,12 +366,11 @@ void World::updateStream(const glm::vec3 &playerPos) {
         enqueueRemesh(ChunkCoord{cc.x + 1, cc.z - 1}, true);
         enqueueRemesh(ChunkCoord{cc.x - 1, cc.z + 1}, true);
         enqueueRemesh(ChunkCoord{cc.x - 1, cc.z - 1}, true);
-    }
-}
+    };
 
-void World::uploadReadyMeshes() {
+    int uploadsThisFrame = 0;
     WorkerResult result;
-    while (completed_.tryPop(result)) {
+    while (uploadsThisFrame < kMaxUploadsPerFrame && completed_.tryPop(result)) {
         std::lock_guard<std::mutex> lock(chunksMutex_);
 
         // Drop stale load results for chunks that were unloaded before worker
@@ -322,6 +378,14 @@ void World::uploadReadyMeshes() {
         if (result.replaceChunk && chunks_.find(result.coord) == chunks_.end() &&
             pendingLoad_.find(result.coord) == pendingLoad_.end()) {
             continue;
+        }
+        // Drop stale remesh results for chunks that are no longer loaded.
+        if (!result.replaceChunk) {
+            const auto it = chunks_.find(result.coord);
+            if (it == chunks_.end() || !it->second.chunk) {
+                pendingRemesh_.erase(result.coord);
+                continue;
+            }
         }
 
         auto &entry = chunks_[result.coord];
@@ -332,14 +396,7 @@ void World::uploadReadyMeshes() {
             // path, so boundary face culling can use available neighbors.
             enqueueRemesh(result.coord, true);
             // New chunk may occlude neighbor border faces.
-            enqueueRemesh(ChunkCoord{result.coord.x + 1, result.coord.z}, true);
-            enqueueRemesh(ChunkCoord{result.coord.x - 1, result.coord.z}, true);
-            enqueueRemesh(ChunkCoord{result.coord.x, result.coord.z + 1}, true);
-            enqueueRemesh(ChunkCoord{result.coord.x, result.coord.z - 1}, true);
-            enqueueRemesh(ChunkCoord{result.coord.x + 1, result.coord.z + 1}, true);
-            enqueueRemesh(ChunkCoord{result.coord.x + 1, result.coord.z - 1}, true);
-            enqueueRemesh(ChunkCoord{result.coord.x - 1, result.coord.z + 1}, true);
-            enqueueRemesh(ChunkCoord{result.coord.x - 1, result.coord.z - 1}, true);
+            enqueueNeighborRingRemesh(result.coord);
         } else {
             pendingRemesh_.erase(result.coord);
         }
@@ -349,6 +406,7 @@ void World::uploadReadyMeshes() {
         }
         entry.mesh->upload(result.mesh);
         entry.triangleCount = static_cast<int>(result.mesh.indices.size() / 3);
+        ++uploadsThisFrame;
     }
 }
 

@@ -17,6 +17,7 @@
 #include <filesystem>
 #include <memory>
 #include <mutex>
+#include <limits>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -121,6 +122,8 @@ class World {
     int loadRadius_ = 8;
     int unloadRadius_ = 10;
     std::atomic<std::int64_t> playerChunkPacked_{0};
+    std::atomic<std::int64_t> lastStreamChunkPacked_{std::numeric_limits<std::int64_t>::min()};
+    std::atomic<bool> streamDirty_{true};
 
     const gfx::TextureAtlas &atlas_;
     voxel::BlockRegistry blockRegistry_;
@@ -137,7 +140,7 @@ class World {
     std::unordered_set<ChunkCoord, ChunkCoordHash> pendingRemesh_;
     std::unordered_map<FurnaceCoordKey, FurnaceState, FurnaceCoordKeyHash> furnaceStates_;
 
-    std::thread worker_;
+    std::vector<std::thread> workers_;
     std::atomic<bool> running_ = true;
     std::atomic<bool> smoothLighting_{false};
 };

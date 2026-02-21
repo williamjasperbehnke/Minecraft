@@ -144,6 +144,21 @@ gfx::CpuMesh ChunkMesher::buildFaceCulled(const Chunk &chunk, const gfx::Texture
         }
         return AIR;
     };
+    auto hasNeighborChunkFor = [&](int x, int z) -> bool {
+        if (x < 0) {
+            return neighbors.nx != nullptr;
+        }
+        if (x >= Chunk::SX) {
+            return neighbors.px != nullptr;
+        }
+        if (z < 0) {
+            return neighbors.nz != nullptr;
+        }
+        if (z >= Chunk::SZ) {
+            return neighbors.pz != nullptr;
+        }
+        return true;
+    };
 
     LightingSolver::NeighborChunks lightNeighbors{neighbors.px,   neighbors.nx,   neighbors.pz,
                                                   neighbors.nz,   neighbors.pxpz, neighbors.pxnz,
@@ -199,14 +214,16 @@ gfx::CpuMesh ChunkMesher::buildFaceCulled(const Chunk &chunk, const gfx::Texture
                     continue;
                 }
 
-                if (isFaceExposed(registry, id, neighborAt(x + 1, y, z))) {
+                if (hasNeighborChunkFor(x + 1, z) &&
+                    isFaceExposed(registry, id, neighborAt(x + 1, y, z))) {
                     const float sky = lighting.faceSkyLight(x + 1, y, z, 0.86f);
                     const float block = lighting.faceBlockLight(x + 1, y, z);
                     appendQuad(out, {wx + 1, wy, wz}, {wx + 1, wy, wz + 1},
                                {wx + 1, wy + 1, wz + 1}, {wx + 1, wy + 1, wz}, {1, 0, 0},
                                (furnace && front.x == 1) ? furnaceFrontUv : sideUv, sky, block);
                 }
-                if (isFaceExposed(registry, id, neighborAt(x - 1, y, z))) {
+                if (hasNeighborChunkFor(x - 1, z) &&
+                    isFaceExposed(registry, id, neighborAt(x - 1, y, z))) {
                     const float sky = lighting.faceSkyLight(x - 1, y, z, 0.86f);
                     const float block = lighting.faceBlockLight(x - 1, y, z);
                     appendQuad(out, {wx, wy, wz + 1}, {wx, wy, wz}, {wx, wy + 1, wz},
@@ -221,13 +238,14 @@ gfx::CpuMesh ChunkMesher::buildFaceCulled(const Chunk &chunk, const gfx::Texture
                                {wx + 1, wy + 1, wz + 1}, {wx, wy + 1, wz + 1}, {0, 1, 0},
                                atlas.uvRect(d.topTile), sky, block);
                 }
-                if (isFaceExposed(registry, id, neighborAt(x, y - 1, z))) {
+                if (y > 0 && isFaceExposed(registry, id, neighborAt(x, y - 1, z))) {
                     const float sky = lighting.faceSkyLight(x, y - 1, z, 0.56f);
                     const float block = lighting.faceBlockLight(x, y - 1, z);
                     appendQuad(out, {wx, wy, wz + 1}, {wx + 1, wy, wz + 1}, {wx + 1, wy, wz},
                                {wx, wy, wz}, {0, -1, 0}, atlas.uvRect(d.bottomTile), sky, block);
                 }
-                if (isFaceExposed(registry, id, neighborAt(x, y, z + 1))) {
+                if (hasNeighborChunkFor(x, z + 1) &&
+                    isFaceExposed(registry, id, neighborAt(x, y, z + 1))) {
                     const float sky = lighting.faceSkyLight(x, y, z + 1, 0.90f);
                     const float block = lighting.faceBlockLight(x, y, z + 1);
                     appendQuad(out, {wx + 1, wy, wz + 1}, {wx, wy, wz + 1}, {wx, wy + 1, wz + 1},
@@ -235,7 +253,8 @@ gfx::CpuMesh ChunkMesher::buildFaceCulled(const Chunk &chunk, const gfx::Texture
                                (furnace && front.y == 1) ? furnaceFrontUv : sideUv,
                                sky, block);
                 }
-                if (isFaceExposed(registry, id, neighborAt(x, y, z - 1))) {
+                if (hasNeighborChunkFor(x, z - 1) &&
+                    isFaceExposed(registry, id, neighborAt(x, y, z - 1))) {
                     const float sky = lighting.faceSkyLight(x, y, z - 1, 0.90f);
                     const float block = lighting.faceBlockLight(x, y, z - 1);
                     appendQuad(out, {wx, wy, wz}, {wx + 1, wy, wz}, {wx + 1, wy + 1, wz},
