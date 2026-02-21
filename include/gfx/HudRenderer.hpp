@@ -2,6 +2,7 @@
 
 #include "game/CraftingSystem.hpp"
 #include "game/Inventory.hpp"
+#include "game/SmeltingSystem.hpp"
 #include "gfx/TextureAtlas.hpp"
 #include "voxel/Block.hpp"
 
@@ -32,8 +33,13 @@ class HudRenderer {
                   int hoveredSlotIndex, float hudScale,
                   const std::array<game::Inventory::Slot, game::CraftingSystem::kInputCount>
                       &craftInput,
-                  int craftingGridSize, bool usingCraftingTable,
+                  int craftingGridSize, bool usingCraftingTable, bool usingFurnace,
+                  const game::Inventory::Slot &smeltInput,
+                  const game::Inventory::Slot &smeltFuel,
+                  const game::Inventory::Slot &smeltOutput, float smeltProgress01,
+                  float smeltFuel01,
                   bool showRecipeMenu, const std::vector<game::CraftingSystem::RecipeInfo> &recipes,
+                  const std::vector<game::SmeltingSystem::Recipe> &smeltingRecipes,
                   const std::vector<bool> &recipeCraftable,
                   float recipeScroll, float uiTimeSeconds, const std::string &recipeSearch,
                   bool showCreativeMenu, const std::vector<voxel::BlockId> &creativeItems,

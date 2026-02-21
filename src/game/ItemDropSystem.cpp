@@ -207,7 +207,7 @@ void ItemDropSystem::update(const world::World &world, const glm::vec3 &playerPo
         const float horiz2 = d.x * d.x + d.z * d.z;
         if (it.pickupDelay <= 0.0f && horiz2 <= kPickupRadius * kPickupRadius &&
             std::abs(d.y) <= 1.9f) {
-            pendingPickups_.push_back({it.id, 1});
+            pendingPickups_.push_back(Pickup{it.id, 1, it.pos});
             items_[i] = items_.back();
             items_.pop_back();
             continue;
@@ -216,7 +216,7 @@ void ItemDropSystem::update(const world::World &world, const glm::vec3 &playerPo
     }
 }
 
-std::vector<std::pair<voxel::BlockId, int>> ItemDropSystem::consumePickups() {
+std::vector<ItemDropSystem::Pickup> ItemDropSystem::consumePickups() {
     auto out = std::move(pendingPickups_);
     pendingPickups_.clear();
     return out;
@@ -265,6 +265,8 @@ void ItemDropSystem::render(const glm::mat4 &proj, const glm::mat4 &view,
         const glm::vec4 uvSide = atlas.uvRect(def.sideTile);
         const glm::vec4 uvTop = atlas.uvRect(def.topTile);
         const glm::vec4 uvBottom = atlas.uvRect(def.bottomTile);
+        const bool furnaceLike = voxel::isFurnace(item.id);
+        const glm::vec4 uvFront = furnaceLike ? atlas.uvRect(voxel::TILE_FURNACE_FRONT) : uvSide;
         const float bob = 0.08f * std::sin(item.age * 3.8f);
         const glm::vec3 center = item.pos + glm::vec3(0.0f, 0.23f + bob, 0.0f);
         const float ang = item.age * 1.8f;
@@ -273,7 +275,9 @@ void ItemDropSystem::render(const glm::mat4 &proj, const glm::mat4 &view,
         model = glm::rotate(model, ang, glm::vec3(0.0f, 1.0f, 0.0f));
 
         const bool plantItem = (item.id == voxel::STICK || item.id == voxel::TALL_GRASS ||
-                                item.id == voxel::FLOWER || voxel::isTorch(item.id));
+                                item.id == voxel::FLOWER || item.id == voxel::IRON_INGOT ||
+                                item.id == voxel::COPPER_INGOT || item.id == voxel::GOLD_INGOT ||
+                                voxel::isTorch(item.id));
         if (plantItem) {
             appendPlantSprite(model, uvSide);
             continue;
@@ -293,7 +297,7 @@ void ItemDropSystem::render(const glm::mat4 &proj, const glm::mat4 &view,
         const glm::vec3 p110 = tp(h, h, -h);
         const glm::vec3 p111 = tp(h, h, h);
 
-        appendQuad(p001, p101, p111, p011, uvSide, 0.92f);   // +Z
+        appendQuad(p001, p101, p111, p011, uvFront, 0.92f);  // +Z (furnace front)
         appendQuad(p100, p000, p010, p110, uvSide, 0.75f);   // -Z
         appendQuad(p000, p001, p011, p010, uvSide, 0.82f);   // -X
         appendQuad(p101, p100, p110, p111, uvSide, 0.88f);   // +X

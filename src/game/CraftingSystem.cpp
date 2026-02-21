@@ -72,6 +72,25 @@ CraftingSystem::CraftingSystem() {
                {1, {voxel::SAND, 1, false}},
                {2, {voxel::SAND, 1, false}},
                {3, {voxel::SAND, 1, false}}});
+
+    addShaped({{0, {voxel::STONE, false, 1}},
+               {1, {voxel::STONE, false, 1}},
+               {2, {voxel::STONE, false, 1}},
+               {3, {voxel::STONE, false, 1}},
+               {5, {voxel::STONE, false, 1}},
+               {6, {voxel::STONE, false, 1}},
+               {7, {voxel::STONE, false, 1}},
+               {8, {voxel::STONE, false, 1}}},
+              voxel::FURNACE, 1, "Furnace", 3, {{voxel::STONE, 8, false}},
+              {0, 1, 2, 3, 5, 6, 7, 8},
+              {{0, {voxel::STONE, 1, false}},
+               {1, {voxel::STONE, 1, false}},
+               {2, {voxel::STONE, 1, false}},
+               {3, {voxel::STONE, 1, false}},
+               {5, {voxel::STONE, 1, false}},
+               {6, {voxel::STONE, 1, false}},
+               {7, {voxel::STONE, 1, false}},
+               {8, {voxel::STONE, 1, false}}});
 }
 
 int CraftingSystem::activeInputCount(int gridSize) {

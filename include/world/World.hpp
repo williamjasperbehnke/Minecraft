@@ -7,6 +7,7 @@
 #include "voxel/Chunk.hpp"
 #include "voxel/ChunkIO.hpp"
 #include "world/ChunkCoord.hpp"
+#include "world/FurnaceState.hpp"
 #include "world/WorldGen.hpp"
 
 #include <glm/vec3.hpp>
@@ -33,6 +34,24 @@ struct WorldDebugStats {
 
 class World {
   public:
+    struct FurnaceCoordKey {
+        int x = 0;
+        int y = 0;
+        int z = 0;
+        bool operator==(const FurnaceCoordKey &other) const {
+            return x == other.x && y == other.y && z == other.z;
+        }
+    };
+
+    struct FurnaceCoordKeyHash {
+        std::size_t operator()(const FurnaceCoordKey &k) const {
+            std::size_t h = static_cast<std::size_t>(static_cast<std::uint32_t>(k.x));
+            h = (h * 1315423911u) ^ static_cast<std::size_t>(static_cast<std::uint32_t>(k.y));
+            h = (h * 2654435761u) ^ static_cast<std::size_t>(static_cast<std::uint32_t>(k.z));
+            return h;
+        }
+    };
+
     World(const gfx::TextureAtlas &atlas, std::filesystem::path saveRoot,
           std::uint32_t seed = 1337u);
     ~World();
@@ -50,6 +69,10 @@ class World {
     bool isChunkLoadedAt(int wx, int wz) const;
     voxel::BlockId getBlock(int wx, int wy, int wz) const;
     bool setBlock(int wx, int wy, int wz, voxel::BlockId id);
+    bool getFurnaceState(int wx, int wy, int wz, FurnaceState &out) const;
+    void setFurnaceState(int wx, int wy, int wz, const FurnaceState &state);
+    void clearFurnaceState(int wx, int wy, int wz);
+    std::vector<glm::ivec3> loadedFurnacePositions() const;
 
     void setStreamingRadii(int loadRadius, int unloadRadius);
     void setSmoothLighting(bool enabled);
@@ -112,6 +135,7 @@ class World {
 
     std::unordered_set<ChunkCoord, ChunkCoordHash> pendingLoad_;
     std::unordered_set<ChunkCoord, ChunkCoordHash> pendingRemesh_;
+    std::unordered_map<FurnaceCoordKey, FurnaceState, FurnaceCoordKeyHash> furnaceStates_;
 
     std::thread worker_;
     std::atomic<bool> running_ = true;

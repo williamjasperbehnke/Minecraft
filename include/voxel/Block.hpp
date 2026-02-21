@@ -43,6 +43,20 @@ constexpr BlockId OAK_PLANKS = 32;
 constexpr BlockId SPRUCE_PLANKS = 33;
 constexpr BlockId BIRCH_PLANKS = 34;
 constexpr BlockId STICK = 35;
+constexpr BlockId FURNACE = 36;
+constexpr BlockId GLASS = 37;
+constexpr BlockId BRICKS = 38;
+constexpr BlockId IRON_INGOT = 39;
+constexpr BlockId COPPER_INGOT = 40;
+constexpr BlockId GOLD_INGOT = 41;
+constexpr BlockId FURNACE_POS_X = 42;
+constexpr BlockId FURNACE_NEG_X = 43;
+constexpr BlockId FURNACE_POS_Z = 44;
+constexpr BlockId FURNACE_NEG_Z = 45;
+constexpr BlockId LIT_FURNACE_POS_X = 46;
+constexpr BlockId LIT_FURNACE_NEG_X = 47;
+constexpr BlockId LIT_FURNACE_POS_Z = 48;
+constexpr BlockId LIT_FURNACE_NEG_Z = 49;
 
 inline bool isTorch(BlockId id) {
     return id == TORCH || id == TORCH_WALL_POS_X || id == TORCH_WALL_NEG_X ||
@@ -54,6 +68,60 @@ inline bool isWallTorch(BlockId id) {
            id == TORCH_WALL_NEG_Z;
 }
 
+inline bool isFurnace(BlockId id) {
+    return id == FURNACE || id == FURNACE_POS_X || id == FURNACE_NEG_X || id == FURNACE_POS_Z ||
+           id == FURNACE_NEG_Z || id == LIT_FURNACE_POS_X || id == LIT_FURNACE_NEG_X ||
+           id == LIT_FURNACE_POS_Z || id == LIT_FURNACE_NEG_Z;
+}
+
+inline bool isLitFurnace(BlockId id) {
+    return id == LIT_FURNACE_POS_X || id == LIT_FURNACE_NEG_X || id == LIT_FURNACE_POS_Z ||
+           id == LIT_FURNACE_NEG_Z;
+}
+
+inline BlockId toUnlitFurnace(BlockId id) {
+    switch (id) {
+    case LIT_FURNACE_POS_X:
+        return FURNACE_POS_X;
+    case LIT_FURNACE_NEG_X:
+        return FURNACE_NEG_X;
+    case LIT_FURNACE_POS_Z:
+        return FURNACE_POS_Z;
+    case LIT_FURNACE_NEG_Z:
+        return FURNACE_NEG_Z;
+    case FURNACE:
+        return FURNACE_NEG_Z;
+    default:
+        return id;
+    }
+}
+
+inline BlockId toLitFurnace(BlockId id) {
+    switch (id) {
+    case FURNACE_POS_X:
+        return LIT_FURNACE_POS_X;
+    case FURNACE_NEG_X:
+        return LIT_FURNACE_NEG_X;
+    case FURNACE_POS_Z:
+        return LIT_FURNACE_POS_Z;
+    case FURNACE_NEG_Z:
+    case FURNACE:
+        return LIT_FURNACE_NEG_Z;
+    default:
+        return id;
+    }
+}
+
+inline std::uint8_t emittedBlockLight(BlockId id) {
+    if (isTorch(id)) {
+        return 14;
+    }
+    if (isLitFurnace(id)) {
+        return 13;
+    }
+    return 0;
+}
+
 struct BlockDef {
     bool solid = false;
     bool transparent = true;
@@ -61,6 +129,21 @@ struct BlockDef {
     std::uint16_t topTile = 0;
     std::uint16_t bottomTile = 0;
 };
+
+// Shared atlas tile ids for furnace rendering across world/UI/item meshes.
+constexpr std::uint16_t TILE_FURNACE_FRONT = 49;
+constexpr std::uint16_t TILE_FURNACE_TOP_BOTTOM = 50;
+constexpr std::uint16_t TILE_FURNACE_SIDE = 56;
+constexpr std::uint16_t TILE_FURNACE_FRONT_LIT = 57;
+
+inline std::uint16_t furnaceFrontTile(bool lit) {
+    return lit ? TILE_FURNACE_FRONT_LIT : TILE_FURNACE_FRONT;
+}
+
+inline bool isFurnaceDef(const BlockDef &def) {
+    return def.sideTile == TILE_FURNACE_SIDE && def.topTile == TILE_FURNACE_TOP_BOTTOM &&
+           def.bottomTile == TILE_FURNACE_TOP_BOTTOM;
+}
 
 class BlockRegistry {
   public:
@@ -101,6 +184,29 @@ class BlockRegistry {
         defs_[SPRUCE_PLANKS] = {true, false, 46, 46, 46};
         defs_[BIRCH_PLANKS] = {true, false, 47, 47, 47};
         defs_[STICK] = {false, true, 48, 48, 48};
+        defs_[FURNACE] = {true, false, TILE_FURNACE_SIDE, TILE_FURNACE_TOP_BOTTOM,
+                          TILE_FURNACE_TOP_BOTTOM};
+        defs_[FURNACE_POS_X] = {true, false, TILE_FURNACE_SIDE, TILE_FURNACE_TOP_BOTTOM,
+                                TILE_FURNACE_TOP_BOTTOM};
+        defs_[FURNACE_NEG_X] = {true, false, TILE_FURNACE_SIDE, TILE_FURNACE_TOP_BOTTOM,
+                                TILE_FURNACE_TOP_BOTTOM};
+        defs_[FURNACE_POS_Z] = {true, false, TILE_FURNACE_SIDE, TILE_FURNACE_TOP_BOTTOM,
+                                TILE_FURNACE_TOP_BOTTOM};
+        defs_[FURNACE_NEG_Z] = {true, false, TILE_FURNACE_SIDE, TILE_FURNACE_TOP_BOTTOM,
+                                TILE_FURNACE_TOP_BOTTOM};
+        defs_[LIT_FURNACE_POS_X] = {true, false, TILE_FURNACE_SIDE, TILE_FURNACE_TOP_BOTTOM,
+                                    TILE_FURNACE_TOP_BOTTOM};
+        defs_[LIT_FURNACE_NEG_X] = {true, false, TILE_FURNACE_SIDE, TILE_FURNACE_TOP_BOTTOM,
+                                    TILE_FURNACE_TOP_BOTTOM};
+        defs_[LIT_FURNACE_POS_Z] = {true, false, TILE_FURNACE_SIDE, TILE_FURNACE_TOP_BOTTOM,
+                                    TILE_FURNACE_TOP_BOTTOM};
+        defs_[LIT_FURNACE_NEG_Z] = {true, false, TILE_FURNACE_SIDE, TILE_FURNACE_TOP_BOTTOM,
+                                    TILE_FURNACE_TOP_BOTTOM};
+        defs_[GLASS] = {true, true, 51, 51, 51};
+        defs_[BRICKS] = {true, false, 52, 52, 52};
+        defs_[IRON_INGOT] = {false, true, 53, 53, 53};
+        defs_[COPPER_INGOT] = {false, true, 54, 54, 54};
+        defs_[GOLD_INGOT] = {false, true, 55, 55, 55};
     }
 
     void set(BlockId id, BlockDef def) {

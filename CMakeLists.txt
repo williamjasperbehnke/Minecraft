@@ -66,6 +66,7 @@ add_library(voxel_lib
   src/game/ItemDropSystem.cpp
   src/game/Inventory.cpp
   src/game/DebugMenu.cpp
+  src/game/SmeltingSystem.cpp
   src/voxel/Chunk.cpp
   src/voxel/LightingSolver.cpp
   src/voxel/ChunkMesher.cpp

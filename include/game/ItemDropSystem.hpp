@@ -18,6 +18,12 @@ namespace game {
 
 class ItemDropSystem {
   public:
+    struct Pickup {
+        voxel::BlockId id = voxel::AIR;
+        int count = 0;
+        glm::vec3 pos{0.0f};
+    };
+
     ItemDropSystem() = default;
     ~ItemDropSystem();
 
@@ -26,7 +32,7 @@ class ItemDropSystem {
 
     void spawn(voxel::BlockId id, const glm::vec3 &worldPos, int count = 1);
     void update(const world::World &world, const glm::vec3 &playerPos, float dt);
-    std::vector<std::pair<voxel::BlockId, int>> consumePickups();
+    std::vector<Pickup> consumePickups();
     void render(const glm::mat4 &proj, const glm::mat4 &view, const gfx::TextureAtlas &atlas,
                 const voxel::BlockRegistry &registry);
 
@@ -62,7 +68,7 @@ class ItemDropSystem {
 
     std::vector<Vertex> verts_;
     std::vector<Item> items_;
-    std::vector<std::pair<voxel::BlockId, int>> pendingPickups_;
+    std::vector<Pickup> pendingPickups_;
 };
 
 } // namespace game

@@ -7,6 +7,7 @@
 #include "game/Inventory.hpp"
 #include "game/ItemDropSystem.hpp"
 #include "game/PlayerController.hpp"
+#include "game/SmeltingSystem.hpp"
 #include "gfx/HudRenderer.hpp"
 #include "gfx/Shader.hpp"
 #include "gfx/TextureAtlas.hpp"
@@ -546,7 +547,8 @@ std::filesystem::path allocateWorldPath(const std::string &worldName) {
 }
 
 bool loadPlayerData(const std::filesystem::path &worldDir, glm::vec3 &cameraPos, int &selectedSlot,
-                    bool &ghostMode, game::Inventory &inventory) {
+                    bool &ghostMode, game::Inventory &inventory,
+                    game::SmeltingSystem::State &smelting) {
     std::ifstream in(worldDir / "player.dat");
     if (!in) {
         return false;
@@ -554,7 +556,7 @@ bool loadPlayerData(const std::filesystem::path &worldDir, glm::vec3 &cameraPos,
 
     std::string magic;
     in >> magic;
-    if (!in || (magic != "VXP1" && magic != "VXP2")) {
+    if (!in || (magic != "VXP1" && magic != "VXP2" && magic != "VXP3")) {
         return false;
     }
 
@@ -563,7 +565,7 @@ bool loadPlayerData(const std::filesystem::path &worldDir, glm::vec3 &cameraPos,
     int loadedMode = 1;
     in >> loadedPos.x >> loadedPos.y >> loadedPos.z;
     in >> loadedSelected;
-    if (magic == "VXP2") {
+    if (magic == "VXP2" || magic == "VXP3") {
         in >> loadedMode;
     }
     if (!in) {
@@ -597,18 +599,65 @@ bool loadPlayerData(const std::filesystem::path &worldDir, glm::vec3 &cameraPos,
     selectedSlot = std::clamp(loadedSelected, 0, game::Inventory::kHotbarSize - 1);
     ghostMode = (loadedMode != 0);
     cameraPos = loadedPos;
+    smelting = {};
+    if (magic == "VXP3") {
+        auto loadSmeltSlot = [&](game::Inventory::Slot &slot) {
+            int id = 0;
+            int count = 0;
+            in >> id >> count;
+            if (!in) {
+                return false;
+            }
+            count = std::clamp(count, 0, game::Inventory::kMaxStack);
+            if (count <= 0 || id < 0 || id > std::numeric_limits<std::uint16_t>::max()) {
+                slot = {};
+                return true;
+            }
+            slot.id = static_cast<voxel::BlockId>(id);
+            slot.count = count;
+            return true;
+        };
+        if (!loadSmeltSlot(smelting.input) || !loadSmeltSlot(smelting.fuel) ||
+            !loadSmeltSlot(smelting.output)) {
+            return false;
+        }
+        in >> smelting.progressSeconds >> smelting.burnSecondsRemaining >>
+            smelting.burnSecondsCapacity;
+        if (!in) {
+            return false;
+        }
+        smelting.progressSeconds =
+            std::clamp(smelting.progressSeconds, 0.0f, game::SmeltingSystem::kSmeltSeconds);
+        smelting.burnSecondsRemaining = std::max(0.0f, smelting.burnSecondsRemaining);
+        smelting.burnSecondsCapacity = std::max(0.0f, smelting.burnSecondsCapacity);
+        if (smelting.burnSecondsCapacity > 0.0f &&
+            smelting.burnSecondsRemaining > smelting.burnSecondsCapacity) {
+            smelting.burnSecondsRemaining = smelting.burnSecondsCapacity;
+        }
+        if (smelting.fuel.id == voxel::AIR || smelting.fuel.count <= 0) {
+            smelting.fuel = {};
+        }
+        if (smelting.input.id == voxel::AIR || smelting.input.count <= 0) {
+            smelting.input = {};
+            smelting.progressSeconds = 0.0f;
+        }
+        if (smelting.output.id == voxel::AIR || smelting.output.count <= 0) {
+            smelting.output = {};
+        }
+    }
     return true;
 }
 
 void savePlayerData(const std::filesystem::path &worldDir, const glm::vec3 &cameraPos,
-                    int selectedSlot, bool ghostMode, const game::Inventory &inventory) {
+                    int selectedSlot, bool ghostMode, const game::Inventory &inventory,
+                    const game::SmeltingSystem::State &smelting) {
     std::filesystem::create_directories(worldDir);
     std::ofstream out(worldDir / "player.dat", std::ios::trunc);
     if (!out) {
         return;
     }
 
-    out << "VXP2\n";
+    out << "VXP3\n";
     out << std::fixed << std::setprecision(std::numeric_limits<float>::max_digits10) << cameraPos.x
         << ' ' << cameraPos.y << ' '
         << cameraPos.z << '\n';
@@ -619,6 +668,16 @@ void savePlayerData(const std::filesystem::path &worldDir, const glm::vec3 &came
         out << static_cast<int>(slot.id) << ' '
             << std::clamp(slot.count, 0, game::Inventory::kMaxStack) << '\n';
     }
+    auto writeSmeltSlot = [&](const game::Inventory::Slot &slot) {
+        out << static_cast<int>(slot.id) << ' '
+            << std::clamp(slot.count, 0, game::Inventory::kMaxStack) << '\n';
+    };
+    writeSmeltSlot(smelting.input);
+    writeSmeltSlot(smelting.fuel);
+    writeSmeltSlot(smelting.output);
+    out << std::max(0.0f, smelting.progressSeconds) << ' '
+        << std::max(0.0f, smelting.burnSecondsRemaining) << ' '
+        << std::max(0.0f, smelting.burnSecondsCapacity) << '\n';
 }
 
 WorldSelection runTitleMenu(GLFWwindow *window, gfx::HudRenderer &hud) {
@@ -800,7 +859,7 @@ constexpr int kTrashSlot = kUiSlotCount;
 constexpr int kUiSlotCountWithTrash = kTrashSlot + 1;
 
 int inventorySlotAtCursor(double mx, double my, int width, int height, bool showInventory,
-                          float hudScale, int craftingGridSize) {
+                          float hudScale, int craftingGridSize, bool usingFurnace) {
     if (!showInventory) {
         return -1;
     }
@@ -854,6 +913,8 @@ int inventorySlotAtCursor(double mx, double my, int width, int height, bool show
     const float craftPanelGap = 26.0f * uiScale;
     const float craftPanelW = craftGridW + 44.0f * uiScale + craftSlot;
     const float totalPanelW = invW + craftPanelGap + craftPanelW;
+    const float tableGridW = 3.0f * craftSlot + 2.0f * craftGap;
+    const float tablePanelW = tableGridW + 44.0f * uiScale + craftSlot;
     const float invX = cx - totalPanelW * 0.5f;
     const float invY = y0 - 44.0f * uiScale - invH;
 
@@ -869,20 +930,31 @@ int inventorySlotAtCursor(double mx, double my, int width, int height, bool show
     const float craftX = invX + invW + craftPanelGap;
     const float trashGap = 10.0f * uiScale;
     const float craftRegionH = craftGridW + trashGap + craftSlot;
-    const float craftY =
-        (craftGrid == game::CraftingSystem::kGridSizeTable)
-            ? invY
-            : (invY + (invH - craftRegionH) * 0.5f);
-    for (int r = 0; r < craftGrid; ++r) {
-        for (int c = 0; c < craftGrid; ++c) {
-            const int idx = game::Inventory::kSlotCount + r * craftGrid + c;
-            const float sx = craftX + c * (craftSlot + craftGap);
-            const float sy = craftY + r * (craftSlot + craftGap);
-            considerSlot(idx, sx, sy, craftSlot);
+    const float craftY = usingFurnace
+                             ? invY
+                             : ((craftGrid == game::CraftingSystem::kGridSizeTable)
+                                    ? invY
+                                    : (invY + (invH - craftRegionH) * 0.5f));
+    const float furnaceInXBase = craftX + 4.0f * uiScale;
+    const float furnaceInYBase = craftY + 2.0f * uiScale;
+    const float furnaceFuelYBase = furnaceInYBase + craftSlot + 20.0f * uiScale;
+    const float furnaceMidX = furnaceInXBase + craftSlot + 16.0f * uiScale;
+    const float furnaceOutXBase = furnaceMidX + 42.0f * uiScale;
+    if (usingFurnace) {
+        considerSlot(game::Inventory::kSlotCount, furnaceInXBase, furnaceInYBase, craftSlot);
+        considerSlot(game::Inventory::kSlotCount + 1, furnaceInXBase, furnaceFuelYBase, craftSlot);
+    } else {
+        for (int r = 0; r < craftGrid; ++r) {
+            for (int c = 0; c < craftGrid; ++c) {
+                const int idx = game::Inventory::kSlotCount + r * craftGrid + c;
+                const float sx = craftX + c * (craftSlot + craftGap);
+                const float sy = craftY + r * (craftSlot + craftGap);
+                considerSlot(idx, sx, sy, craftSlot);
+            }
         }
     }
-    const float outX = craftX + craftGridW + 44.0f * uiScale;
-    const float outY = craftY + (craftGridW - craftSlot) * 0.5f;
+    const float outX = usingFurnace ? furnaceOutXBase : (craftX + craftGridW + 44.0f * uiScale);
+    const float outY = usingFurnace ? furnaceInYBase : (craftY + (craftGridW - craftSlot) * 0.5f);
     considerSlot(kCraftOutputSlot, outX, outY, craftSlot);
     const float trashX = craftX - 10.0f * uiScale;
     const float invBorderBottomY = invY + invH + 10.0f * uiScale;
@@ -939,7 +1011,7 @@ struct RecipeMenuLayout {
 };
 
 RecipeMenuLayout computeRecipeMenuLayout(int width, int height, float hudScale, int craftingGridSize,
-                                         std::size_t recipeCount) {
+                                         bool usingFurnace, std::size_t recipeCount) {
     const float cx = width * 0.5f;
     const float uiScale = std::clamp(hudScale, 0.8f, 1.8f);
     const float y0 = height - 90.0f * uiScale;
@@ -958,6 +1030,8 @@ RecipeMenuLayout computeRecipeMenuLayout(int width, int height, float hudScale, 
     const float craftPanelGap = 26.0f * uiScale;
     const float craftPanelW = craftGridW + 44.0f * uiScale + craftSlot;
     const float totalPanelW = invW + craftPanelGap + craftPanelW;
+    const float tableGridW = 3.0f * craftSlot + 2.0f * craftGap;
+    const float tablePanelW = tableGridW + 44.0f * uiScale + craftSlot;
     const float invX = cx - totalPanelW * 0.5f;
     const float invY = y0 - 44.0f * uiScale - invH;
 
@@ -1071,7 +1145,8 @@ struct CreativeMenuLayout {
 };
 
 CreativeMenuLayout computeCreativeMenuLayout(int width, int height, float hudScale,
-                                             int craftingGridSize, std::size_t itemCount) {
+                                             int craftingGridSize, bool usingFurnace,
+                                             std::size_t itemCount) {
     const float cx = width * 0.5f;
     const float uiScale = std::clamp(hudScale, 0.8f, 1.8f);
     const float y0 = height - 90.0f * uiScale;
@@ -1090,7 +1165,10 @@ CreativeMenuLayout computeCreativeMenuLayout(int width, int height, float hudSca
     const float craftPanelGap = 26.0f * uiScale;
     const float craftPanelW = craftGridW + 44.0f * uiScale + craftSlot;
     const float totalPanelW = invW + craftPanelGap + craftPanelW;
-    const float invX = cx - totalPanelW * 0.5f;
+    const float tableGridW = 3.0f * craftSlot + 2.0f * craftGap;
+    const float tablePanelW = tableGridW + 44.0f * uiScale + craftSlot;
+    const float furnaceCenterOffset = usingFurnace ? (tablePanelW - craftPanelW) * 0.35f : 0.0f;
+    const float invX = cx - totalPanelW * 0.5f + furnaceCenterOffset;
     const float invY = y0 - 44.0f * uiScale - invH;
 
     const float panelHeaderH = 34.0f * uiScale;
@@ -1180,7 +1258,9 @@ const std::vector<voxel::BlockId> &creativeCatalog() {
         voxel::ICE,          voxel::COAL_ORE,    voxel::COPPER_ORE,   voxel::IRON_ORE,
         voxel::GOLD_ORE,     voxel::DIAMOND_ORE, voxel::EMERALD_ORE,  voxel::TALL_GRASS,
         voxel::FLOWER,       voxel::TORCH,       voxel::CRAFTING_TABLE, voxel::OAK_PLANKS,
-        voxel::SPRUCE_PLANKS, voxel::BIRCH_PLANKS, voxel::STICK,
+        voxel::SPRUCE_PLANKS, voxel::BIRCH_PLANKS, voxel::STICK, voxel::FURNACE,
+        voxel::GLASS,        voxel::BRICKS,      voxel::IRON_INGOT,    voxel::COPPER_INGOT,
+        voxel::GOLD_INGOT,
     };
     return kItems;
 }
@@ -1251,6 +1331,21 @@ bool recipeUsesIngredient(const game::CraftingSystem::RecipeInfo &recipe, voxel:
         if (cell.ingredient.id == targetId) {
             return true;
         }
+    }
+    return false;
+}
+
+bool smeltingRecipeMatchesSearch(const game::SmeltingSystem::Recipe &recipe,
+                                 const std::string &search) {
+    const std::string needle = toLowerAscii(search);
+    if (needle.empty()) {
+        return true;
+    }
+    if (toLowerAscii(game::blockName(recipe.input)).find(needle) != std::string::npos) {
+        return true;
+    }
+    if (toLowerAscii(game::blockName(recipe.output)).find(needle) != std::string::npos) {
+        return true;
     }
     return false;
 }
@@ -1511,6 +1606,19 @@ glm::ivec3 torchOutwardNormal(voxel::BlockId id) {
     }
 }
 
+voxel::BlockId orientedFurnaceFromForward(const glm::vec3 &forward, bool lit) {
+    if (std::abs(forward.x) >= std::abs(forward.z)) {
+        if (forward.x >= 0.0f) {
+            return lit ? voxel::LIT_FURNACE_POS_X : voxel::FURNACE_POS_X;
+        }
+        return lit ? voxel::LIT_FURNACE_NEG_X : voxel::FURNACE_NEG_X;
+    }
+    if (forward.z >= 0.0f) {
+        return lit ? voxel::LIT_FURNACE_POS_Z : voxel::FURNACE_POS_Z;
+    }
+    return lit ? voxel::LIT_FURNACE_NEG_Z : voxel::FURNACE_NEG_Z;
+}
+
 bool torchHasSupport(const world::World &world, const glm::ivec3 &cell, voxel::BlockId id) {
     if (!voxel::isTorch(id)) {
         return true;
@@ -1575,6 +1683,24 @@ bool isLookingAtCraftingTable(world::World &world, const game::Camera &camera, f
     }
     const voxel::BlockId id = world.getBlock(hit->block.x, hit->block.y, hit->block.z);
     return id == voxel::CRAFTING_TABLE;
+}
+
+std::optional<glm::ivec3> lookedAtFurnaceCell(world::World &world, const game::Camera &camera,
+                                              float raycastDistance) {
+    const std::optional<voxel::RayHit> hit =
+        voxel::Raycaster::cast(world, camera.position(), camera.forward(), raycastDistance);
+    if (!hit.has_value()) {
+        return std::nullopt;
+    }
+    const voxel::BlockId id = world.getBlock(hit->block.x, hit->block.y, hit->block.z);
+    if (!voxel::isFurnace(id)) {
+        return std::nullopt;
+    }
+    return hit->block;
+}
+
+bool isLookingAtFurnace(world::World &world, const game::Camera &camera, float raycastDistance) {
+    return lookedAtFurnaceCell(world, camera, raycastDistance).has_value();
 }
 
 int pauseMenuButtonAtCursor(double mx, double my, int width, int height) {
@@ -1833,6 +1959,9 @@ int main() {
             game::Inventory inventory;
             game::CraftingSystem craftingSystem;
             game::CraftingSystem::State crafting;
+            game::SmeltingSystem smeltingSystem;
+            game::SmeltingSystem::State smelting;
+            std::optional<glm::ivec3> activeFurnaceCell;
             float recipeMenuScroll = 0.0f;
             std::string recipeSearchText;
             float creativeMenuScroll = 0.0f;
@@ -1841,21 +1970,78 @@ int main() {
             bool recipeCraftableOnly = false;
             int craftingGridSize = game::CraftingSystem::kGridSizeInventory;
             bool usingCraftingTable = false;
+            bool usingFurnace = false;
             game::Inventory::Slot carriedSlot{};
             std::array<bool, game::Inventory::kHotbarSize> prevBlockKeys{};
             int selectedBlockIndex = 0;
             glm::vec3 loadedCameraPos = camera.position();
             bool pendingSpawnResolve = false;
             if (loadPlayerData(worldSelection.path, loadedCameraPos, selectedBlockIndex, ghostMode,
-                               inventory)) {
+                               inventory, smelting)) {
                 camera.setPosition(loadedCameraPos);
                 if (!ghostMode) {
                     pendingSpawnResolve = true;
                 }
             }
+            auto toWorldFurnaceState = [&](const game::SmeltingSystem::State &src) {
+                world::FurnaceState out{};
+                out.input.id = src.input.id;
+                out.input.count = src.input.count;
+                out.fuel.id = src.fuel.id;
+                out.fuel.count = src.fuel.count;
+                out.output.id = src.output.id;
+                out.output.count = src.output.count;
+                out.progressSeconds = src.progressSeconds;
+                out.burnSecondsRemaining = src.burnSecondsRemaining;
+                out.burnSecondsCapacity = src.burnSecondsCapacity;
+                return out;
+            };
+            auto fromWorldFurnaceState = [&](const world::FurnaceState &src) {
+                game::SmeltingSystem::State out{};
+                out.input.id = src.input.id;
+                out.input.count = src.input.count;
+                out.fuel.id = src.fuel.id;
+                out.fuel.count = src.fuel.count;
+                out.output.id = src.output.id;
+                out.output.count = src.output.count;
+                out.progressSeconds = src.progressSeconds;
+                out.burnSecondsRemaining = src.burnSecondsRemaining;
+                out.burnSecondsCapacity = src.burnSecondsCapacity;
+                return out;
+            };
+            auto persistActiveFurnaceState = [&]() {
+                if (!activeFurnaceCell.has_value()) {
+                    return;
+                }
+                const bool hasItems = (smelting.input.id != voxel::AIR && smelting.input.count > 0) ||
+                                      (smelting.fuel.id != voxel::AIR && smelting.fuel.count > 0) ||
+                                      (smelting.output.id != voxel::AIR && smelting.output.count > 0);
+                const bool hasWork =
+                    smelting.progressSeconds > 0.0f || smelting.burnSecondsRemaining > 0.0f ||
+                    smelting.burnSecondsCapacity > 0.0f;
+                if (hasItems || hasWork) {
+                    const glm::ivec3 c = activeFurnaceCell.value();
+                    world.setFurnaceState(c.x, c.y, c.z, toWorldFurnaceState(smelting));
+                } else {
+                    const glm::ivec3 c = activeFurnaceCell.value();
+                    world.clearFurnaceState(c.x, c.y, c.z);
+                }
+            };
+            auto loadActiveFurnaceState = [&]() {
+                smelting = {};
+                if (!activeFurnaceCell.has_value()) {
+                    return;
+                }
+                world::FurnaceState loaded{};
+                const glm::ivec3 c = activeFurnaceCell.value();
+                if (world.getFurnaceState(c.x, c.y, c.z, loaded)) {
+                    smelting = fromWorldFurnaceState(loaded);
+                }
+            };
             auto saveCurrentPlayer = [&]() {
+                persistActiveFurnaceState();
                 savePlayerData(worldSelection.path, camera.position(), selectedBlockIndex, ghostMode,
-                               inventory);
+                               inventory, smelting);
             };
             camera.resetMouseLook(window);
             bool prevInventoryLeft = false;
@@ -1878,6 +2064,15 @@ int main() {
             int lastRecipeFillIndex = -1;
             bool prevCreativeMenuToggle = false;
             bool prevCreativeSearchBackspace = false;
+            bool inventorySpreadDragging = false;
+            std::vector<int> inventorySpreadSlots;
+            game::Inventory::Slot inventorySpreadStartCarried{};
+            std::vector<std::pair<int, game::Inventory::Slot>> inventorySpreadOriginalSlots;
+            int inventorySpreadPickupSourceSlot = -1;
+            bool inventoryRightSpreadDragging = false;
+            std::vector<int> inventoryRightSpreadSlots;
+            game::Inventory::Slot inventoryRightSpreadStartCarried{};
+            std::vector<std::pair<int, game::Inventory::Slot>> inventoryRightSpreadOriginalSlots;
 
             float lastTime = static_cast<float>(glfwGetTime());
             float titleAccum = 0.0f;
@@ -1983,9 +2178,44 @@ int main() {
                 }
                 mineCooldown = std::max(0.0f, mineCooldown - dt);
                 itemDrops.update(world, camera.position(), dt);
+                persistActiveFurnaceState();
+                const auto loadedFurnaces = world.loadedFurnacePositions();
+                for (const glm::ivec3 &fpos : loadedFurnaces) {
+                    world::FurnaceState wstate{};
+                    if (!world.getFurnaceState(fpos.x, fpos.y, fpos.z, wstate)) {
+                        continue;
+                    }
+                    const voxel::BlockId furnaceBlockId = world.getBlock(fpos.x, fpos.y, fpos.z);
+                    game::SmeltingSystem::State gstate = fromWorldFurnaceState(wstate);
+                    smeltingSystem.update(gstate, dt);
+                    const bool furnaceActive = gstate.burnSecondsRemaining > 0.0f;
+                    if (voxel::isFurnace(furnaceBlockId)) {
+                        const voxel::BlockId desiredId =
+                            furnaceActive ? voxel::toLitFurnace(furnaceBlockId)
+                                          : voxel::toUnlitFurnace(furnaceBlockId);
+                        if (desiredId != furnaceBlockId) {
+                            world.setBlock(fpos.x, fpos.y, fpos.z, desiredId);
+                        }
+                    }
+                    const bool hasItems = (gstate.input.id != voxel::AIR && gstate.input.count > 0) ||
+                                          (gstate.fuel.id != voxel::AIR && gstate.fuel.count > 0) ||
+                                          (gstate.output.id != voxel::AIR && gstate.output.count > 0);
+                    const bool hasWork =
+                        gstate.progressSeconds > 0.0f || gstate.burnSecondsRemaining > 0.0f ||
+                        gstate.burnSecondsCapacity > 0.0f;
+                    if (!hasItems && !hasWork) {
+                        world.clearFurnaceState(fpos.x, fpos.y, fpos.z);
+                    } else {
+                        world.setFurnaceState(fpos.x, fpos.y, fpos.z, toWorldFurnaceState(gstate));
+                    }
+                }
+                loadActiveFurnaceState();
                 for (const auto &pickup : itemDrops.consumePickups()) {
-                    inventory.add(pickup.first, pickup.second);
-                    audio.playPickup();
+                    if (inventory.add(pickup.id, pickup.count)) {
+                        audio.playPickup();
+                    } else {
+                        itemDrops.spawn(pickup.id, pickup.pos, pickup.count);
+                    }
                 }
 
                 const bool hudToggleDown = glfwGetKey(window, GLFW_KEY_F2) == GLFW_PRESS;
@@ -2007,6 +2237,31 @@ int main() {
                 prevModeToggle = modeToggleDown;
 
                 auto clearCraftInputs = [&]() {
+                    if (usingFurnace) {
+                        auto flushSmeltSlot = [&](game::Inventory::Slot &slot) {
+                            if (slot.id == voxel::AIR || slot.count <= 0) {
+                                slot = {};
+                                return;
+                            }
+                            while (slot.count > 0 && inventory.add(slot.id, 1)) {
+                                slot.count -= 1;
+                            }
+                            if (slot.count > 0) {
+                                const glm::vec3 dropPos =
+                                    camera.position() + camera.forward() * 2.10f +
+                                    glm::vec3(0.0f, -0.30f, 0.0f);
+                                itemDrops.spawn(slot.id, dropPos, slot.count);
+                            }
+                            slot = {};
+                        };
+                        flushSmeltSlot(smelting.input);
+                        flushSmeltSlot(smelting.fuel);
+                        flushSmeltSlot(smelting.output);
+                        smelting.progressSeconds = 0.0f;
+                        smelting.burnSecondsRemaining = 0.0f;
+                        smelting.burnSecondsCapacity = 0.0f;
+                        return;
+                    }
                     for (int i = 0; i < kCraftInputCount; ++i) {
                         auto &slot = crafting.input[i];
                         if (slot.id == voxel::AIR || slot.count <= 0) {
@@ -2038,14 +2293,31 @@ int main() {
                     const bool openingInventory = !inventoryVisible;
                     inventoryVisible = openingInventory;
                     if (openingInventory) {
+                        const auto lookedFurnace =
+                            lookedAtFurnaceCell(world, camera, debugCfg.raycastDistance);
+                        usingFurnace = lookedFurnace.has_value();
+                        if (usingFurnace) {
+                            activeFurnaceCell = lookedFurnace;
+                            loadActiveFurnaceState();
+                        } else {
+                            activeFurnaceCell.reset();
+                            smelting = {};
+                        }
                         usingCraftingTable =
+                            !usingFurnace &&
                             isLookingAtCraftingTable(world, camera, debugCfg.raycastDistance);
                         craftingGridSize = usingCraftingTable ? game::CraftingSystem::kGridSizeTable
                                                               : game::CraftingSystem::kGridSizeInventory;
                         craftingSystem.updateOutput(crafting, craftingGridSize);
                     } else {
-                        clearCraftInputs();
+                        persistActiveFurnaceState();
+                        if (!usingFurnace) {
+                            clearCraftInputs();
+                        }
                         usingCraftingTable = false;
+                        usingFurnace = false;
+                        activeFurnaceCell.reset();
+                        smelting = {};
                         craftingGridSize = game::CraftingSystem::kGridSizeInventory;
                         recipeMenuVisible = false;
                         creativeMenuVisible = false;
@@ -2105,7 +2377,18 @@ int main() {
                     !(recipeMenuVisible && recipeSearchFocused)) {
                     if (!inventoryVisible) {
                         inventoryVisible = true;
+                        const auto lookedFurnace =
+                            lookedAtFurnaceCell(world, camera, debugCfg.raycastDistance);
+                        usingFurnace = lookedFurnace.has_value();
+                        if (usingFurnace) {
+                            activeFurnaceCell = lookedFurnace;
+                            loadActiveFurnaceState();
+                        } else {
+                            activeFurnaceCell.reset();
+                            smelting = {};
+                        }
                         usingCraftingTable =
+                            !usingFurnace &&
                             isLookingAtCraftingTable(world, camera, debugCfg.raycastDistance);
                         craftingGridSize = usingCraftingTable ? game::CraftingSystem::kGridSizeTable
                                                               : game::CraftingSystem::kGridSizeInventory;
@@ -2148,6 +2431,7 @@ int main() {
                 prevCreativeSearchBackspace = recipeBackspace;
 
                 std::vector<int> filteredRecipeIndices;
+                std::vector<int> filteredSmeltingIndices;
                 std::vector<unsigned char> recipeCraftableCache;
                 std::vector<unsigned char> recipeCraftableComputed;
                 const int recipeFilterActiveInputs =
@@ -2173,7 +2457,7 @@ int main() {
                     return craftable;
                 };
 
-                if (recipeMenuVisible) {
+                if (recipeMenuVisible && !usingFurnace) {
                     filteredRecipeIndices.reserve(craftingSystem.recipeInfos().size());
                     recipeCraftableCache.assign(craftingSystem.recipeInfos().size(), 0);
                     recipeCraftableComputed.assign(craftingSystem.recipeInfos().size(), 0);
@@ -2213,6 +2497,38 @@ int main() {
                         filteredRecipeIndices.insert(filteredRecipeIndices.begin() + insertPos, pick);
                     }
                 }
+                if (recipeMenuVisible && usingFurnace) {
+                    const auto &smeltRecipes = smeltingSystem.recipes();
+                    filteredSmeltingIndices.reserve(smeltRecipes.size());
+
+                    int fuelCount = 0;
+                    for (int i = 0; i < game::Inventory::kSlotCount; ++i) {
+                        const auto &slot = inventory.slot(i);
+                        if (slot.id != voxel::AIR && slot.count > 0 && smeltingSystem.isFuel(slot.id)) {
+                            fuelCount += slot.count;
+                        }
+                    }
+
+                    for (int i = 0; i < static_cast<int>(smeltRecipes.size()); ++i) {
+                        const auto &recipe = smeltRecipes[i];
+                        const bool matchesSearch =
+                            smeltingRecipeMatchesSearch(recipe, recipeSearchText);
+                        const bool matchesIngredient = !recipeIngredientFilter.has_value() ||
+                                                       recipe.input == recipeIngredientFilter.value();
+                        int inputCount = 0;
+                        for (int s = 0; s < game::Inventory::kSlotCount; ++s) {
+                            const auto &slot = inventory.slot(s);
+                            if (slot.id == recipe.input && slot.count > 0) {
+                                inputCount += slot.count;
+                            }
+                        }
+                        const bool matchesCraftable =
+                            !recipeCraftableOnly || (inputCount > 0 && fuelCount > 0);
+                        if (matchesSearch && matchesIngredient && matchesCraftable) {
+                            filteredSmeltingIndices.push_back(i);
+                        }
+                    }
+                }
 
                 std::vector<voxel::BlockId> filteredCreativeItems;
                 if (creativeMenuVisible) {
@@ -2234,88 +2550,178 @@ int main() {
                     const bool leftNow =
                         glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
                     recipeMenuScroll -= gRecipeMenuScrollDelta * (34.0f * debugCfg.hudScale);
-                    const RecipeMenuLayout recipeLayout =
-                        computeRecipeMenuLayout(winW, winH, debugCfg.hudScale, craftingGridSize,
-                                                filteredRecipeIndices.size());
+                    const std::size_t recipeCount =
+                        usingFurnace ? filteredSmeltingIndices.size() : filteredRecipeIndices.size();
+                    const RecipeMenuLayout recipeLayout = computeRecipeMenuLayout(
+                        winW, winH, debugCfg.hudScale, craftingGridSize, usingFurnace, recipeCount);
 
-                    if (leftNow && !prevLeft) {
-                        const bool onCraftableFilter =
-                            mx >= recipeLayout.craftableFilterX &&
-                            mx <= (recipeLayout.craftableFilterX + recipeLayout.craftableFilterW) &&
-                            my >= recipeLayout.craftableFilterY &&
-                            my <= (recipeLayout.craftableFilterY + recipeLayout.craftableFilterH);
-                        const bool onIngredientFilterClear =
-                            recipeIngredientFilter.has_value() &&
-                            mx >= recipeLayout.ingredientTagCloseX &&
-                            mx <= (recipeLayout.ingredientTagCloseX + recipeLayout.ingredientTagCloseS) &&
-                            my >= recipeLayout.ingredientTagCloseY &&
-                            my <= (recipeLayout.ingredientTagCloseY + recipeLayout.ingredientTagCloseS);
-                        if (onIngredientFilterClear) {
-                            recipeIngredientFilter.reset();
-                            recipeSearchFocused = false;
-                            gRecipeSearchText = nullptr;
-                            glfwSetCharCallback(window, nullptr);
-                        } else if (onCraftableFilter) {
-                            recipeCraftableOnly = !recipeCraftableOnly;
-                            recipeSearchFocused = false;
-                            gRecipeSearchText = nullptr;
-                            glfwSetCharCallback(window, nullptr);
-                        } else {
-                            recipeSearchFocused = mx >= recipeLayout.searchX &&
-                                                  mx <= (recipeLayout.searchX + recipeLayout.searchW) &&
-                                                  my >= recipeLayout.searchY &&
-                                                  my <= (recipeLayout.searchY + recipeLayout.searchH);
-                        }
-                        if (recipeSearchFocused) {
-                            gRecipeSearchText = &recipeSearchText;
-                            glfwSetCharCallback(window, onRecipeSearchCharInput);
-                        }
-                    }
-
-                    if (leftNow && !prevLeft) {
-                        const bool onTrack = mx >= (recipeLayout.trackX - 6.0f) &&
-                                             mx <= (recipeLayout.trackX + recipeLayout.trackW + 6.0f) &&
-                                             my >= recipeLayout.trackY &&
-                                             my <= (recipeLayout.trackY + recipeLayout.trackH);
-                        if (onTrack) {
-                            const float thumbTravel =
-                                std::max(0.0f, recipeLayout.trackH - recipeLayout.thumbH);
-                            const float thumbY =
-                                recipeLayout.trackY +
-                                ((recipeLayout.maxScroll > 0.0f)
-                                     ? (recipeMenuScroll / recipeLayout.maxScroll) * thumbTravel
-                                     : 0.0f);
-                            const bool onThumb = my >= thumbY && my <= (thumbY + recipeLayout.thumbH);
-                            if (onThumb) {
-                                recipeScrollDragging = true;
-                                recipeScrollGrabOffsetY = static_cast<float>(my) - thumbY;
-                            } else if (recipeLayout.maxScroll > 0.0f) {
-                                const float t = std::clamp(
-                                    static_cast<float>((my - recipeLayout.trackY - recipeLayout.thumbH * 0.5f) /
-                                                       std::max(1.0f, thumbTravel)),
-                                    0.0f, 1.0f);
-                                recipeMenuScroll = t * recipeLayout.maxScroll;
+                    if (usingFurnace) {
+                        if (leftNow && !prevLeft) {
+                            const bool onCraftableFilter =
+                                mx >= recipeLayout.craftableFilterX &&
+                                mx <= (recipeLayout.craftableFilterX + recipeLayout.craftableFilterW) &&
+                                my >= recipeLayout.craftableFilterY &&
+                                my <= (recipeLayout.craftableFilterY + recipeLayout.craftableFilterH);
+                            const bool onIngredientFilterClear =
+                                recipeIngredientFilter.has_value() &&
+                                mx >= recipeLayout.ingredientTagCloseX &&
+                                mx <= (recipeLayout.ingredientTagCloseX + recipeLayout.ingredientTagCloseS) &&
+                                my >= recipeLayout.ingredientTagCloseY &&
+                                my <= (recipeLayout.ingredientTagCloseY + recipeLayout.ingredientTagCloseS);
+                            if (onIngredientFilterClear) {
+                                recipeIngredientFilter.reset();
+                                recipeSearchFocused = false;
+                                gRecipeSearchText = nullptr;
+                                glfwSetCharCallback(window, nullptr);
+                            } else if (onCraftableFilter) {
+                                recipeCraftableOnly = !recipeCraftableOnly;
+                                recipeSearchFocused = false;
+                                gRecipeSearchText = nullptr;
+                                glfwSetCharCallback(window, nullptr);
+                            } else {
+                                recipeSearchFocused = mx >= recipeLayout.searchX &&
+                                                      mx <= (recipeLayout.searchX + recipeLayout.searchW) &&
+                                                      my >= recipeLayout.searchY &&
+                                                      my <= (recipeLayout.searchY + recipeLayout.searchH);
+                            }
+                            if (recipeSearchFocused) {
+                                gRecipeSearchText = &recipeSearchText;
+                                glfwSetCharCallback(window, onRecipeSearchCharInput);
                             }
                         }
+                        if (leftNow && !prevLeft) {
+                            const bool onTrack = mx >= (recipeLayout.trackX - 6.0f) &&
+                                                 mx <= (recipeLayout.trackX + recipeLayout.trackW + 6.0f) &&
+                                                 my >= recipeLayout.trackY &&
+                                                 my <= (recipeLayout.trackY + recipeLayout.trackH);
+                            if (onTrack) {
+                                const float thumbTravel =
+                                    std::max(0.0f, recipeLayout.trackH - recipeLayout.thumbH);
+                                const float thumbY =
+                                    recipeLayout.trackY +
+                                    ((recipeLayout.maxScroll > 0.0f)
+                                         ? (recipeMenuScroll / recipeLayout.maxScroll) * thumbTravel
+                                         : 0.0f);
+                                const bool onThumb =
+                                    my >= thumbY && my <= (thumbY + recipeLayout.thumbH);
+                                if (onThumb) {
+                                    recipeScrollDragging = true;
+                                    recipeScrollGrabOffsetY = static_cast<float>(my) - thumbY;
+                                } else if (recipeLayout.maxScroll > 0.0f) {
+                                    const float t = std::clamp(
+                                        static_cast<float>((my - recipeLayout.trackY -
+                                                            recipeLayout.thumbH * 0.5f) /
+                                                           std::max(1.0f, thumbTravel)),
+                                        0.0f, 1.0f);
+                                    recipeMenuScroll = t * recipeLayout.maxScroll;
+                                }
+                            }
+                        }
+                        if (!leftNow) {
+                            recipeScrollDragging = false;
+                        }
+                        creativeSearchFocused = false;
+                        gRecipeSearchText = recipeSearchFocused ? &recipeSearchText : nullptr;
+                        glfwSetCharCallback(window,
+                                            recipeSearchFocused ? onRecipeSearchCharInput : nullptr);
+                        if (recipeScrollDragging && recipeLayout.maxScroll > 0.0f) {
+                            const float thumbTravel =
+                                std::max(0.0f, recipeLayout.trackH - recipeLayout.thumbH);
+                            const float thumbY = std::clamp(
+                                static_cast<float>(my) - recipeScrollGrabOffsetY, recipeLayout.trackY,
+                                recipeLayout.trackY + thumbTravel);
+                            const float t = (thumbTravel > 0.0f)
+                                                ? (thumbY - recipeLayout.trackY) / thumbTravel
+                                                : 0.0f;
+                            recipeMenuScroll = t * recipeLayout.maxScroll;
+                        }
+                        recipeMenuScroll =
+                            std::clamp(recipeMenuScroll, 0.0f, recipeLayout.maxScroll);
+                    } else {
+
+                        if (leftNow && !prevLeft) {
+                            const bool onCraftableFilter =
+                                mx >= recipeLayout.craftableFilterX &&
+                                mx <= (recipeLayout.craftableFilterX + recipeLayout.craftableFilterW) &&
+                                my >= recipeLayout.craftableFilterY &&
+                                my <= (recipeLayout.craftableFilterY + recipeLayout.craftableFilterH);
+                            const bool onIngredientFilterClear =
+                                recipeIngredientFilter.has_value() &&
+                                mx >= recipeLayout.ingredientTagCloseX &&
+                                mx <= (recipeLayout.ingredientTagCloseX + recipeLayout.ingredientTagCloseS) &&
+                                my >= recipeLayout.ingredientTagCloseY &&
+                                my <= (recipeLayout.ingredientTagCloseY + recipeLayout.ingredientTagCloseS);
+                            if (onIngredientFilterClear) {
+                                recipeIngredientFilter.reset();
+                                recipeSearchFocused = false;
+                                gRecipeSearchText = nullptr;
+                                glfwSetCharCallback(window, nullptr);
+                            } else if (onCraftableFilter) {
+                                recipeCraftableOnly = !recipeCraftableOnly;
+                                recipeSearchFocused = false;
+                                gRecipeSearchText = nullptr;
+                                glfwSetCharCallback(window, nullptr);
+                            } else {
+                                recipeSearchFocused = mx >= recipeLayout.searchX &&
+                                                      mx <= (recipeLayout.searchX + recipeLayout.searchW) &&
+                                                      my >= recipeLayout.searchY &&
+                                                      my <= (recipeLayout.searchY + recipeLayout.searchH);
+                            }
+                            if (recipeSearchFocused) {
+                                gRecipeSearchText = &recipeSearchText;
+                                glfwSetCharCallback(window, onRecipeSearchCharInput);
+                            }
+                        }
+
+                        if (leftNow && !prevLeft) {
+                            const bool onTrack = mx >= (recipeLayout.trackX - 6.0f) &&
+                                                 mx <= (recipeLayout.trackX + recipeLayout.trackW + 6.0f) &&
+                                                 my >= recipeLayout.trackY &&
+                                                 my <= (recipeLayout.trackY + recipeLayout.trackH);
+                            if (onTrack) {
+                                const float thumbTravel =
+                                    std::max(0.0f, recipeLayout.trackH - recipeLayout.thumbH);
+                                const float thumbY =
+                                    recipeLayout.trackY +
+                                    ((recipeLayout.maxScroll > 0.0f)
+                                         ? (recipeMenuScroll / recipeLayout.maxScroll) * thumbTravel
+                                         : 0.0f);
+                                const bool onThumb =
+                                    my >= thumbY && my <= (thumbY + recipeLayout.thumbH);
+                                if (onThumb) {
+                                    recipeScrollDragging = true;
+                                    recipeScrollGrabOffsetY = static_cast<float>(my) - thumbY;
+                                } else if (recipeLayout.maxScroll > 0.0f) {
+                                    const float t = std::clamp(
+                                        static_cast<float>((my - recipeLayout.trackY -
+                                                            recipeLayout.thumbH * 0.5f) /
+                                                           std::max(1.0f, thumbTravel)),
+                                        0.0f, 1.0f);
+                                    recipeMenuScroll = t * recipeLayout.maxScroll;
+                                }
+                            }
+                        }
+                        if (!leftNow) {
+                            recipeScrollDragging = false;
+                        }
+                        creativeSearchFocused = false;
+                        gRecipeSearchText = recipeSearchFocused ? &recipeSearchText : nullptr;
+                        glfwSetCharCallback(window,
+                                            recipeSearchFocused ? onRecipeSearchCharInput : nullptr);
+                        if (recipeScrollDragging && recipeLayout.maxScroll > 0.0f) {
+                            const float thumbTravel =
+                                std::max(0.0f, recipeLayout.trackH - recipeLayout.thumbH);
+                            const float thumbY = std::clamp(
+                                static_cast<float>(my) - recipeScrollGrabOffsetY, recipeLayout.trackY,
+                                recipeLayout.trackY + thumbTravel);
+                            const float t = (thumbTravel > 0.0f)
+                                                ? (thumbY - recipeLayout.trackY) / thumbTravel
+                                                : 0.0f;
+                            recipeMenuScroll = t * recipeLayout.maxScroll;
+                        }
+                        recipeMenuScroll =
+                            std::clamp(recipeMenuScroll, 0.0f, recipeLayout.maxScroll);
                     }
-                    if (!leftNow) {
-                        recipeScrollDragging = false;
-                    }
-                    creativeSearchFocused = false;
-                    gRecipeSearchText = recipeSearchFocused ? &recipeSearchText : nullptr;
-                    glfwSetCharCallback(window,
-                                        recipeSearchFocused ? onRecipeSearchCharInput : nullptr);
-                    if (recipeScrollDragging && recipeLayout.maxScroll > 0.0f) {
-                        const float thumbTravel =
-                            std::max(0.0f, recipeLayout.trackH - recipeLayout.thumbH);
-                        const float thumbY = std::clamp(
-                            static_cast<float>(my) - recipeScrollGrabOffsetY, recipeLayout.trackY,
-                            recipeLayout.trackY + thumbTravel);
-                        const float t = (thumbTravel > 0.0f) ? (thumbY - recipeLayout.trackY) / thumbTravel
-                                                             : 0.0f;
-                        recipeMenuScroll = t * recipeLayout.maxScroll;
-                    }
-                    recipeMenuScroll = std::clamp(recipeMenuScroll, 0.0f, recipeLayout.maxScroll);
                 } else if (creativeMenuVisible && inventoryVisible && !menuOpen && !pauseMenuOpen) {
                     int winW = 1;
                     int winH = 1;
@@ -2328,7 +2734,7 @@ int main() {
                     creativeMenuScroll -= gRecipeMenuScrollDelta * (34.0f * debugCfg.hudScale);
                     const CreativeMenuLayout creativeLayout =
                         computeCreativeMenuLayout(winW, winH, debugCfg.hudScale, craftingGridSize,
-                                                  filteredCreativeItems.size());
+                                                  usingFurnace, filteredCreativeItems.size());
 
                     if (leftNow && !prevLeft) {
                         creativeSearchFocused = mx >= creativeLayout.searchX &&
@@ -2403,7 +2809,7 @@ int main() {
                     glfwGetCursorPos(window, &mx, &my);
                     hoveredInventorySlot =
                         inventorySlotAtCursor(mx, my, winW, winH, true, debugCfg.hudScale,
-                                              craftingGridSize);
+                                              craftingGridSize, usingFurnace);
                 }
 
                 const bool recipeIngredientKeyDown = glfwGetKey(window, GLFW_KEY_U) == GLFW_PRESS;
@@ -2417,7 +2823,13 @@ int main() {
                         }
                     } else if (hoveredInventorySlot >= game::Inventory::kSlotCount &&
                                hoveredInventorySlot < game::Inventory::kSlotCount + kCraftInputCount) {
-                        const auto &s = crafting.input[hoveredInventorySlot - game::Inventory::kSlotCount];
+                        const auto &s = usingFurnace
+                                            ? ((hoveredInventorySlot ==
+                                                game::Inventory::kSlotCount + 1)
+                                                   ? smelting.fuel
+                                                   : smelting.input)
+                                            : crafting.input[hoveredInventorySlot -
+                                                             game::Inventory::kSlotCount];
                         if (s.count > 0 && s.id != voxel::AIR) {
                             hoveredId = s.id;
                         }
@@ -2521,7 +2933,7 @@ int main() {
                     glfwGetCursorPos(window, &mx, &my);
                     const int slotIndex =
                         inventorySlotAtCursor(mx, my, winW, winH, true, debugCfg.hudScale,
-                                              craftingGridSize);
+                                              craftingGridSize, usingFurnace);
                     const bool shiftDown =
                         (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS) ||
                         (glfwGetKey(window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS);
@@ -2603,12 +3015,248 @@ int main() {
                         if (idx >= 0 && idx < game::Inventory::kSlotCount) {
                             return &inventory.slot(idx);
                         }
+                        if (usingFurnace) {
+                            if (idx == game::Inventory::kSlotCount) {
+                                return &smelting.input;
+                            }
+                            if (idx == game::Inventory::kSlotCount + 1) {
+                                return &smelting.fuel;
+                            }
+                            return nullptr;
+                        }
                         if (idx >= game::Inventory::kSlotCount &&
                             idx < game::Inventory::kSlotCount + kCraftInputCount) {
                             return &crafting.input[idx - game::Inventory::kSlotCount];
                         }
                         return nullptr;
                     };
+                    const int furnaceInputSlot = game::Inventory::kSlotCount;
+                    const int furnaceFuelSlot = game::Inventory::kSlotCount + 1;
+                    auto furnaceSlotAccepts = [&](int idx, voxel::BlockId id) {
+                        if (!usingFurnace || id == voxel::AIR) {
+                            return true;
+                        }
+                        if (idx == furnaceInputSlot) {
+                            return smeltingSystem.canSmelt(id);
+                        }
+                        if (idx == furnaceFuelSlot) {
+                            return smeltingSystem.isFuel(id);
+                        }
+                        if (idx == kCraftOutputSlot) {
+                            return false;
+                        }
+                        return true;
+                    };
+                    auto canAcceptIntoSlotForId = [&](int idx, voxel::BlockId id) {
+                        if (idx == kCraftOutputSlot || idx == kTrashSlot) {
+                            return false;
+                        }
+                        if (id == voxel::AIR) {
+                            return false;
+                        }
+                        auto *slot = slotFromUiIndex(idx);
+                        if (slot == nullptr) {
+                            return false;
+                        }
+                        if (!furnaceSlotAccepts(idx, id)) {
+                            return false;
+                        }
+                        if (slot->count <= 0 || slot->id == voxel::AIR) {
+                            return true;
+                        }
+                        return slot->id == id && slot->count < game::Inventory::kMaxStack;
+                    };
+                    auto tryPlaceOneFromCarried = [&](int idx) {
+                        if (idx == kCraftOutputSlot || idx == kTrashSlot) {
+                            return false;
+                        }
+                        if (carriedSlot.id == voxel::AIR || carriedSlot.count <= 0) {
+                            return false;
+                        }
+                        auto *dst = slotFromUiIndex(idx);
+                        if (dst == nullptr || !furnaceSlotAccepts(idx, carriedSlot.id)) {
+                            return false;
+                        }
+                        if (dst->count <= 0 || dst->id == voxel::AIR) {
+                            dst->id = carriedSlot.id;
+                            dst->count = 1;
+                            carriedSlot.count -= 1;
+                            clearIfEmpty(carriedSlot);
+                            return true;
+                        }
+                        if (dst->id == carriedSlot.id && dst->count < game::Inventory::kMaxStack) {
+                            dst->count += 1;
+                            carriedSlot.count -= 1;
+                            clearIfEmpty(carriedSlot);
+                            return true;
+                        }
+                        return false;
+                    };
+                    auto recomputeSpreadPreview = [&]() {
+                        carriedSlot = inventorySpreadStartCarried;
+                        for (const auto &entry : inventorySpreadOriginalSlots) {
+                            if (auto *slot = slotFromUiIndex(entry.first); slot != nullptr) {
+                                *slot = entry.second;
+                            }
+                        }
+                        bool progress = true;
+                        while (carriedSlot.id != voxel::AIR && carriedSlot.count > 0 && progress) {
+                            progress = false;
+                            for (const int idx : inventorySpreadSlots) {
+                                if (carriedSlot.id == voxel::AIR || carriedSlot.count <= 0) {
+                                    break;
+                                }
+                                auto *dst = slotFromUiIndex(idx);
+                                if (dst == nullptr || !furnaceSlotAccepts(idx, carriedSlot.id)) {
+                                    continue;
+                                }
+                                if (dst->count > 0 && dst->id != carriedSlot.id) {
+                                    continue;
+                                }
+                                if (dst->count >= game::Inventory::kMaxStack) {
+                                    continue;
+                                }
+                                if (dst->count <= 0 || dst->id == voxel::AIR) {
+                                    dst->id = carriedSlot.id;
+                                    dst->count = 0;
+                                }
+                                dst->count += 1;
+                                carriedSlot.count -= 1;
+                                clearIfEmpty(carriedSlot);
+                                progress = true;
+                            }
+                        }
+                        if (!usingFurnace) {
+                            craftingSystem.updateOutput(crafting, craftingGridSize);
+                        }
+                    };
+                    auto recomputeRightSpreadPreview = [&]() {
+                        carriedSlot = inventoryRightSpreadStartCarried;
+                        for (const auto &entry : inventoryRightSpreadOriginalSlots) {
+                            if (auto *slot = slotFromUiIndex(entry.first); slot != nullptr) {
+                                *slot = entry.second;
+                            }
+                        }
+                        bool progress = true;
+                        while (carriedSlot.id != voxel::AIR && carriedSlot.count > 0 && progress) {
+                            progress = false;
+                            for (const int idx : inventoryRightSpreadSlots) {
+                                if (carriedSlot.id == voxel::AIR || carriedSlot.count <= 0) {
+                                    break;
+                                }
+                                auto *dst = slotFromUiIndex(idx);
+                                if (dst == nullptr ||
+                                    !furnaceSlotAccepts(idx, inventoryRightSpreadStartCarried.id)) {
+                                    continue;
+                                }
+                                if (dst->count > 0 &&
+                                    dst->id != inventoryRightSpreadStartCarried.id) {
+                                    continue;
+                                }
+                                if (dst->count >= game::Inventory::kMaxStack) {
+                                    continue;
+                                }
+                                if (dst->count <= 0 || dst->id == voxel::AIR) {
+                                    dst->id = inventoryRightSpreadStartCarried.id;
+                                    dst->count = 0;
+                                }
+                                dst->count += 1;
+                                carriedSlot.count -= 1;
+                                clearIfEmpty(carriedSlot);
+                                progress = true;
+                            }
+                        }
+                        if (!usingFurnace) {
+                            craftingSystem.updateOutput(crafting, craftingGridSize);
+                        }
+                    };
+                    auto resetLeftSpread = [&]() {
+                        inventorySpreadDragging = false;
+                        inventorySpreadSlots.clear();
+                        inventorySpreadOriginalSlots.clear();
+                        inventorySpreadPickupSourceSlot = -1;
+                    };
+                    auto startLeftSpread = [&](int idx) {
+                        inventorySpreadDragging = true;
+                        inventorySpreadStartCarried = carriedSlot;
+                        inventorySpreadSlots.clear();
+                        inventorySpreadOriginalSlots.clear();
+                        inventorySpreadSlots.push_back(idx);
+                        if (auto *slot = slotFromUiIndex(idx); slot != nullptr) {
+                            inventorySpreadOriginalSlots.emplace_back(idx, *slot);
+                        }
+                        recomputeSpreadPreview();
+                    };
+                    auto resetRightSpread = [&]() {
+                        inventoryRightSpreadDragging = false;
+                        inventoryRightSpreadSlots.clear();
+                        inventoryRightSpreadOriginalSlots.clear();
+                    };
+                    auto startRightSpread = [&](int idx) {
+                        inventoryRightSpreadDragging = true;
+                        inventoryRightSpreadStartCarried = carriedSlot;
+                        inventoryRightSpreadSlots.clear();
+                        inventoryRightSpreadOriginalSlots.clear();
+                        inventoryRightSpreadSlots.push_back(idx);
+                        if (auto *slot = slotFromUiIndex(idx); slot != nullptr) {
+                            inventoryRightSpreadOriginalSlots.emplace_back(idx, *slot);
+                        }
+                    };
+                    if (left && !prevInventoryLeft) {
+                        resetLeftSpread();
+                    }
+                    if (!inventorySpreadDragging && left && prevInventoryLeft && !shiftDown &&
+                        carriedSlot.id != voxel::AIR && carriedSlot.count > 0 &&
+                        slotIndex != inventorySpreadPickupSourceSlot &&
+                        canAcceptIntoSlotForId(slotIndex, carriedSlot.id)) {
+                        startLeftSpread(slotIndex);
+                    }
+                    if (inventorySpreadDragging && left && !shiftDown &&
+                        canAcceptIntoSlotForId(slotIndex, carriedSlot.id)) {
+                        if (std::find(inventorySpreadSlots.begin(), inventorySpreadSlots.end(),
+                                      slotIndex) == inventorySpreadSlots.end()) {
+                            inventorySpreadSlots.push_back(slotIndex);
+                            if (auto *slot = slotFromUiIndex(slotIndex); slot != nullptr) {
+                                inventorySpreadOriginalSlots.emplace_back(slotIndex, *slot);
+                            }
+                            recomputeSpreadPreview();
+                        }
+                    }
+                    if (inventorySpreadDragging && !left && prevInventoryLeft) {
+                        resetLeftSpread();
+                    }
+                    if (!left && !prevInventoryLeft) {
+                        resetLeftSpread();
+                    }
+                    if (right && !prevInventoryRight) {
+                        resetRightSpread();
+                        if (!shiftDown && carriedSlot.id != voxel::AIR && carriedSlot.count > 0 &&
+                            canAcceptIntoSlotForId(slotIndex, carriedSlot.id)) {
+                            startRightSpread(slotIndex);
+                        }
+                    }
+                    if (!inventoryRightSpreadDragging && right && prevInventoryRight && !shiftDown &&
+                        carriedSlot.id != voxel::AIR && carriedSlot.count > 0 &&
+                        canAcceptIntoSlotForId(slotIndex, carriedSlot.id)) {
+                        startRightSpread(slotIndex);
+                    }
+                    if (inventoryRightSpreadDragging && right && prevInventoryRight &&
+                        canAcceptIntoSlotForId(slotIndex, inventoryRightSpreadStartCarried.id)) {
+                        if (std::find(inventoryRightSpreadSlots.begin(),
+                                      inventoryRightSpreadSlots.end(),
+                                      slotIndex) == inventoryRightSpreadSlots.end()) {
+                            inventoryRightSpreadSlots.push_back(slotIndex);
+                            if (auto *slot = slotFromUiIndex(slotIndex); slot != nullptr) {
+                                inventoryRightSpreadOriginalSlots.emplace_back(slotIndex, *slot);
+                            }
+                            if (inventoryRightSpreadSlots.size() > 1) {
+                                recomputeRightSpreadPreview();
+                            }
+                        }
+                    }
+                    if (!right) {
+                        resetRightSpread();
+                    }
 
                     bool handledRecipeClick = false;
                     bool handledCreativeClick = false;
@@ -2616,22 +3264,22 @@ int main() {
                     if (creativeMenuVisible && (left && !prevInventoryLeft || right && !prevInventoryRight)) {
                         const CreativeMenuLayout creativeLayout =
                             computeCreativeMenuLayout(winW, winH, debugCfg.hudScale, craftingGridSize,
-                                                      filteredCreativeItems.size());
+                                                      usingFurnace, filteredCreativeItems.size());
                         const int creativeIndex = creativeItemAtCursor(
                             mx, my, creativeLayout, creativeMenuScroll, filteredCreativeItems.size());
                         if (creativeIndex >= 0 &&
                             creativeIndex < static_cast<int>(filteredCreativeItems.size())) {
                             const voxel::BlockId id = filteredCreativeItems[creativeIndex];
-                            const int addCount = (left && !prevInventoryLeft) ? game::Inventory::kMaxStack
-                                                                               : 1;
+                            const int addCount =
+                                shiftDown ? game::Inventory::kMaxStack : 1;
                             inventory.add(id, addCount);
                             handledCreativeClick = true;
                         }
                     }
-                    if (recipeMenuVisible && left && !prevInventoryLeft) {
+                    if (recipeMenuVisible && !usingFurnace && left && !prevInventoryLeft) {
                         const RecipeMenuLayout recipeLayout =
                             computeRecipeMenuLayout(winW, winH, debugCfg.hudScale, craftingGridSize,
-                                                    filteredRecipeIndices.size());
+                                                    usingFurnace, filteredRecipeIndices.size());
                         const int recipeIndex = recipeRowAtCursor(
                             mx, my, recipeLayout, recipeMenuScroll, filteredRecipeIndices.size());
                         if (recipeIndex >= 0 &&
@@ -2676,6 +3324,143 @@ int main() {
                             handledRecipeClick = true;
                         }
                     }
+                    if (recipeMenuVisible && usingFurnace && left && !prevInventoryLeft) {
+                        const RecipeMenuLayout recipeLayout = computeRecipeMenuLayout(
+                            winW, winH, debugCfg.hudScale, craftingGridSize, usingFurnace,
+                            filteredSmeltingIndices.size());
+                        const int recipeIndex = recipeRowAtCursor(
+                            mx, my, recipeLayout, recipeMenuScroll, filteredSmeltingIndices.size());
+                        if (recipeIndex >= 0 &&
+                            recipeIndex < static_cast<int>(filteredSmeltingIndices.size())) {
+                            const auto &smeltRecipes = smeltingSystem.recipes();
+                            const auto &recipe = smeltRecipes[filteredSmeltingIndices[recipeIndex]];
+                            int fuelCount = 0;
+                            int inputCount = 0;
+                            for (int i = 0; i < game::Inventory::kSlotCount; ++i) {
+                                const auto &slot = inventory.slot(i);
+                                if (slot.id != voxel::AIR && slot.count > 0) {
+                                    if (smeltingSystem.isFuel(slot.id)) {
+                                        fuelCount += slot.count;
+                                    }
+                                    if (slot.id == recipe.input) {
+                                        inputCount += slot.count;
+                                    }
+                                }
+                            }
+                            const bool smeltableNow = (inputCount > 0 && fuelCount > 0);
+                            if (!smeltableNow) {
+                                handledRecipeClick = true;
+                            } else {
+                                const bool switchingRecipe =
+                                    (smelting.input.id != voxel::AIR && smelting.input.count > 0 &&
+                                     smelting.input.id != recipe.input);
+                                bool abortRecipeClick = false;
+
+                                if (switchingRecipe) {
+                                    const auto stackCapacityFor = [&](voxel::BlockId id) {
+                                        int cap = 0;
+                                        for (int i = 0; i < game::Inventory::kSlotCount; ++i) {
+                                            const auto &dst = inventory.slot(i);
+                                            if (dst.count == 0 || dst.id == voxel::AIR) {
+                                                cap += game::Inventory::kMaxStack;
+                                            } else if (dst.id == id &&
+                                                       dst.count < game::Inventory::kMaxStack) {
+                                                cap += (game::Inventory::kMaxStack - dst.count);
+                                            }
+                                        }
+                                        return cap;
+                                    };
+
+                                    int needInput = (smelting.input.id != voxel::AIR &&
+                                                     smelting.input.count > 0)
+                                                        ? smelting.input.count
+                                                        : 0;
+                                    int needOutput = (smelting.output.id != voxel::AIR &&
+                                                      smelting.output.count > 0)
+                                                         ? smelting.output.count
+                                                         : 0;
+                                    bool canStoreAll = true;
+                                    if (needInput > 0 || needOutput > 0) {
+                                        if (needInput > 0 && smelting.input.id == smelting.output.id) {
+                                            canStoreAll =
+                                                stackCapacityFor(smelting.input.id) >=
+                                                (needInput + needOutput);
+                                        } else {
+                                            if (needInput > 0) {
+                                                canStoreAll =
+                                                    canStoreAll &&
+                                                    (stackCapacityFor(smelting.input.id) >= needInput);
+                                            }
+                                            if (needOutput > 0) {
+                                                canStoreAll =
+                                                    canStoreAll &&
+                                                    (stackCapacityFor(smelting.output.id) >= needOutput);
+                                            }
+                                        }
+                                    }
+                                    if (!canStoreAll) {
+                                        handledRecipeClick = true;
+                                        abortRecipeClick = true;
+                                    }
+
+                                    if (!abortRecipeClick) {
+                                        if (needInput > 0) {
+                                            int remaining = smelting.input.count;
+                                            moveStackIntoInventory(smelting.input.id, remaining);
+                                            smelting.input.count = remaining;
+                                            clearIfEmpty(smelting.input);
+                                        }
+                                        if (needOutput > 0) {
+                                            int remaining = smelting.output.count;
+                                            moveStackIntoInventory(smelting.output.id, remaining);
+                                            smelting.output.count = remaining;
+                                            clearIfEmpty(smelting.output);
+                                        }
+                                        smelting.progressSeconds = 0.0f;
+                                    }
+                                }
+
+                                if (!abortRecipeClick) {
+                                    auto addOneInput = [&](voxel::BlockId id) {
+                                        if (id == voxel::AIR) {
+                                            return false;
+                                        }
+                                        if (smelting.input.id != voxel::AIR && smelting.input.id != id) {
+                                            return false;
+                                        }
+                                        if (smelting.input.id == voxel::AIR ||
+                                            smelting.input.count <= 0) {
+                                            smelting.input.id = id;
+                                            smelting.input.count = 0;
+                                        }
+                                        if (smelting.input.count >= game::Inventory::kMaxStack) {
+                                            return false;
+                                        }
+                                        for (int i = 0; i < game::Inventory::kSlotCount; ++i) {
+                                            auto &slot = inventory.slot(i);
+                                            if (slot.id != id || slot.count <= 0) {
+                                                continue;
+                                            }
+                                            slot.count -= 1;
+                                            smelting.input.count += 1;
+                                            if (slot.count <= 0) {
+                                                slot = {};
+                                            }
+                                            return true;
+                                        }
+                                        return false;
+                                    };
+                                    if (shiftDown) {
+                                        while (addOneInput(recipe.input)) {
+                                        }
+                                    } else {
+                                        addOneInput(recipe.input);
+                                    }
+                                }
+                                handledRecipeClick = true;
+                            }
+                        }
+                    }
 
                     if (slotIndex == kTrashSlot &&
                         ((left && !prevInventoryLeft) || (right && !prevInventoryRight))) {
@@ -2691,8 +3476,36 @@ int main() {
                             : slotFromUiIndex(slotIndex);
 
                     if (!handledRecipeClick && slotIndex == kCraftOutputSlot) {
-                        if (left && !prevInventoryLeft && crafting.output.id != voxel::AIR &&
-                            crafting.output.count > 0) {
+                        if (usingFurnace) {
+                            if (left && !prevInventoryLeft && smelting.output.id != voxel::AIR &&
+                                smelting.output.count > 0) {
+                                if (shiftDown && carriedSlot.count == 0) {
+                                    int remaining = smelting.output.count;
+                                    const voxel::BlockId id = smelting.output.id;
+                                    moveStackIntoInventory(id, remaining);
+                                    smelting.output.count = remaining;
+                                    clearIfEmpty(smelting.output);
+                                } else {
+                                    const bool canTake = (carriedSlot.count == 0 ||
+                                                          carriedSlot.id == voxel::AIR ||
+                                                          carriedSlot.id == smelting.output.id);
+                                    if (canTake) {
+                                        if (carriedSlot.count == 0 || carriedSlot.id == voxel::AIR) {
+                                            carriedSlot.id = smelting.output.id;
+                                        }
+                                        const int canStack =
+                                            game::Inventory::kMaxStack - carriedSlot.count;
+                                        if (canStack > 0) {
+                                            const int move = std::min(canStack, smelting.output.count);
+                                            carriedSlot.count += move;
+                                            smelting.output.count -= move;
+                                            clearIfEmpty(smelting.output);
+                                        }
+                                    }
+                                }
+                            }
+                        } else if (left && !prevInventoryLeft && crafting.output.id != voxel::AIR &&
+                                   crafting.output.count > 0) {
                             if (shiftDown && carriedSlot.count == 0) {
                                 while (crafting.output.id != voxel::AIR && crafting.output.count > 0) {
                                     const voxel::BlockId craftedId = crafting.output.id;
@@ -2774,11 +3587,54 @@ int main() {
                                 }
                             } else if (shiftDown && carriedSlot.count == 0) {
                                 if (slotIndex >= 0 && slotIndex < game::Inventory::kSlotCount) {
-                                    if (slotIndex < game::Inventory::kHotbarSize) {
-                                        moveToRange(slotIndex, game::Inventory::kHotbarSize,
-                                                    game::Inventory::kSlotCount);
+                                    if (usingFurnace) {
+                                        auto &from = inventory.slot(slotIndex);
+                                        bool movedAny = false;
+                                        auto moveInto = [&](game::Inventory::Slot &dst) {
+                                            if (from.count <= 0 || from.id == voxel::AIR) {
+                                                return;
+                                            }
+                                            if (dst.count > 0 && dst.id != from.id) {
+                                                return;
+                                            }
+                                            const int can = game::Inventory::kMaxStack - dst.count;
+                                            if (can <= 0) {
+                                                return;
+                                            }
+                                            const int move = std::min(can, from.count);
+                                            if (move <= 0) {
+                                                return;
+                                            }
+                                            if (dst.id == voxel::AIR || dst.count <= 0) {
+                                                dst.id = from.id;
+                                                dst.count = 0;
+                                            }
+                                            dst.count += move;
+                                            from.count -= move;
+                                            movedAny = true;
+                                        };
+                                        if (smeltingSystem.canSmelt(from.id)) {
+                                            moveInto(smelting.input);
+                                        }
+                                        if (smeltingSystem.isFuel(from.id)) {
+                                            moveInto(smelting.fuel);
+                                        }
+                                        if (!movedAny) {
+                                            if (slotIndex < game::Inventory::kHotbarSize) {
+                                                moveToRange(slotIndex, game::Inventory::kHotbarSize,
+                                                            game::Inventory::kSlotCount);
+                                            } else {
+                                                moveToRange(slotIndex, 0, game::Inventory::kHotbarSize);
+                                            }
+                                        }
+                                        clearIfEmpty(from);
                                     } else {
-                                        moveToRange(slotIndex, 0, game::Inventory::kHotbarSize);
+                                        if (slotIndex < game::Inventory::kHotbarSize) {
+                                            moveToRange(slotIndex, game::Inventory::kHotbarSize,
+                                                        game::Inventory::kSlotCount);
+                                        } else {
+                                            moveToRange(slotIndex, 0, game::Inventory::kHotbarSize);
+                                        }
                                     }
                                 } else if (slotIndex >= game::Inventory::kSlotCount &&
                                            slotIndex < game::Inventory::kSlotCount + kCraftInputCount) {
@@ -2791,19 +3647,26 @@ int main() {
                             } else if (carriedSlot.count == 0) {
                                 carriedSlot = *dst;
                                 *dst = {};
+                                inventorySpreadPickupSourceSlot = slotIndex;
                             } else if (dst->count == 0) {
-                                *dst = carriedSlot;
-                                carriedSlot = {};
+                                if (furnaceSlotAccepts(slotIndex, carriedSlot.id)) {
+                                    *dst = carriedSlot;
+                                    carriedSlot = {};
+                                }
                             } else if (dst->id == carriedSlot.id &&
                                        dst->count < game::Inventory::kMaxStack) {
-                                const int canTake = game::Inventory::kMaxStack - dst->count;
-                                const int move =
-                                    (carriedSlot.count < canTake) ? carriedSlot.count : canTake;
-                                dst->count += move;
-                                carriedSlot.count -= move;
-                                clearIfEmpty(carriedSlot);
+                                if (furnaceSlotAccepts(slotIndex, carriedSlot.id)) {
+                                    const int canTake = game::Inventory::kMaxStack - dst->count;
+                                    const int move =
+                                        (carriedSlot.count < canTake) ? carriedSlot.count : canTake;
+                                    dst->count += move;
+                                    carriedSlot.count -= move;
+                                    clearIfEmpty(carriedSlot);
+                                }
                             } else {
-                                std::swap(*dst, carriedSlot);
+                                if (furnaceSlotAccepts(slotIndex, carriedSlot.id)) {
+                                    std::swap(*dst, carriedSlot);
+                                }
                             }
                             lastInventoryLeftClickTime = now;
                             lastInventoryLeftClickId = clickId;
@@ -2817,20 +3680,12 @@ int main() {
                                     clearIfEmpty(*dst);
                                 }
                             } else {
-                                if (dst->count == 0 || dst->id == voxel::AIR) {
-                                    dst->id = carriedSlot.id;
-                                    dst->count = 1;
-                                    carriedSlot.count -= 1;
-                                    clearIfEmpty(carriedSlot);
-                                } else if (dst->id == carriedSlot.id &&
-                                           dst->count < game::Inventory::kMaxStack) {
-                                    dst->count += 1;
-                                    carriedSlot.count -= 1;
-                                    clearIfEmpty(carriedSlot);
+                                if (tryPlaceOneFromCarried(slotIndex)) {
+                                    // Single-slot right click behavior: place one.
                                 }
                             }
                         }
-                        if (slotIndex >= game::Inventory::kSlotCount) {
+                        if (!usingFurnace && slotIndex >= game::Inventory::kSlotCount) {
                             craftingSystem.updateOutput(crafting, craftingGridSize);
                         }
                     } else if (!handledRecipeClick && !handledCreativeClick && !handledTrashClick) {
@@ -2861,11 +3716,41 @@ int main() {
                         miningProgress += dt / game::breakSeconds(targetId);
                         if (miningProgress >= 1.0f) {
                             if (world.setBlock(target.x, target.y, target.z, voxel::AIR)) {
+                                if (voxel::isFurnace(targetId)) {
+                                    world::FurnaceState wstate{};
+                                    if (world.getFurnaceState(target.x, target.y, target.z, wstate)) {
+                                        auto dropSmeltSlot = [&](const game::Inventory::Slot &slot) {
+                                            if (slot.id != voxel::AIR && slot.count > 0) {
+                                                itemDrops.spawn(slot.id, glm::vec3(target) +
+                                                                             glm::vec3(0.5f, 0.2f, 0.5f),
+                                                               slot.count);
+                                            }
+                                        };
+                                        const game::SmeltingSystem::State gstate =
+                                            fromWorldFurnaceState(wstate);
+                                        dropSmeltSlot(gstate.input);
+                                        dropSmeltSlot(gstate.fuel);
+                                        dropSmeltSlot(gstate.output);
+                                        world.clearFurnaceState(target.x, target.y, target.z);
+                                    }
+                                    if (activeFurnaceCell.has_value() &&
+                                        activeFurnaceCell->x == target.x &&
+                                        activeFurnaceCell->y == target.y &&
+                                        activeFurnaceCell->z == target.z) {
+                                        activeFurnaceCell.reset();
+                                        smelting = {};
+                                        usingFurnace = false;
+                                    }
+                                }
                                 glm::vec3 dropPos = glm::vec3(target) + glm::vec3(0.5f, 0.2f, 0.5f);
                                 if (targetId == voxel::TALL_GRASS || targetId == voxel::FLOWER) {
                                     dropPos.y = static_cast<float>(target.y) + 0.02f;
                                 }
-                                itemDrops.spawn(voxel::isTorch(targetId) ? voxel::TORCH : targetId,
+                                const voxel::BlockId dropId =
+                                    voxel::isTorch(targetId)
+                                        ? voxel::TORCH
+                                        : (voxel::isFurnace(targetId) ? voxel::FURNACE : targetId);
+                                itemDrops.spawn(dropId,
                                                dropPos, 1);
                                 dropUnsupportedTorchesAround(world, itemDrops, target);
                                 dropUnsupportedPlantsAround(world, itemDrops, target);
@@ -2893,7 +3778,8 @@ int main() {
                         voxel::BlockId placeId = slot.id;
 
                         // Sticks are inventory items, not placeable world blocks.
-                        if (slot.id == voxel::STICK) {
+                        if (slot.id == voxel::STICK || slot.id == voxel::IRON_INGOT ||
+                            slot.id == voxel::COPPER_INGOT || slot.id == voxel::GOLD_INGOT) {
                             placementAllowed = false;
                         }
 
@@ -2925,6 +3811,10 @@ int main() {
                             if (!world.isSolidBlock(place.x, place.y - 1, place.z)) {
                                 placementAllowed = false;
                             }
+                        }
+
+                        if (placementAllowed && placeId == voxel::FURNACE) {
+                            placeId = orientedFurnaceFromForward(camera.forward(), false);
                         }
 
                         if (placementAllowed && world.setBlock(place.x, place.y, place.z, placeId)) {
@@ -3299,13 +4189,38 @@ int main() {
                 if (hudVisible) {
                     std::vector<game::CraftingSystem::RecipeInfo> visibleRecipes;
                     std::vector<bool> visibleRecipeCraftable;
-                    if (recipeMenuVisible) {
+                    std::vector<game::SmeltingSystem::Recipe> visibleSmeltingRecipes;
+                    if (recipeMenuVisible && !usingFurnace) {
                         visibleRecipes.reserve(filteredRecipeIndices.size());
                         visibleRecipeCraftable.reserve(filteredRecipeIndices.size());
                         for (int idx : filteredRecipeIndices) {
                             const auto &recipe = craftingSystem.recipeInfos()[idx];
                             visibleRecipes.push_back(recipe);
                             visibleRecipeCraftable.push_back(isRecipeCraftableNow(idx));
+                        }
+                    } else if (recipeMenuVisible && usingFurnace) {
+                        const auto &smeltRecipes = smeltingSystem.recipes();
+                        visibleSmeltingRecipes.reserve(filteredSmeltingIndices.size());
+                        visibleRecipeCraftable.reserve(filteredSmeltingIndices.size());
+                        int fuelCount = 0;
+                        for (int i = 0; i < game::Inventory::kSlotCount; ++i) {
+                            const auto &slot = inventory.slot(i);
+                            if (slot.id != voxel::AIR && slot.count > 0 &&
+                                smeltingSystem.isFuel(slot.id)) {
+                                fuelCount += slot.count;
+                            }
+                        }
+                        for (int idx : filteredSmeltingIndices) {
+                            const auto &recipe = smeltRecipes[idx];
+                            visibleSmeltingRecipes.push_back(recipe);
+                            int inputCount = 0;
+                            for (int s = 0; s < game::Inventory::kSlotCount; ++s) {
+                                const auto &slot = inventory.slot(s);
+                                if (slot.id == recipe.input && slot.count > 0) {
+                                    inputCount += slot.count;
+                                }
+                            }
+                            visibleRecipeCraftable.push_back(inputCount > 0 && fuelCount > 0);
                         }
                     }
                     std::string lookedAt = "Looking: (none)";
@@ -3340,8 +4255,15 @@ int main() {
                                  allCounts, inventoryVisible, carriedSlot.id, carriedSlot.count,
                                  static_cast<float>(cursorX), static_cast<float>(cursorY),
                                  hoveredInventorySlot, debugCfg.hudScale, crafting.input,
-                                 craftingGridSize, usingCraftingTable, recipeMenuVisible,
-                                 visibleRecipes, visibleRecipeCraftable, recipeMenuScroll,
+                                 craftingGridSize, usingCraftingTable, usingFurnace,
+                                 smelting.input, smelting.fuel, smelting.output,
+                                 smelting.progressSeconds / game::SmeltingSystem::kSmeltSeconds,
+                                 (smelting.burnSecondsCapacity > 0.0f)
+                                     ? (smelting.burnSecondsRemaining / smelting.burnSecondsCapacity)
+                                     : 0.0f,
+                                 recipeMenuVisible,
+                                 visibleRecipes, visibleSmeltingRecipes, visibleRecipeCraftable,
+                                 recipeMenuScroll,
                                  static_cast<float>(glfwGetTime()), recipeSearchText,
                                  creativeMenuVisible, filteredCreativeItems, creativeMenuScroll,
                                  creativeSearchText, recipeCraftableOnly, recipeIngredientFilter,

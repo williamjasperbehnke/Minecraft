@@ -7,6 +7,9 @@
 namespace game {
 
 const char *blockName(voxel::BlockId id) {
+    if (voxel::isFurnace(id)) {
+        return "Furnace";
+    }
     switch (id) {
     case voxel::GRASS:
         return "Grass Block";
@@ -74,12 +77,25 @@ const char *blockName(voxel::BlockId id) {
         return "Birch Planks";
     case voxel::STICK:
         return "Stick";
+    case voxel::GLASS:
+        return "Glass";
+    case voxel::BRICKS:
+        return "Bricks";
+    case voxel::IRON_INGOT:
+        return "Iron Ingot";
+    case voxel::COPPER_INGOT:
+        return "Copper Ingot";
+    case voxel::GOLD_INGOT:
+        return "Gold Ingot";
     default:
         return "Block";
     }
 }
 
 float breakSeconds(voxel::BlockId id) {
+    if (voxel::isFurnace(id)) {
+        return 0.58f;
+    }
     switch (id) {
     case voxel::LEAVES:
     case voxel::SPRUCE_LEAVES:
@@ -108,6 +124,13 @@ float breakSeconds(voxel::BlockId id) {
     case voxel::CRAFTING_TABLE:
     case voxel::STICK:
         return 0.58f;
+    case voxel::GLASS:
+    case voxel::BRICKS:
+        return 0.62f;
+    case voxel::IRON_INGOT:
+    case voxel::COPPER_INGOT:
+    case voxel::GOLD_INGOT:
+        return 0.30f;
     case voxel::COAL_ORE:
     case voxel::COPPER_ORE:
         return 0.70f;
@@ -128,6 +151,9 @@ float breakSeconds(voxel::BlockId id) {
 
 AudioSystem::SoundProfile soundProfileForBlock(voxel::BlockId id) {
     using Profile = AudioSystem::SoundProfile;
+    if (voxel::isFurnace(id)) {
+        return Profile::Stone;
+    }
     switch (id) {
     case voxel::GRASS:
     case voxel::DIRT:
@@ -141,6 +167,7 @@ AudioSystem::SoundProfile soundProfileForBlock(voxel::BlockId id) {
     case voxel::DIAMOND_ORE:
     case voxel::EMERALD_ORE:
     case voxel::SANDSTONE:
+    case voxel::BRICKS:
         return Profile::Stone;
     case voxel::WOOD:
     case voxel::SPRUCE_WOOD:
@@ -169,7 +196,12 @@ AudioSystem::SoundProfile soundProfileForBlock(voxel::BlockId id) {
     case voxel::SNOW_BLOCK:
         return Profile::Snow;
     case voxel::ICE:
+    case voxel::GLASS:
         return Profile::Ice;
+    case voxel::IRON_INGOT:
+    case voxel::COPPER_INGOT:
+    case voxel::GOLD_INGOT:
+        return Profile::Stone;
     default:
         return Profile::Default;
     }

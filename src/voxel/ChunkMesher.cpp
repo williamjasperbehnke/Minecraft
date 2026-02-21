@@ -33,6 +33,26 @@ glm::vec4 flipV(const glm::vec4 &uv) {
     return {uv.x, uv.w, uv.z, uv.y};
 }
 
+glm::ivec2 furnaceFrontNormal(BlockId id) {
+    switch (id) {
+    case FURNACE_POS_X:
+    case LIT_FURNACE_POS_X:
+        return {-1, 0};
+    case FURNACE_NEG_X:
+    case LIT_FURNACE_NEG_X:
+        return {1, 0};
+    case FURNACE_POS_Z:
+    case LIT_FURNACE_POS_Z:
+        return {0, -1};
+    case FURNACE:
+    case FURNACE_NEG_Z:
+    case LIT_FURNACE_NEG_Z:
+        return {0, 1};
+    default:
+        return {0, 0};
+    }
+}
+
 void appendQuad(gfx::CpuMesh &mesh, const glm::vec3 &p0, const glm::vec3 &p1, const glm::vec3 &p2,
                 const glm::vec3 &p3, const glm::vec3 &normal, const glm::vec4 &uv, float skyLight,
                 float blockLight) {
@@ -142,6 +162,11 @@ gfx::CpuMesh ChunkMesher::buildFaceCulled(const Chunk &chunk, const gfx::Texture
                 const float wy = static_cast<float>(y);
                 const float wz = static_cast<float>(chunkXZ.y * Chunk::SZ + z);
                 const auto &d = registry.get(id);
+                const bool furnace = isFurnace(id);
+                const glm::ivec2 front = furnace ? furnaceFrontNormal(id) : glm::ivec2{0, 0};
+                const glm::vec4 furnaceFrontUv =
+                    flipV(atlas.uvRect(furnaceFrontTile(isLitFurnace(id))));
+                const glm::vec4 sideUv = flipV(atlas.uvRect(d.sideTile));
                 if (isCrossPlant(id)) {
                     // Plants should not become fully dim just because a block is directly above:
                     // blend light from their own cell and the cell above.
@@ -179,13 +204,14 @@ gfx::CpuMesh ChunkMesher::buildFaceCulled(const Chunk &chunk, const gfx::Texture
                     const float block = lighting.faceBlockLight(x + 1, y, z);
                     appendQuad(out, {wx + 1, wy, wz}, {wx + 1, wy, wz + 1},
                                {wx + 1, wy + 1, wz + 1}, {wx + 1, wy + 1, wz}, {1, 0, 0},
-                               flipV(atlas.uvRect(d.sideTile)), sky, block);
+                               (furnace && front.x == 1) ? furnaceFrontUv : sideUv, sky, block);
                 }
                 if (isFaceExposed(registry, id, neighborAt(x - 1, y, z))) {
                     const float sky = lighting.faceSkyLight(x - 1, y, z, 0.86f);
                     const float block = lighting.faceBlockLight(x - 1, y, z);
                     appendQuad(out, {wx, wy, wz + 1}, {wx, wy, wz}, {wx, wy + 1, wz},
-                               {wx, wy + 1, wz + 1}, {-1, 0, 0}, flipV(atlas.uvRect(d.sideTile)),
+                               {wx, wy + 1, wz + 1}, {-1, 0, 0},
+                               (furnace && front.x == -1) ? furnaceFrontUv : sideUv,
                                sky, block);
                 }
                 if (isFaceExposed(registry, id, neighborAt(x, y + 1, z))) {
@@ -205,14 +231,16 @@ gfx::CpuMesh ChunkMesher::buildFaceCulled(const Chunk &chunk, const gfx::Texture
                     const float sky = lighting.faceSkyLight(x, y, z + 1, 0.90f);
                     const float block = lighting.faceBlockLight(x, y, z + 1);
                     appendQuad(out, {wx + 1, wy, wz + 1}, {wx, wy, wz + 1}, {wx, wy + 1, wz + 1},
-                               {wx + 1, wy + 1, wz + 1}, {0, 0, 1}, flipV(atlas.uvRect(d.sideTile)),
+                               {wx + 1, wy + 1, wz + 1}, {0, 0, 1},
+                               (furnace && front.y == 1) ? furnaceFrontUv : sideUv,
                                sky, block);
                 }
                 if (isFaceExposed(registry, id, neighborAt(x, y, z - 1))) {
                     const float sky = lighting.faceSkyLight(x, y, z - 1, 0.90f);
                     const float block = lighting.faceBlockLight(x, y, z - 1);
                     appendQuad(out, {wx, wy, wz}, {wx + 1, wy, wz}, {wx + 1, wy + 1, wz},
-                               {wx, wy + 1, wz}, {0, 0, -1}, flipV(atlas.uvRect(d.sideTile)), sky,
+                               {wx, wy + 1, wz}, {0, 0, -1},
+                               (furnace && front.y == -1) ? furnaceFrontUv : sideUv, sky,
                                block);
                 }
             }

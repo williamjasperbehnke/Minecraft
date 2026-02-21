@@ -24,6 +24,10 @@ ChunkCoord unpackChunkCoord(std::int64_t packed) {
                       static_cast<int>(static_cast<std::int32_t>(packed & 0xFFFFFFFF))};
 }
 
+World::FurnaceCoordKey makeFurnaceKey(int x, int y, int z) {
+    return World::FurnaceCoordKey{x, y, z};
+}
+
 } // namespace
 
 World::World(const gfx::TextureAtlas &atlas, std::filesystem::path saveRoot, std::uint32_t seed)
@@ -43,7 +47,29 @@ World::~World() {
     std::lock_guard<std::mutex> lock(chunksMutex_);
     for (auto &[coord, entry] : chunks_) {
         if (entry.chunk) {
-            io_.save(*entry.chunk, coord);
+            std::vector<world::FurnaceRecordLocal> localFurnaces;
+            localFurnaces.reserve(4);
+            for (const auto &[fKey, fState] : furnaceStates_) {
+                if (fKey.y < 0 || fKey.y >= voxel::Chunk::SY) {
+                    continue;
+                }
+                const ChunkCoord fcc = worldToChunk(fKey.x, fKey.z);
+                if (fcc.x != coord.x || fcc.z != coord.z) {
+                    continue;
+                }
+                const int lx = floorMod(fKey.x, voxel::Chunk::SX);
+                const int lz = floorMod(fKey.z, voxel::Chunk::SZ);
+                if (!voxel::isFurnace(entry.chunk->get(lx, fKey.y, lz))) {
+                    continue;
+                }
+                world::FurnaceRecordLocal rec{};
+                rec.x = static_cast<std::uint8_t>(lx);
+                rec.y = static_cast<std::uint8_t>(fKey.y);
+                rec.z = static_cast<std::uint8_t>(lz);
+                rec.state = fState;
+                localFurnaces.push_back(rec);
+            }
+            io_.save(*entry.chunk, coord, &localFurnaces);
         }
     }
 }
@@ -238,7 +264,37 @@ void World::updateStream(const glm::vec3 &playerPos) {
             continue;
         }
         if (it->second.chunk) {
-            io_.save(*it->second.chunk, cc);
+            std::vector<world::FurnaceRecordLocal> localFurnaces;
+            localFurnaces.reserve(4);
+            for (const auto &[fKey, fState] : furnaceStates_) {
+                if (fKey.y < 0 || fKey.y >= voxel::Chunk::SY) {
+                    continue;
+                }
+                const ChunkCoord fcc = worldToChunk(fKey.x, fKey.z);
+                if (fcc.x != cc.x || fcc.z != cc.z) {
+                    continue;
+                }
+                const int lx = floorMod(fKey.x, voxel::Chunk::SX);
+                const int lz = floorMod(fKey.z, voxel::Chunk::SZ);
+                if (!voxel::isFurnace(it->second.chunk->get(lx, fKey.y, lz))) {
+                    continue;
+                }
+                world::FurnaceRecordLocal rec{};
+                rec.x = static_cast<std::uint8_t>(lx);
+                rec.y = static_cast<std::uint8_t>(fKey.y);
+                rec.z = static_cast<std::uint8_t>(lz);
+                rec.state = fState;
+                localFurnaces.push_back(rec);
+            }
+            io_.save(*it->second.chunk, cc, &localFurnaces);
+            for (auto fit = furnaceStates_.begin(); fit != furnaceStates_.end();) {
+                const ChunkCoord fcc = worldToChunk(fit->first.x, fit->first.z);
+                if (fcc.x == cc.x && fcc.z == cc.z) {
+                    fit = furnaceStates_.erase(fit);
+                } else {
+                    ++fit;
+                }
+            }
         }
         chunks_.erase(it);
         pendingLoad_.erase(cc);
@@ -411,11 +467,9 @@ bool World::setBlock(int wx, int wy, int wz, voxel::BlockId id) {
     enqueueRemesh(ChunkCoord{cc.x + 1, cc.z - 1}, true);
     enqueueRemesh(ChunkCoord{cc.x + 1, cc.z + 1}, true);
 
-    // Torch light can cross chunk boundaries even when the modified block is
-    // not on an edge, so refresh direct neighbors for correct seam lighting.
-    if (voxel::isTorch(prevId) || voxel::isTorch(id)) {
-        // Also refresh second ring for torch add/remove to prevent stale light
-        // when cached neighbor meshes are one propagation step behind.
+    // Emissive block changes can cross chunk boundaries even when the modified
+    // block is not on an edge, so refresh a second ring for seam correctness.
+    if (voxel::emittedBlockLight(prevId) != voxel::emittedBlockLight(id)) {
         enqueueRemesh(ChunkCoord{cc.x - 2, cc.z}, true);
         enqueueRemesh(ChunkCoord{cc.x + 2, cc.z}, true);
         enqueueRemesh(ChunkCoord{cc.x, cc.z - 2}, true);
@@ -423,6 +477,53 @@ bool World::setBlock(int wx, int wy, int wz, voxel::BlockId id) {
     }
 
     return true;
+}
+
+bool World::getFurnaceState(int wx, int wy, int wz, FurnaceState &out) const {
+    if (wy < 0 || wy >= voxel::Chunk::SY) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(chunksMutex_);
+    const auto it = furnaceStates_.find(makeFurnaceKey(wx, wy, wz));
+    if (it == furnaceStates_.end()) {
+        return false;
+    }
+    out = it->second;
+    return true;
+}
+
+void World::setFurnaceState(int wx, int wy, int wz, const FurnaceState &state) {
+    if (wy < 0 || wy >= voxel::Chunk::SY) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(chunksMutex_);
+    furnaceStates_[makeFurnaceKey(wx, wy, wz)] = state;
+}
+
+void World::clearFurnaceState(int wx, int wy, int wz) {
+    std::lock_guard<std::mutex> lock(chunksMutex_);
+    furnaceStates_.erase(makeFurnaceKey(wx, wy, wz));
+}
+
+std::vector<glm::ivec3> World::loadedFurnacePositions() const {
+    std::lock_guard<std::mutex> lock(chunksMutex_);
+    std::vector<glm::ivec3> out;
+    out.reserve(furnaceStates_.size());
+    for (const auto &[k, st] : furnaceStates_) {
+        (void)st;
+        const ChunkCoord cc = worldToChunk(k.x, k.z);
+        const auto cit = chunks_.find(cc);
+        if (cit == chunks_.end() || !cit->second.chunk) {
+            continue;
+        }
+        const int lx = floorMod(k.x, voxel::Chunk::SX);
+        const int lz = floorMod(k.z, voxel::Chunk::SZ);
+        if (!voxel::isFurnace(cit->second.chunk->get(lx, k.y, lz))) {
+            continue;
+        }
+        out.emplace_back(k.x, k.y, k.z);
+    }
+    return out;
 }
 
 void World::workerLoop() {
@@ -449,9 +550,17 @@ void World::workerLoop() {
 
         if (job.type == JobType::LoadOrGenerate) {
             auto chunk = std::make_shared<voxel::Chunk>();
-
-            if (!io_.load(*chunk, job.coord)) {
+            std::vector<world::FurnaceRecordLocal> loadedFurnaces;
+            if (!io_.load(*chunk, job.coord, &loadedFurnaces)) {
                 gen_.fillChunk(*chunk, job.coord);
+            } else if (!loadedFurnaces.empty()) {
+                std::lock_guard<std::mutex> lock(chunksMutex_);
+                for (const auto &rec : loadedFurnaces) {
+                    const int wx = job.coord.x * voxel::Chunk::SX + static_cast<int>(rec.x);
+                    const int wy = static_cast<int>(rec.y);
+                    const int wz = job.coord.z * voxel::Chunk::SZ + static_cast<int>(rec.z);
+                    furnaceStates_[makeFurnaceKey(wx, wy, wz)] = rec.state;
+                }
             }
             // Defer mesh build to remesh jobs after chunk registration so
             // neighbor-aware edge culling happens before any faces are rendered.

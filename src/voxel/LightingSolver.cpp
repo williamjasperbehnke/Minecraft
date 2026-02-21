@@ -131,9 +131,10 @@ LightingSolver::LocalLight LightingSolver::buildLocalLight(const Chunk &src) con
     for (int x = 0; x < Chunk::SX; ++x) {
         for (int y = 0; y < Chunk::SY; ++y) {
             for (int z = 0; z < Chunk::SZ; ++z) {
-                if (isTorch(src.getUnchecked(x, y, z))) {
+                const std::uint8_t emission = emittedBlockLight(src.getUnchecked(x, y, z));
+                if (emission > 0) {
                     const int idx = lightIndex(x, y, z);
-                    ll.block[idx] = 14;
+                    ll.block[idx] = emission;
                     queue.push_back(idx);
                 }
             }
@@ -298,9 +299,10 @@ void LightingSolver::buildExtendedBlockLight() {
     for (int ex = 0; ex < kExtSX; ++ex) {
         for (int y = 0; y < Chunk::SY; ++y) {
             for (int ez = 0; ez < kExtSZ; ++ez) {
-                if (isTorch(blockAtExt(ex, y, ez))) {
+                const std::uint8_t emission = emittedBlockLight(blockAtExt(ex, y, ez));
+                if (emission > 0) {
                     const int idx = extIndex(ex, y, ez);
-                    extBlockLight_[idx] = 14;
+                    extBlockLight_[idx] = emission;
                     queue.push_back(idx);
                 }
             }
