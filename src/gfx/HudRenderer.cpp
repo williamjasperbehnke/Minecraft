@@ -2,6 +2,7 @@
 
 #include "game/GameRules.hpp"
 #include "game/SmeltingSystem.hpp"
+#include "voxel/Chunk.hpp"
 
 #include <glad/glad.h>
 #include <stb_easy_font.h>
@@ -52,6 +53,12 @@ unsigned int link(unsigned int vs, unsigned int fs) {
 
 float textWidthPx(const std::string &text) {
     return static_cast<float>(stb_easy_font_width(const_cast<char *>(text.c_str())));
+}
+
+glm::vec3 mapColorForBlock(voxel::BlockId id, const voxel::BlockRegistry &registry,
+                           const TextureAtlas &atlas) {
+    const voxel::BlockDef &def = registry.get(id);
+    return atlas.tileAverageColor(def.topTile);
 }
 
 } // namespace
@@ -572,6 +579,636 @@ void HudRenderer::renderPauseMenu(int width, int height, float cursorX, float cu
 
     const std::string pauseHint = "Esc closes this menu";
     drawText(cx - textWidthPx(pauseHint) * 0.5f, cy + 120.0f, pauseHint, 210, 216, 230, 255);
+
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDisable(GL_DEPTH_TEST);
+    glUseProgram(uiShader_);
+    glUniform2f(glGetUniformLocation(uiShader_, "uScreen"), static_cast<float>(width),
+                static_cast<float>(height));
+    glBindVertexArray(uiVao_);
+    glBindBuffer(GL_ARRAY_BUFFER, uiVbo_);
+    glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(verts_.size() * sizeof(UiVertex)),
+                 verts_.data(), GL_DYNAMIC_DRAW);
+    glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(verts_.size()));
+    glEnable(GL_DEPTH_TEST);
+}
+
+void HudRenderer::renderMapOverlay(int width, int height, const game::MapSystem &map,
+                                   int mapCenterWX, int mapCenterWZ, int playerWX, int playerWZ,
+                                   float zoom, float cursorX, float cursorY,
+                                   int selectedWaypoint, const std::string &waypointName,
+                                   std::uint8_t waypointR, std::uint8_t waypointG,
+                                   std::uint8_t waypointB, int waypointIcon,
+                                   bool waypointVisible, float playerHeadingRad,
+                                   bool waypointNameFocused, bool waypointEditorOpen,
+                                   const voxel::BlockRegistry &registry, const TextureAtlas &atlas) {
+    init2D();
+    verts_.clear();
+
+    const float w = static_cast<float>(width);
+    const float h = static_cast<float>(height);
+    const float panelW = std::max(320.0f, std::min(w - 80.0f, w * 0.86f));
+    const float panelH = std::max(260.0f, std::min(h - 60.0f, h * 0.82f));
+    const float panelX = (w - panelW) * 0.5f;
+    const float panelY = (h - panelH) * 0.5f;
+    const float innerPad = 14.0f;
+    const float gridX = panelX + innerPad;
+    const float gridY = panelY + innerPad + 18.0f;
+    const float gridW = panelW - innerPad * 2.0f;
+    const float gridH = panelH - innerPad * 2.0f - 24.0f;
+    // Keep world-map sampling density bounded; very small cells create too many quads.
+    const float cell = std::clamp(4.0f * zoom, 4.0f, 14.0f);
+    const int drawCols = std::max(1, static_cast<int>(std::ceil(gridW / cell)));
+    const int drawRows = std::max(1, static_cast<int>(std::ceil(gridH / cell)));
+    const float centerIx = (static_cast<float>(drawCols) - 1.0f) * 0.5f;
+    const float centerIz = (static_cast<float>(drawRows) - 1.0f) * 0.5f;
+
+    drawRect(0.0f, 0.0f, w, h, 0.03f, 0.04f, 0.05f, 0.62f);
+    drawRect(panelX, panelY, panelW, panelH, 0.05f, 0.07f, 0.10f, 0.92f);
+    drawRect(panelX + 2.0f, panelY + 2.0f, panelW - 4.0f, panelH - 4.0f, 0.10f, 0.12f, 0.16f,
+             0.92f);
+    drawRect(gridX, gridY, gridW, gridH, 0.08f, 0.10f, 0.12f, 0.94f);
+    auto drawWaypointShape = [&](float cx, float cy, float size, int icon, float r, float g,
+                                 float b, float a) {
+        const float half = size * 0.5f;
+        switch (icon % 5) {
+        case 0: { // circle
+            const int iy0 = static_cast<int>(std::floor(-half));
+            const int iy1 = static_cast<int>(std::ceil(half));
+            for (int iy = iy0; iy <= iy1; ++iy) {
+                const float y = static_cast<float>(iy);
+                const float xr = std::sqrt(std::max(0.0f, half * half - y * y));
+                drawRect(cx - xr, cy + y, xr * 2.0f, 1.0f, r, g, b, a);
+            }
+        } break;
+        case 1: // square
+            drawRect(cx - half, cy - half, size, size, r, g, b, a);
+            break;
+        case 2: { // triangle
+            const float h = size;
+            const float topY = cy - h * 0.5f;
+            for (int row = 0; row < static_cast<int>(std::ceil(h)); ++row) {
+                const float t = static_cast<float>(row) / std::max(1.0f, h - 1.0f);
+                const float wrow = (0.18f + t * 0.82f) * size;
+                drawRect(cx - wrow * 0.5f, topY + static_cast<float>(row), wrow, 1.0f, r, g, b,
+                         a);
+            }
+        } break;
+        case 3: { // diamond
+            const int iy0 = static_cast<int>(std::floor(-half));
+            const int iy1 = static_cast<int>(std::ceil(half));
+            for (int iy = iy0; iy <= iy1; ++iy) {
+                const float y = std::abs(static_cast<float>(iy));
+                const float xr = std::max(0.0f, half - y);
+                drawRect(cx - xr, cy + static_cast<float>(iy), xr * 2.0f, 1.0f, r, g, b, a);
+            }
+        } break;
+        default: { // plus
+            const float t = std::max(1.0f, size * 0.28f);
+            drawRect(cx - t * 0.5f, cy - half, t, size, r, g, b, a);
+            drawRect(cx - half, cy - t * 0.5f, size, t, r, g, b, a);
+        } break;
+        }
+    };
+    auto drawWaypointIcon = [&](float cx, float cy, float size, int icon, float r, float g,
+                                float b, float a, bool selected) {
+        const float drawSize = selected ? (size + 4.0f) : size;
+        // Soft drop shadow instead of hard outline.
+        drawWaypointShape(cx + 0.9f, cy + 1.1f, drawSize + 1.0f, icon, 0.0f, 0.0f, 0.0f, 0.22f);
+        drawWaypointShape(cx + 0.6f, cy + 0.8f, drawSize + 0.4f, icon, 0.0f, 0.0f, 0.0f, 0.34f);
+        // Soft fringe to reduce jagged edges.
+        drawWaypointShape(cx, cy, drawSize + 0.9f, icon, r, g, b, 0.40f);
+        drawWaypointShape(cx, cy, drawSize, icon, r, g, b, a);
+    };
+
+    for (int iz = 0; iz < drawRows; ++iz) {
+        for (int ix = 0; ix < drawCols; ++ix) {
+            const int dx = static_cast<int>(std::floor(static_cast<float>(ix) - centerIx));
+            const int dz = static_cast<int>(std::floor(static_cast<float>(iz) - centerIz));
+            voxel::BlockId id = voxel::AIR;
+            if (!map.sample(mapCenterWX + dx, mapCenterWZ + dz, id)) {
+                continue;
+            }
+            const glm::vec3 c = mapColorForBlock(id, registry, atlas);
+            const float px = gridX + static_cast<float>(ix) * cell;
+            const float py = gridY + static_cast<float>(iz) * cell;
+            const float pw = std::min(cell, (gridX + gridW) - px);
+            const float ph = std::min(cell, (gridY + gridH) - py);
+            if (pw <= 0.0f || ph <= 0.0f) {
+                continue;
+            }
+            drawRect(px, py, pw, ph, c.r, c.g, c.b, 0.96f);
+        }
+    }
+
+    int hoveredWaypoint = -1;
+    float hoveredWaypointPx = 9999.0f;
+    for (std::size_t i = 0; i < map.waypoints().size(); ++i) {
+        const auto &wp = map.waypoints()[i];
+        const float px = gridX + (static_cast<float>(wp.x - mapCenterWX) + centerIx) * cell;
+        const float py = gridY + (static_cast<float>(wp.z - mapCenterWZ) + centerIz) * cell;
+        if (px < gridX - 10.0f || py < gridY - 10.0f || px > gridX + gridW + 10.0f ||
+            py > gridY + gridH + 10.0f) {
+            continue;
+        }
+        const float rr = static_cast<float>(wp.r) / 255.0f;
+        const float rg = static_cast<float>(wp.g) / 255.0f;
+        const float rb = static_cast<float>(wp.b) / 255.0f;
+        const bool selected =
+            (selectedWaypoint >= 0 && static_cast<std::size_t>(selectedWaypoint) == i);
+        drawWaypointIcon(px + 0.5f, py + 0.5f, 9.0f, static_cast<int>(wp.icon), rr, rg, rb, 0.98f,
+                         selected);
+        const float dx = cursorX - (px + 0.5f);
+        const float dy = cursorY - (py + 0.5f);
+        const float d = std::sqrt(dx * dx + dy * dy);
+        if (d < 9.0f && d < hoveredWaypointPx) {
+            hoveredWaypointPx = d;
+            hoveredWaypoint = static_cast<int>(i);
+        }
+    }
+
+    const float pCenterX = gridX + centerIx * cell +
+                           static_cast<float>(playerWX - mapCenterWX) * cell;
+    const float pCenterY = gridY + centerIz * cell +
+                           static_cast<float>(playerWZ - mapCenterWZ) * cell;
+    auto drawFilledTri = [&](glm::vec2 a, glm::vec2 b, glm::vec2 c, float rr, float rg, float rb,
+                             float ra) {
+        const float minX = std::floor(std::min({a.x, b.x, c.x}));
+        const float maxX = std::ceil(std::max({a.x, b.x, c.x}));
+        const float minY = std::floor(std::min({a.y, b.y, c.y}));
+        const float maxY = std::ceil(std::max({a.y, b.y, c.y}));
+        const auto edge = [](glm::vec2 p0, glm::vec2 p1, glm::vec2 p) {
+            return (p.x - p0.x) * (p1.y - p0.y) - (p.y - p0.y) * (p1.x - p0.x);
+        };
+        for (int y = static_cast<int>(minY); y <= static_cast<int>(maxY); ++y) {
+            for (int x = static_cast<int>(minX); x <= static_cast<int>(maxX); ++x) {
+                const glm::vec2 p(static_cast<float>(x) + 0.5f, static_cast<float>(y) + 0.5f);
+                const float e0 = edge(a, b, p);
+                const float e1 = edge(b, c, p);
+                const float e2 = edge(c, a, p);
+                if ((e0 >= 0.0f && e1 >= 0.0f && e2 >= 0.0f) ||
+                    (e0 <= 0.0f && e1 <= 0.0f && e2 <= 0.0f)) {
+                    drawRect(static_cast<float>(x), static_cast<float>(y), 1.0f, 1.0f, rr, rg, rb,
+                             ra);
+                }
+            }
+        }
+    };
+    const float pDrawX = std::clamp(pCenterX, gridX + 7.0f, gridX + gridW - 7.0f);
+    const float pDrawY = std::clamp(pCenterY, gridY + 7.0f, gridY + gridH - 7.0f);
+    const float iconAngle = playerHeadingRad;
+    const glm::vec2 fwd(std::sin(iconAngle), -std::cos(iconAngle));
+    const glm::vec2 right(-fwd.y, fwd.x);
+    const glm::vec2 center(pDrawX + 0.5f, pDrawY + 0.5f);
+    const glm::vec2 tip = center + fwd * 7.6f;
+    const glm::vec2 baseL = center - fwd * 3.8f - right * 4.8f;
+    const glm::vec2 baseR = center - fwd * 3.8f + right * 4.8f;
+    drawFilledTri(tip + glm::vec2(1.0f, 1.2f), baseL + glm::vec2(1.0f, 1.2f),
+                  baseR + glm::vec2(1.0f, 1.2f), 0.0f, 0.0f, 0.0f, 0.34f);
+    drawFilledTri(tip, baseL, baseR, 0.98f, 0.30f, 0.22f, 0.98f);
+    drawRect(center.x - 1.3f, center.y - 1.3f, 2.6f, 2.6f, 1.0f, 0.92f, 0.84f, 0.96f);
+    const float playerHoverDx = cursorX - pDrawX;
+    const float playerHoverDy = cursorY - pDrawY;
+    const bool hoverPlayer = std::sqrt(playerHoverDx * playerHoverDx + playerHoverDy * playerHoverDy) <
+                             9.0f;
+
+    drawText(panelX + 10.0f, panelY + 10.0f, "World Map", 240, 244, 252, 255);
+    drawText(panelX + panelW - 196.0f, panelY + 10.0f, "M: Close  +/-: Zoom", 192, 200, 214, 255);
+
+    if (waypointEditorOpen) {
+        const float editorW = 236.0f;
+        const float editorH = 96.0f;
+        const float editorX = panelX + (panelW - editorW) * 0.5f;
+        const float editorY = panelY + (panelH - editorH) * 0.5f;
+        drawRect(editorX, editorY, editorW, editorH, 0.04f, 0.06f, 0.08f, 0.95f);
+        drawRect(editorX + 1.0f, editorY + 1.0f, editorW - 2.0f, editorH - 2.0f, 0.10f, 0.13f, 0.18f,
+                 0.98f);
+        drawText(editorX + 8.0f, editorY + 8.0f, "Waypoint", 226, 232, 246, 255);
+        drawRect(editorX + editorW - 22.0f, editorY + 6.0f, 16.0f, 16.0f, 0.16f, 0.18f, 0.24f, 0.95f);
+        drawText(editorX + editorW - 17.0f, editorY + 10.0f, "X", 240, 128, 128, 255);
+
+        const float nameX = editorX + 8.0f;
+        const float nameY = editorY + 32.0f;
+        const float nameW = editorW - 16.0f;
+        const float nameH = 20.0f;
+        drawRect(nameX, nameY, nameW, nameH, waypointNameFocused ? 0.24f : 0.12f,
+                 waypointNameFocused ? 0.38f : 0.18f, waypointNameFocused ? 0.62f : 0.27f, 0.98f);
+        drawRect(nameX + 1.0f, nameY + 1.0f, nameW - 2.0f, nameH - 2.0f, 0.08f, 0.10f, 0.14f,
+                 0.98f);
+        const std::string shownName = waypointName.empty() ? std::string("(name)") : waypointName;
+        drawText(nameX + 6.0f, nameY + 6.0f, shownName, waypointName.empty() ? 154 : 232,
+                 waypointName.empty() ? 164 : 236, waypointName.empty() ? 182 : 245, 255);
+
+        const float swY = editorY + 58.0f;
+        const float swS = 16.0f;
+        const float swGap = 6.0f;
+        const glm::vec3 palette[5] = {
+            {1.00f, 0.38f, 0.38f}, {0.36f, 0.82f, 1.00f}, {0.40f, 0.92f, 0.42f},
+            {0.96f, 0.90f, 0.34f}, {0.92f, 0.52f, 0.96f},
+        };
+        for (int i = 0; i < 5; ++i) {
+            const float sx = editorX + 8.0f + static_cast<float>(i) * (swS + swGap);
+            const bool selectedColor =
+                (std::abs(static_cast<int>(waypointR) - static_cast<int>(palette[i].r * 255.0f)) <=
+                     8 &&
+                 std::abs(static_cast<int>(waypointG) - static_cast<int>(palette[i].g * 255.0f)) <=
+                     8 &&
+                 std::abs(static_cast<int>(waypointB) - static_cast<int>(palette[i].b * 255.0f)) <=
+                     8);
+            if (selectedColor) {
+                drawRect(sx - 1.0f, swY - 1.0f, swS + 2.0f, swS + 2.0f, 0.36f, 0.56f, 0.88f, 0.95f);
+                drawRect(sx, swY, swS, swS, 0.12f, 0.20f, 0.34f, 0.88f);
+            }
+            drawRect(sx, swY, swS, swS, palette[i].r, palette[i].g, palette[i].b, 0.98f);
+        }
+
+        const float iconX0 = editorX + 118.0f;
+        const float iconY = swY;
+        const float iconW = 18.0f;
+        const float iconGap = 5.0f;
+        const float closeS = 16.0f;
+        const float closeX = editorX + editorW - closeS - 6.0f;
+        const float eyeW = 18.0f;
+        const float eyeH = 18.0f;
+        const float eyeX = closeX - 4.0f - eyeW;
+        const float eyeY = editorY + 5.0f;
+        const float delW = 54.0f;
+        const float delH = 18.0f;
+        const float delX = eyeX - 4.0f - delW;
+        const float delY = editorY + 5.0f;
+        drawRect(delX, delY, delW, delH, 0.36f, 0.10f, 0.10f, 0.95f);
+        drawRect(delX + 1.0f, delY + 1.0f, delW - 2.0f, delH - 2.0f, 0.58f, 0.14f, 0.14f, 0.95f);
+        const std::string delText = "Delete";
+        drawText(delX + (delW - textWidthPx(delText)) * 0.5f, delY + (delH - 8.0f) * 0.5f + 1.0f,
+                 delText, 246, 230, 230, 255);
+        for (int i = 0; i < 5; ++i) {
+            const float bx = iconX0 + static_cast<float>(i) * (iconW + iconGap);
+            const bool active = (std::clamp(waypointIcon, 0, 4) == i);
+            if (active) {
+                drawRect(bx - 1.0f, iconY - 1.0f, iconW + 2.0f, iconW + 2.0f, 0.36f, 0.56f, 0.88f,
+                         0.95f);
+                drawRect(bx, iconY, iconW, iconW, 0.12f, 0.20f, 0.34f, 0.88f);
+            }
+            drawWaypointShape(bx + iconW * 0.5f, iconY + iconW * 0.5f, iconW - 5.0f, i, 0.92f,
+                              0.95f, 0.99f, 1.0f);
+        }
+        drawRect(eyeX, eyeY, eyeW, eyeH, 0.10f, 0.12f, 0.16f, 0.94f);
+        drawRect(eyeX + 1.0f, eyeY + 1.0f, eyeW - 2.0f, eyeH - 2.0f,
+                 waypointVisible ? 0.22f : 0.14f, waypointVisible ? 0.34f : 0.20f,
+                 waypointVisible ? 0.56f : 0.26f, 0.95f);
+        const float cx = eyeX + eyeW * 0.5f;
+        const float cy = eyeY + eyeH * 0.5f;
+        // Eye outline
+        drawRect(cx - 4.5f, cy - 1.0f, 9.0f, 2.0f, 0.90f, 0.94f, 0.99f, 0.96f);
+        drawRect(cx - 3.5f, cy - 2.0f, 7.0f, 1.0f, 0.90f, 0.94f, 0.99f, 0.96f);
+        drawRect(cx - 3.5f, cy + 1.0f, 7.0f, 1.0f, 0.90f, 0.94f, 0.99f, 0.96f);
+        if (waypointVisible) {
+            drawRect(cx - 1.5f, cy - 1.5f, 3.0f, 3.0f, 0.24f, 0.56f, 0.92f, 0.98f);
+        } else {
+            for (int i = -4; i <= 4; ++i) {
+                drawRect(cx + static_cast<float>(i) * 0.85f - 0.55f,
+                         cy + static_cast<float>(i) * 0.85f - 0.55f, 1.1f, 1.1f, 0.92f, 0.34f,
+                         0.32f, 0.98f);
+            }
+        }
+    }
+
+    if (!waypointEditorOpen) {
+        if (hoveredWaypoint >= 0 && hoveredWaypoint < static_cast<int>(map.waypoints().size())) {
+            const auto &wp = map.waypoints()[hoveredWaypoint];
+            const std::string tip = wp.name.empty() ? std::string("Waypoint") : wp.name;
+            const float rr = static_cast<float>(wp.r) / 255.0f;
+            const float rg = static_cast<float>(wp.g) / 255.0f;
+            const float rb = static_cast<float>(wp.b) / 255.0f;
+            const float padX = 7.0f;
+            const float tipH = 16.0f;
+            const float tipW = textWidthPx(tip) + padX * 2.0f;
+            const float tipX = std::clamp(cursorX + 12.0f, 4.0f, w - tipW - 4.0f);
+            const float tipY = std::clamp(cursorY - 8.0f, 4.0f, h - tipH - 4.0f);
+            drawRect(tipX, tipY, tipW, tipH, rr * 0.45f, rg * 0.45f, rb * 0.45f, 0.94f);
+            drawRect(tipX + 1.0f, tipY + 1.0f, tipW - 2.0f, tipH - 2.0f, rr * 0.78f, rg * 0.78f,
+                     rb * 0.78f, 0.96f);
+            drawText(tipX + (tipW - textWidthPx(tip)) * 0.5f, tipY + 4.0f, tip, 245, 248, 252,
+                     255);
+        } else if (hoverPlayer) {
+            const std::string tip = "Player";
+            const float padX = 7.0f;
+            const float tipH = 16.0f;
+            const float tipW = textWidthPx(tip) + padX * 2.0f;
+            const float tipX = std::clamp(cursorX + 12.0f, 4.0f, w - tipW - 4.0f);
+            const float tipY = std::clamp(cursorY - 8.0f, 4.0f, h - tipH - 4.0f);
+            drawRect(tipX, tipY, tipW, tipH, 0.10f, 0.18f, 0.34f, 0.94f);
+            drawRect(tipX + 1.0f, tipY + 1.0f, tipW - 2.0f, tipH - 2.0f, 0.16f, 0.28f, 0.50f,
+                     0.96f);
+            drawText(tipX + (tipW - textWidthPx(tip)) * 0.5f, tipY + 4.0f, tip, 245, 248, 252,
+                     255);
+        } else if (cursorX >= gridX && cursorX <= (gridX + gridW) && cursorY >= gridY &&
+                   cursorY <= (gridY + gridH)) {
+            const int gx = static_cast<int>(std::floor((cursorX - gridX) / cell));
+            const int gz = static_cast<int>(std::floor((cursorY - gridY) / cell));
+            const int dx = static_cast<int>(std::floor(static_cast<float>(gx) - centerIx));
+            const int dz = static_cast<int>(std::floor(static_cast<float>(gz) - centerIz));
+            voxel::BlockId hoverId = voxel::AIR;
+            if (map.sample(mapCenterWX + dx, mapCenterWZ + dz, hoverId)) {
+                const std::string tip = game::blockName(hoverId);
+                const float padX = 7.0f;
+                const float tipH = 16.0f;
+                const float tipW = textWidthPx(tip) + padX * 2.0f;
+                const float tipX = std::clamp(cursorX + 12.0f, 4.0f, w - tipW - 4.0f);
+                const float tipY = std::clamp(cursorY - 8.0f, 4.0f, h - tipH - 4.0f);
+                drawRect(tipX, tipY, tipW, tipH, 0.04f, 0.06f, 0.08f, 0.92f);
+                drawRect(tipX + 1.0f, tipY + 1.0f, tipW - 2.0f, tipH - 2.0f, 0.11f, 0.14f, 0.19f,
+                         0.94f);
+                drawText(tipX + (tipW - textWidthPx(tip)) * 0.5f, tipY + 4.0f, tip, 228, 234, 246,
+                         255);
+            }
+        }
+    }
+
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDisable(GL_DEPTH_TEST);
+    glUseProgram(uiShader_);
+    glUniform2f(glGetUniformLocation(uiShader_, "uScreen"), w, h);
+    glBindVertexArray(uiVao_);
+    glBindBuffer(GL_ARRAY_BUFFER, uiVbo_);
+    glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(verts_.size() * sizeof(UiVertex)),
+                 verts_.data(), GL_DYNAMIC_DRAW);
+    glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(verts_.size()));
+    glEnable(GL_DEPTH_TEST);
+}
+
+void HudRenderer::renderMiniMap(int width, int height, const game::MapSystem &map, int playerWX,
+                                int playerWZ, float zoom, bool northLocked, bool showCompass,
+                                bool showWaypoints,
+                                float headingRad,
+                                const voxel::BlockRegistry &registry, const TextureAtlas &atlas) {
+    init2D();
+    verts_.clear();
+
+    const float w = static_cast<float>(width);
+    const float panelW = 190.0f;
+    const float panelH = 190.0f;
+    const float margin = 14.0f;
+    const float panelX = w - panelW - margin;
+    const float panelY = margin;
+    const float innerPad = 10.0f;
+    const float gridX = panelX + innerPad;
+    const float gridY = panelY + innerPad + 14.0f;
+    const float gridW = panelW - innerPad * 2.0f;
+    const float gridH = panelH - innerPad * 2.0f - 36.0f;
+    const float cell = std::clamp(2.2f * zoom, 1.2f, 6.0f);
+    const int drawCols = std::max(1, static_cast<int>(std::ceil(gridW / cell)));
+    const int drawRows = std::max(1, static_cast<int>(std::ceil(gridH / cell)));
+    const float centerIx = (static_cast<float>(drawCols) - 1.0f) * 0.5f;
+    const float centerIz = (static_cast<float>(drawRows) - 1.0f) * 0.5f;
+    auto drawWaypointShape = [&](float cx, float cy, float size, int icon, float r, float g,
+                                 float b, float a) {
+        const float half = size * 0.5f;
+        switch (icon % 5) {
+        case 0: { // circle
+            const int iy0 = static_cast<int>(std::floor(-half));
+            const int iy1 = static_cast<int>(std::ceil(half));
+            for (int iy = iy0; iy <= iy1; ++iy) {
+                const float y = static_cast<float>(iy);
+                const float xr = std::sqrt(std::max(0.0f, half * half - y * y));
+                drawRect(cx - xr, cy + y, xr * 2.0f, 1.0f, r, g, b, a);
+            }
+        } break;
+        case 1:
+            drawRect(cx - half, cy - half, size, size, r, g, b, a);
+            break;
+        case 2: { // triangle
+            const float h = size;
+            const float topY = cy - h * 0.5f;
+            for (int row = 0; row < static_cast<int>(std::ceil(h)); ++row) {
+                const float t = static_cast<float>(row) / std::max(1.0f, h - 1.0f);
+                const float wrow = (0.18f + t * 0.82f) * size;
+                drawRect(cx - wrow * 0.5f, topY + static_cast<float>(row), wrow, 1.0f, r, g, b,
+                         a);
+            }
+        } break;
+        case 3: { // diamond
+            const int iy0 = static_cast<int>(std::floor(-half));
+            const int iy1 = static_cast<int>(std::ceil(half));
+            for (int iy = iy0; iy <= iy1; ++iy) {
+                const float y = std::abs(static_cast<float>(iy));
+                const float xr = std::max(0.0f, half - y);
+                drawRect(cx - xr, cy + static_cast<float>(iy), xr * 2.0f, 1.0f, r, g, b, a);
+            }
+        } break;
+        default: { // plus
+            const float t = std::max(1.0f, size * 0.28f);
+            drawRect(cx - t * 0.5f, cy - half, t, size, r, g, b, a);
+            drawRect(cx - half, cy - t * 0.5f, size, t, r, g, b, a);
+        } break;
+        }
+    };
+
+    drawRect(panelX, panelY, panelW, panelH, 0.05f, 0.07f, 0.10f, 0.86f);
+    drawRect(panelX + 2.0f, panelY + 2.0f, panelW - 4.0f, panelH - 4.0f, 0.10f, 0.12f, 0.16f,
+             0.86f);
+    drawRect(gridX, gridY, gridW, gridH, 0.08f, 0.10f, 0.12f, 0.92f);
+    drawText(panelX + 10.0f, panelY + 8.0f, "Mini Map", 228, 234, 246, 255);
+
+    for (int iz = 0; iz < drawRows; ++iz) {
+        for (int ix = 0; ix < drawCols; ++ix) {
+            const int dx = static_cast<int>(std::floor(static_cast<float>(ix) - centerIx));
+            const int dz = static_cast<int>(std::floor(static_cast<float>(iz) - centerIz));
+            int sdx = dx;
+            int sdz = dz;
+            if (!northLocked) {
+                const float c = std::cos(headingRad);
+                const float s = std::sin(headingRad);
+                const float rx = static_cast<float>(dx) * c - static_cast<float>(dz) * s;
+                const float rz = static_cast<float>(dx) * s + static_cast<float>(dz) * c;
+                sdx = static_cast<int>(std::round(rx));
+                sdz = static_cast<int>(std::round(rz));
+            }
+            voxel::BlockId id = voxel::AIR;
+            if (!map.sample(playerWX + sdx, playerWZ + sdz, id)) {
+                continue;
+            }
+            const glm::vec3 c = mapColorForBlock(id, registry, atlas);
+            const float px = gridX + static_cast<float>(ix) * cell;
+            const float py = gridY + static_cast<float>(iz) * cell;
+            const float pw = std::min(cell, (gridX + gridW) - px);
+            const float ph = std::min(cell, (gridY + gridH) - py);
+            if (pw <= 0.0f || ph <= 0.0f) {
+                continue;
+            }
+            drawRect(px, py, pw, ph, c.r, c.g, c.b, 0.96f);
+        }
+    }
+
+    const float pCenterX = gridX + centerIx * cell;
+    const float pCenterY = gridY + centerIz * cell;
+    auto drawFilledTri = [&](glm::vec2 a, glm::vec2 b, glm::vec2 c, float rr, float rg, float rb,
+                             float ra) {
+        const float minX = std::floor(std::min({a.x, b.x, c.x}));
+        const float maxX = std::ceil(std::max({a.x, b.x, c.x}));
+        const float minY = std::floor(std::min({a.y, b.y, c.y}));
+        const float maxY = std::ceil(std::max({a.y, b.y, c.y}));
+        const auto edge = [](glm::vec2 p0, glm::vec2 p1, glm::vec2 p) {
+            return (p.x - p0.x) * (p1.y - p0.y) - (p.y - p0.y) * (p1.x - p0.x);
+        };
+        for (int y = static_cast<int>(minY); y <= static_cast<int>(maxY); ++y) {
+            for (int x = static_cast<int>(minX); x <= static_cast<int>(maxX); ++x) {
+                const glm::vec2 p(static_cast<float>(x) + 0.5f, static_cast<float>(y) + 0.5f);
+                const float e0 = edge(a, b, p);
+                const float e1 = edge(b, c, p);
+                const float e2 = edge(c, a, p);
+                if ((e0 >= 0.0f && e1 >= 0.0f && e2 >= 0.0f) ||
+                    (e0 <= 0.0f && e1 <= 0.0f && e2 <= 0.0f)) {
+                    drawRect(static_cast<float>(x), static_cast<float>(y), 1.0f, 1.0f, rr, rg, rb,
+                             ra);
+                }
+            }
+        }
+    };
+    const float iconAngle = northLocked ? headingRad : 0.0f;
+    const glm::vec2 fwd(std::sin(iconAngle), -std::cos(iconAngle));
+    const glm::vec2 right(-fwd.y, fwd.x);
+    const glm::vec2 center(pCenterX + 0.5f, pCenterY + 0.5f);
+    const glm::vec2 tip = center + fwd * 6.8f;
+    const glm::vec2 baseL = center - fwd * 3.6f - right * 4.4f;
+    const glm::vec2 baseR = center - fwd * 3.6f + right * 4.4f;
+    drawFilledTri(tip + glm::vec2(0.9f, 1.1f), baseL + glm::vec2(0.9f, 1.1f),
+                  baseR + glm::vec2(0.9f, 1.1f), 0.0f, 0.0f, 0.0f, 0.36f);
+    drawFilledTri(tip, baseL, baseR, 0.98f, 0.30f, 0.22f, 0.98f);
+    drawRect(center.x - 1.2f, center.y - 1.2f, 2.4f, 2.4f, 1.0f, 0.92f, 0.84f, 0.96f);
+
+    // Render waypoints on minimap; clamp to map edge if out of view.
+    if (showWaypoints) {
+        for (const auto &wp : map.waypoints()) {
+            if (!wp.visible) {
+                continue;
+            }
+            float dx = static_cast<float>(wp.x - playerWX);
+            float dz = static_cast<float>(wp.z - playerWZ);
+            if (!northLocked) {
+                const float c = std::cos(headingRad);
+                const float s = std::sin(headingRad);
+                const float sx = dx * c + dz * s;
+                const float sz = -dx * s + dz * c;
+                dx = sx;
+                dz = sz;
+            }
+            float px = pCenterX + dx * cell;
+            float py = pCenterY + dz * cell;
+            const float margin = 5.0f;
+            const float minX = gridX + margin;
+            const float maxX = gridX + gridW - margin;
+            const float minY = gridY + margin;
+            const float maxY = gridY + gridH - margin;
+            const bool clipped = (px < minX || px > maxX || py < minY || py > maxY);
+            px = std::clamp(px, minX, maxX);
+            py = std::clamp(py, minY, maxY);
+            const float rr = static_cast<float>(wp.r) / 255.0f;
+            const float rg = static_cast<float>(wp.g) / 255.0f;
+            const float rb = static_cast<float>(wp.b) / 255.0f;
+            drawWaypointShape(px + 0.6f, py + 0.8f, 7.0f, static_cast<int>(wp.icon), 0.0f, 0.0f,
+                              0.0f, clipped ? 0.30f : 0.40f);
+            drawWaypointShape(px, py, clipped ? 5.5f : 6.5f, static_cast<int>(wp.icon), rr, rg, rb,
+                              clipped ? 0.82f : 0.96f);
+        }
+    }
+
+    if (showCompass) {
+        const float compassR = std::min(gridW, gridH) * 0.44f;
+        const struct Dir {
+            const char *label;
+            float angle;
+        } dirs[4] = {{"N", 0.0f}, {"E", 1.5707964f}, {"S", 3.1415927f}, {"W", 4.7123890f}};
+        for (const auto &d : dirs) {
+            const float a = northLocked ? d.angle : (d.angle - headingRad);
+            const float cx = pCenterX + std::sin(a) * compassR;
+            const float cy = pCenterY - std::cos(a) * compassR;
+            const float lw = textWidthPx(d.label) + 3.0f;
+            const float lh = 10.0f;
+            const float lx = cx - lw * 0.5f;
+            const float ly = cy - lh * 0.5f;
+            drawRect(lx, ly, lw, lh, 0.02f, 0.03f, 0.04f, 0.84f);
+            if (d.label[0] == 'N') {
+                drawText(lx + (lw - textWidthPx(d.label)) * 0.5f + 0.5f, ly + 1.5f, d.label, 246,
+                         118, 98, 252);
+            } else {
+                drawText(lx + (lw - textWidthPx(d.label)) * 0.5f + 0.5f, ly + 1.5f, d.label, 228,
+                         236, 248, 250);
+            }
+        }
+    }
+
+    // Mini-map controls inside panel, below map.
+    const float btnH = 16.0f;
+    const float btnY = panelY + panelH - btnH - 7.0f;
+    const float compassW = 22.0f;
+    const float followW = 22.0f;
+    const float waypointW = 22.0f;
+    const float minusW = 24.0f;
+    const float plusW = 24.0f;
+    const float gap = 4.0f;
+    const float totalW = compassW + followW + waypointW + minusW + plusW + gap * 4.0f;
+    const float btnX0 = panelX + panelW - totalW - 8.0f;
+    const float disabledMul = 0.45f;
+    drawRect(btnX0, btnY, compassW, btnH, 0.09f, 0.11f, 0.14f, 0.90f);
+    drawRect(btnX0 + 1.0f, btnY + 1.0f, compassW - 2.0f, btnH - 2.0f, 0.16f, 0.18f, 0.23f, 0.90f);
+    const float ccx = btnX0 + compassW * 0.5f;
+    const float ccy = btnY + btnH * 0.5f;
+    // Compass icon: ring + cardinal ticks + red north needle.
+    const float cm = showCompass ? 1.0f : disabledMul;
+    drawRect(ccx - 5.0f, ccy - 5.0f, 10.0f, 10.0f, 0.88f * cm, 0.92f * cm, 0.98f * cm, 0.94f);
+    drawRect(ccx - 4.0f, ccy - 4.0f, 8.0f, 8.0f, 0.07f * cm, 0.10f * cm, 0.14f * cm, 0.95f);
+    drawRect(ccx - 0.5f, ccy - 4.0f, 1.0f, 1.6f, 0.92f * cm, 0.95f * cm, 0.99f * cm, 0.95f);
+    drawRect(ccx - 0.5f, ccy + 2.4f, 1.0f, 1.6f, 0.92f * cm, 0.95f * cm, 0.99f * cm, 0.95f);
+    drawRect(ccx - 4.0f, ccy - 0.5f, 1.6f, 1.0f, 0.92f * cm, 0.95f * cm, 0.99f * cm, 0.95f);
+    drawRect(ccx + 2.4f, ccy - 0.5f, 1.6f, 1.0f, 0.92f * cm, 0.95f * cm, 0.99f * cm, 0.95f);
+    drawRect(ccx - 0.8f, ccy - 3.4f, 1.6f, 2.4f, 0.95f * cm, 0.36f * cm, 0.34f * cm, 0.98f);
+    drawRect(ccx - 0.4f, ccy - 2.0f, 0.8f, 4.0f, 0.88f * cm, 0.90f * cm, 0.95f * cm, 0.95f);
+    drawRect(ccx - 0.7f, ccy - 0.7f, 1.4f, 1.4f, 0.95f * cm, 0.95f * cm, 0.99f * cm, 0.98f);
+
+    const float followX = btnX0 + compassW + gap;
+    drawRect(followX, btnY, followW, btnH, 0.09f, 0.11f, 0.14f, 0.90f);
+    drawRect(followX + 1.0f, btnY + 1.0f, followW - 2.0f, btnH - 2.0f, 0.16f, 0.18f, 0.23f,
+             0.90f);
+    const float lcx = followX + followW * 0.5f;
+    const float lcy = btnY + btnH * 0.5f;
+    // Lock icon with locked/unlocked shackle state (North lock toggle).
+    if (northLocked) {
+        drawRect(lcx - 3.0f, lcy - 4.0f, 6.0f, 1.8f, 0.88f, 0.92f, 0.99f, 0.98f);
+        drawRect(lcx - 2.0f, lcy - 2.5f, 1.2f, 1.4f, 0.88f, 0.92f, 0.99f, 0.98f);
+        drawRect(lcx + 0.8f, lcy - 2.5f, 1.2f, 1.4f, 0.88f, 0.92f, 0.99f, 0.98f);
+    } else {
+        drawRect(lcx - 3.0f, lcy - 4.0f, 5.0f, 1.8f, 0.88f, 0.92f, 0.99f, 0.98f);
+        drawRect(lcx - 2.0f, lcy - 2.5f, 1.2f, 1.4f, 0.88f, 0.92f, 0.99f, 0.98f);
+    }
+    drawRect(lcx - 4.0f, lcy - 1.0f, 8.0f, 6.0f, northLocked ? 0.38f : 0.28f,
+             northLocked ? 0.68f : 0.44f, northLocked ? 0.94f : 0.62f, 0.96f);
+    drawRect(lcx - 0.7f, lcy + 1.0f, 1.4f, 2.5f, 0.92f, 0.95f, 0.99f, 0.96f);
+
+    const float waypointX = followX + followW + gap;
+    drawRect(waypointX, btnY, waypointW, btnH, 0.09f, 0.11f, 0.14f, 0.90f);
+    drawRect(waypointX + 1.0f, btnY + 1.0f, waypointW - 2.0f, btnH - 2.0f, 0.16f, 0.18f, 0.23f,
+             0.90f);
+    const float wpx = waypointX + waypointW * 0.5f;
+    const float wpy = btnY + btnH * 0.5f;
+    const float wm = showWaypoints ? 1.0f : disabledMul;
+    // Flag icon
+    drawRect(wpx - 3.6f, wpy - 4.4f, 1.2f, 8.8f, 0.92f * wm, 0.95f * wm, 0.99f * wm, 0.96f);
+    drawRect(wpx - 2.4f, wpy - 4.0f, 5.4f, 3.4f, 0.94f * wm, 0.36f * wm, 0.34f * wm, 0.96f);
+    drawRect(wpx - 2.4f, wpy - 0.8f, 3.9f, 1.0f, 0.94f * wm, 0.36f * wm, 0.34f * wm, 0.96f);
+
+    const float minusX = waypointX + waypointW + gap;
+    drawRect(minusX, btnY, minusW, btnH, 0.12f, 0.15f, 0.20f, 0.94f);
+    drawRect(minusX + 1.0f, btnY + 1.0f, minusW - 2.0f, btnH - 2.0f, 0.20f, 0.24f, 0.32f, 0.92f);
+    drawText(minusX + (minusW - textWidthPx("-")) * 0.5f, btnY + 4.0f, "-", 240, 244, 252, 255);
+    const float plusX = minusX + minusW + gap;
+    drawRect(plusX, btnY, plusW, btnH, 0.12f, 0.15f, 0.20f, 0.94f);
+    drawRect(plusX + 1.0f, btnY + 1.0f, plusW - 2.0f, btnH - 2.0f, 0.20f, 0.24f, 0.32f, 0.92f);
+    drawText(plusX + (plusW - textWidthPx("+")) * 0.5f, btnY + 4.0f, "+", 240, 244, 252, 255);
+    const std::string zoomText = std::to_string(static_cast<int>(std::round(zoom * 100.0f))) + "%";
+    drawText(panelX + 10.0f, btnY + 5.0f, zoomText, 208, 216, 232, 255);
 
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -2040,6 +2677,89 @@ void HudRenderer::renderBlockOutline(const glm::mat4 &proj, const glm::mat4 &vie
         drawFrame(shrink, collapseR, collapseG, collapseB, collapseA);
     }
 
+    glLineWidth(1.0f);
+}
+
+void HudRenderer::renderWorldWaypoints(const glm::mat4 &proj, const glm::mat4 &view,
+                                       const game::MapSystem &map, const glm::vec3 &cameraPos,
+                                       const std::function<bool(int, int)> &isChunkLoadedAt) {
+    if (map.waypoints().empty()) {
+        return;
+    }
+    initLine();
+
+    glUseProgram(lineShader_);
+    glUniformMatrix4fv(glGetUniformLocation(lineShader_, "uProj"), 1, GL_FALSE,
+                       glm::value_ptr(proj));
+    glUniformMatrix4fv(glGetUniformLocation(lineShader_, "uView"), 1, GL_FALSE,
+                       glm::value_ptr(view));
+    glBindVertexArray(lineVao_);
+
+    static unsigned int solidVao = 0;
+    static unsigned int solidVbo = 0;
+    if (solidVao == 0 || solidVbo == 0) {
+        constexpr float cubeTri[36 * 3] = {
+            // +Z
+            0, 0, 1, 1, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 0, 1, 1,
+            // -Z
+            1, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 0, 1, 1, 0,
+            // -X
+            0, 0, 0, 0, 0, 1, 0, 1, 1, 0, 0, 0, 0, 1, 1, 0, 1, 0,
+            // +X
+            1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 1, 1, 1, 0, 1, 1, 1,
+            // +Y
+            0, 1, 0, 0, 1, 1, 1, 1, 1, 0, 1, 0, 1, 1, 1, 1, 1, 0,
+            // -Y
+            0, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 0, 1, 0, 1, 0, 0, 1};
+        glGenVertexArrays(1, &solidVao);
+        glGenBuffers(1, &solidVbo);
+        glBindVertexArray(solidVao);
+        glBindBuffer(GL_ARRAY_BUFFER, solidVbo);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(cubeTri), cubeTri, GL_STATIC_DRAW);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), nullptr);
+    }
+
+    const float maxDist2 = 480.0f * 480.0f;
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glEnable(GL_DEPTH_TEST);
+    glDepthMask(GL_TRUE);
+    glLineWidth(1.8f);
+    for (const auto &wp : map.waypoints()) {
+        if (!wp.visible) {
+            continue;
+        }
+        if (!isChunkLoadedAt(wp.x, wp.z)) {
+            continue;
+        }
+        const float dx = static_cast<float>(wp.x) + 0.5f - cameraPos.x;
+        const float dz = static_cast<float>(wp.z) + 0.5f - cameraPos.z;
+        if (dx * dx + dz * dz > maxDist2) {
+            continue;
+        }
+        const float rr = static_cast<float>(wp.r) / 255.0f;
+        const float rg = static_cast<float>(wp.g) / 255.0f;
+        const float rb = static_cast<float>(wp.b) / 255.0f;
+
+        const float poleBaseY = 0.02f;
+        const float poleTopY = static_cast<float>(voxel::Chunk::SY) + 0.86f;
+        glm::mat4 beamModel(1.0f);
+        beamModel = glm::translate(
+            beamModel, glm::vec3(static_cast<float>(wp.x) + 0.5f, poleBaseY, static_cast<float>(wp.z) + 0.5f));
+        beamModel = glm::scale(beamModel, glm::vec3(0.10f, poleTopY - poleBaseY, 0.10f));
+        glUniformMatrix4fv(glGetUniformLocation(lineShader_, "uModel"), 1, GL_FALSE,
+                           glm::value_ptr(beamModel));
+        glUniform4f(glGetUniformLocation(lineShader_, "uColor"), rr * 0.86f, rg * 0.86f, rb * 0.86f,
+                    0.82f);
+        glBindVertexArray(solidVao);
+        glDrawArrays(GL_TRIANGLES, 0, 36);
+        glBindVertexArray(lineVao_);
+        glUniform4f(glGetUniformLocation(lineShader_, "uColor"), rr * 0.78f, rg * 0.78f, rb * 0.78f,
+                    0.95f);
+        glDrawArrays(GL_LINES, 0, 24);
+
+    }
     glLineWidth(1.0f);
 }
 

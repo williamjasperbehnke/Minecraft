@@ -1,7 +1,9 @@
 #pragma once
 
+#include <glm/vec3.hpp>
 #include <glm/vec4.hpp>
 #include <string>
+#include <vector>
 
 namespace gfx {
 
@@ -15,6 +17,7 @@ class TextureAtlas {
 
     void bind(int unit) const;
     glm::vec4 uvRect(unsigned int tileIndex) const;
+    glm::vec3 tileAverageColor(unsigned int tileIndex) const;
     bool reload(const std::string &path);
 
   private:
@@ -24,6 +27,7 @@ class TextureAtlas {
     int tileW_ = 16;
     int tileH_ = 16;
     int cols_ = 1;
+    std::vector<glm::vec3> tileAverageColors_;
 };
 
 } // namespace gfx

@@ -6,6 +6,7 @@
 #include "game/GameRules.hpp"
 #include "game/Inventory.hpp"
 #include "game/ItemDropSystem.hpp"
+#include "game/MapSystem.hpp"
 #include "game/Player.hpp"
 #include "game/SmeltingSystem.hpp"
 #include "gfx/HudRenderer.hpp"
@@ -1144,6 +1145,151 @@ struct CreativeMenuLayout {
     float thumbH = 0.0f;
 };
 
+struct MapOverlayLayout {
+    float panelX = 0.0f;
+    float panelY = 0.0f;
+    float panelW = 0.0f;
+    float panelH = 0.0f;
+    float gridX = 0.0f;
+    float gridY = 0.0f;
+    float gridW = 0.0f;
+    float gridH = 0.0f;
+    float cell = 4.0f;
+};
+
+struct MiniMapLayout {
+    float panelX = 0.0f;
+    float panelY = 0.0f;
+    float panelW = 0.0f;
+    float panelH = 0.0f;
+    float compassX = 0.0f;
+    float compassY = 0.0f;
+    float compassW = 0.0f;
+    float compassH = 0.0f;
+    float followX = 0.0f;
+    float followY = 0.0f;
+    float followW = 0.0f;
+    float followH = 0.0f;
+    float waypointX = 0.0f;
+    float waypointY = 0.0f;
+    float waypointW = 0.0f;
+    float waypointH = 0.0f;
+    float minusX = 0.0f;
+    float minusY = 0.0f;
+    float minusW = 0.0f;
+    float minusH = 0.0f;
+    float plusX = 0.0f;
+    float plusY = 0.0f;
+    float plusW = 0.0f;
+    float plusH = 0.0f;
+};
+
+struct WaypointEditorLayout {
+    float panelX = 0.0f;
+    float panelY = 0.0f;
+    float panelW = 0.0f;
+    float panelH = 0.0f;
+    float nameX = 0.0f;
+    float nameY = 0.0f;
+    float nameW = 0.0f;
+    float nameH = 0.0f;
+    float colorX = 0.0f;
+    float colorY = 0.0f;
+    float colorS = 0.0f;
+    float colorGap = 0.0f;
+    float iconX = 0.0f;
+    float iconY = 0.0f;
+    float iconS = 0.0f;
+    float iconGap = 0.0f;
+    float closeX = 0.0f;
+    float closeY = 0.0f;
+    float closeS = 0.0f;
+    float delX = 0.0f;
+    float delY = 0.0f;
+    float delW = 0.0f;
+    float delH = 0.0f;
+    float visibilityX = 0.0f;
+    float visibilityY = 0.0f;
+    float visibilityW = 0.0f;
+    float visibilityH = 0.0f;
+};
+
+MapOverlayLayout computeMapOverlayLayout(int width, int height, float zoom) {
+    const float w = static_cast<float>(width);
+    const float h = static_cast<float>(height);
+    const float panelW = std::max(320.0f, std::min(w - 80.0f, w * 0.86f));
+    const float panelH = std::max(260.0f, std::min(h - 60.0f, h * 0.82f));
+    const float panelX = (w - panelW) * 0.5f;
+    const float panelY = (h - panelH) * 0.5f;
+    const float innerPad = 14.0f;
+    const float gridX = panelX + innerPad;
+    const float gridY = panelY + innerPad + 18.0f;
+    const float gridW = panelW - innerPad * 2.0f;
+    const float gridH = panelH - innerPad * 2.0f - 24.0f;
+    // Keep world-map sampling density bounded; very small cells create too many quads.
+    const float cell = std::clamp(4.0f * zoom, 4.0f, 14.0f);
+    return {panelX, panelY, panelW, panelH, gridX, gridY, gridW, gridH, cell};
+}
+
+WaypointEditorLayout computeWaypointEditorLayout(const MapOverlayLayout &mapLayout) {
+    const float panelW = 236.0f;
+    const float panelH = 96.0f;
+    const float panelX = mapLayout.panelX + (mapLayout.panelW - panelW) * 0.5f;
+    const float panelY = mapLayout.panelY + (mapLayout.panelH - panelH) * 0.5f;
+    const float nameX = panelX + 8.0f;
+    const float nameY = panelY + 32.0f;
+    const float nameW = panelW - 16.0f;
+    const float nameH = 20.0f;
+    const float colorX = panelX + 8.0f;
+    const float colorY = panelY + 58.0f;
+    const float colorS = 16.0f;
+    const float colorGap = 6.0f;
+    const float iconX = panelX + 118.0f;
+    const float iconY = colorY;
+    const float iconS = 18.0f;
+    const float iconGap = 5.0f;
+    const float closeS = 16.0f;
+    const float closeX = panelX + panelW - closeS - 6.0f;
+    const float closeY = panelY + 6.0f;
+    const float visibilityW = 16.0f;
+    const float visibilityH = 16.0f;
+    const float delW = 54.0f;
+    const float delH = 18.0f;
+    const float visibilityX = closeX - 4.0f - visibilityW;
+    const float delY = panelY + 6.0f;
+    const float delX = visibilityX - 4.0f - delW;
+    const float visibilityY = panelY + 7.0f;
+    return {panelX, panelY, panelW, panelH, nameX, nameY, nameW, nameH, colorX, colorY,
+            colorS, colorGap, iconX, iconY, iconS, iconGap, closeX, closeY, closeS, delX, delY,
+            delW, delH, visibilityX, visibilityY, visibilityW, visibilityH};
+}
+
+MiniMapLayout computeMiniMapLayout(int width) {
+    const float w = static_cast<float>(width);
+    const float panelW = 190.0f;
+    const float panelH = 190.0f;
+    const float margin = 14.0f;
+    const float panelX = w - panelW - margin;
+    const float panelY = margin;
+    const float btnH = 16.0f;
+    const float btnY = panelY + panelH - btnH - 7.0f;
+    const float compassW = 22.0f;
+    const float followW = 22.0f;
+    const float waypointW = 22.0f;
+    const float minusW = 24.0f;
+    const float plusW = 24.0f;
+    const float gap = 4.0f;
+    const float totalW = compassW + followW + waypointW + minusW + plusW + gap * 4.0f;
+    const float btnX0 = panelX + panelW - totalW - 8.0f;
+    const float followX = btnX0 + compassW + gap;
+    const float waypointX = followX + followW + gap;
+    const float minusX = waypointX + waypointW + gap;
+    const float plusX = minusX + minusW + gap;
+    return {panelX, panelY, panelW, panelH, btnX0, btnY, compassW, btnH, followX, btnY, followW,
+            btnH, waypointX, btnY, waypointW, btnH, minusX, btnY, minusW, btnH, plusX, btnY, plusW,
+            btnH};
+}
+
 CreativeMenuLayout computeCreativeMenuLayout(int width, int height, float hudScale,
                                              int craftingGridSize, bool usingFurnace,
                                              std::size_t itemCount) {
@@ -1785,6 +1931,7 @@ int main() {
             game::Camera camera(glm::vec3(8.0f, 80.0f, 8.0f));
             game::DebugMenu debugMenu;
             game::ItemDropSystem itemDrops;
+            game::MapSystem mapSystem;
             game::AudioSystem audio;
             voxel::BlockRegistry hudRegistry;
 
@@ -1951,9 +2098,34 @@ int main() {
             bool prevModeToggle = false;
             bool prevTextureReloadToggle = false;
             bool prevInventoryToggle = false;
+            bool prevMapToggle = false;
+            bool prevMapZoomInToggle = false;
+            bool prevMapZoomOutToggle = false;
             bool prevPauseToggle = false;
             bool hudVisible = true;
             bool inventoryVisible = false;
+            bool mapOpen = false;
+            float mapZoom = 1.0f;
+            float miniMapZoom = 1.0f;
+            bool miniMapNorthLocked = true;
+            bool miniMapShowCompass = true;
+            bool miniMapShowWaypoints = true;
+            int selectedWaypointIndex = -1;
+            bool waypointNameFocused = false;
+            bool waypointEditorOpen = false;
+            bool prevWaypointBackspace = false;
+            bool prevWaypointEnter = false;
+            bool prevWaypointEscape = false;
+            bool prevWaypointDelete = false;
+            bool waypointEditHasBackup = false;
+            bool waypointEditWasNew = false;
+            int waypointEditBackupIndex = -1;
+            game::MapSystem::Waypoint waypointEditBackup{};
+            float mapCenterWX = 0.0f;
+            float mapCenterWZ = 0.0f;
+            bool mapDragActive = false;
+            float mapDragLastMouseX = 0.0f;
+            float mapDragLastMouseY = 0.0f;
             bool pauseMenuOpen = false;
             bool ghostMode = true;
             game::Player player;
@@ -1984,6 +2156,9 @@ int main() {
                     pendingSpawnResolve = true;
                 }
             }
+            mapSystem.load(worldSelection.path);
+            mapCenterWX = camera.position().x;
+            mapCenterWZ = camera.position().z;
             auto toWorldFurnaceState = [&](const game::SmeltingSystem::State &src) {
                 world::FurnaceState out{};
                 out.input.id = src.input.id;
@@ -2041,6 +2216,7 @@ int main() {
             };
             auto saveCurrentPlayer = [&]() {
                 persistActiveFurnaceState();
+                mapSystem.save(worldSelection.path);
                 savePlayerData(worldSelection.path, camera.position(), selectedBlockIndex, ghostMode,
                                inventory, smelting);
             };
@@ -2103,11 +2279,12 @@ int main() {
                 debugMenu.update(window, debugCfg, stats, fps, dt * 1000.0f);
                 const bool menuOpen = debugMenu.isOpen();
                 const bool pauseToggleDown = glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS;
-                if (pauseToggleDown && !prevPauseToggle && !menuOpen && !inventoryVisible) {
+                if (pauseToggleDown && !prevPauseToggle && !menuOpen && !inventoryVisible &&
+                    !mapOpen) {
                     pauseMenuOpen = !pauseMenuOpen;
                 }
                 prevPauseToggle = pauseToggleDown;
-                const bool blockInput = menuOpen || inventoryVisible || pauseMenuOpen;
+                const bool blockInput = menuOpen || inventoryVisible || pauseMenuOpen || mapOpen;
                 if (wasMenuOpen && !menuOpen && !inventoryVisible) {
                     camera.resetMouseLook(window);
                 }
@@ -2167,6 +2344,7 @@ int main() {
                 world.updateStream(camera.position());
                 world.uploadReadyMeshes();
                 stats = world.debugStats();
+                mapSystem.observeLoadedChunks(world);
                 if (debugCfg.overrideTime) {
                     dayClockSeconds =
                         std::clamp(debugCfg.timeOfDay01, 0.0f, 1.0f) * kDayLengthSeconds;
@@ -2225,6 +2403,57 @@ int main() {
                 }
                 prevHudToggle = hudToggleDown;
 
+                const bool mapToggleDown = glfwGetKey(window, GLFW_KEY_M) == GLFW_PRESS;
+                if (mapToggleDown && !prevMapToggle && !menuOpen && !inventoryVisible &&
+                    !waypointNameFocused &&
+                    !pauseMenuOpen) {
+                    mapOpen = !mapOpen;
+                    if (mapOpen) {
+                        mapCenterWX = camera.position().x;
+                        mapCenterWZ = camera.position().z;
+                        mapDragActive = false;
+                        waypointEditorOpen = false;
+                        waypointNameFocused = false;
+                        prevWaypointEnter = false;
+                        prevWaypointEscape = false;
+                        prevWaypointDelete = false;
+                        waypointEditHasBackup = false;
+                        waypointEditWasNew = false;
+                        waypointEditBackupIndex = -1;
+                        gRecipeSearchText = nullptr;
+                        glfwSetCharCallback(window, nullptr);
+                    } else {
+                        waypointEditorOpen = false;
+                        waypointNameFocused = false;
+                        prevWaypointEnter = false;
+                        prevWaypointEscape = false;
+                        prevWaypointDelete = false;
+                        waypointEditHasBackup = false;
+                        waypointEditWasNew = false;
+                        waypointEditBackupIndex = -1;
+                        gRecipeSearchText = nullptr;
+                        glfwSetCharCallback(window, nullptr);
+                    }
+                }
+                prevMapToggle = mapToggleDown;
+                const bool mapZoomInDown = (glfwGetKey(window, GLFW_KEY_EQUAL) == GLFW_PRESS) ||
+                                           (glfwGetKey(window, GLFW_KEY_KP_ADD) == GLFW_PRESS);
+                if (mapZoomInDown && !prevMapZoomInToggle && mapOpen) {
+                    mapZoom = std::clamp(mapZoom * 1.15f, 0.5f, 3.0f);
+                }
+                prevMapZoomInToggle = mapZoomInDown;
+                const bool mapZoomOutDown = (glfwGetKey(window, GLFW_KEY_MINUS) == GLFW_PRESS) ||
+                                            (glfwGetKey(window, GLFW_KEY_KP_SUBTRACT) == GLFW_PRESS);
+                if (mapZoomOutDown && !prevMapZoomOutToggle && mapOpen) {
+                    mapZoom = std::clamp(mapZoom / 1.15f, 0.5f, 3.0f);
+                }
+                prevMapZoomOutToggle = mapZoomOutDown;
+                if (mapOpen && std::abs(gRecipeMenuScrollDelta) > 0.01f) {
+                    const float factor = 1.0f + gRecipeMenuScrollDelta * 0.08f;
+                    mapZoom = std::clamp(mapZoom * std::max(0.5f, factor), 0.5f, 3.0f);
+                    gRecipeMenuScrollDelta = 0.0f;
+                }
+
                 const bool textureReloadDown = glfwGetKey(window, GLFW_KEY_F5) == GLFW_PRESS;
                 if (textureReloadDown && !prevTextureReloadToggle && !menuOpen) {
                     if (atlas.reload("assets/textures/atlas.png")) {
@@ -2238,7 +2467,7 @@ int main() {
 
                 const bool modeToggleDown = glfwGetKey(window, GLFW_KEY_F4) == GLFW_PRESS;
                 if (modeToggleDown && !prevModeToggle && !menuOpen && !inventoryVisible &&
-                    !pauseMenuOpen) {
+                    !pauseMenuOpen && !mapOpen) {
                     ghostMode = !ghostMode;
                     if (!ghostMode) {
                         player.setFromCamera(camera.position(), world);
@@ -2301,7 +2530,7 @@ int main() {
                      (creativeMenuVisible && creativeSearchFocused)) &&
                     !menuOpen && !pauseMenuOpen;
                 if (invToggleDown && !prevInventoryToggle && !menuOpen && !pauseMenuOpen &&
-                    !suppressInventoryToggle) {
+                    !mapOpen && !suppressInventoryToggle) {
                     const bool openingInventory = !inventoryVisible;
                     inventoryVisible = openingInventory;
                     if (openingInventory) {
@@ -2359,7 +2588,7 @@ int main() {
 
                 const bool recipeToggleDown = glfwGetKey(window, GLFW_KEY_R) == GLFW_PRESS;
                 if (recipeToggleDown && !prevRecipeMenuToggle && inventoryVisible && !menuOpen &&
-                    !pauseMenuOpen && !(recipeMenuVisible && recipeSearchFocused) &&
+                    !pauseMenuOpen && !mapOpen && !(recipeMenuVisible && recipeSearchFocused) &&
                     !(creativeMenuVisible && creativeSearchFocused)) {
                     recipeMenuVisible = !recipeMenuVisible;
                     if (recipeMenuVisible) {
@@ -2385,6 +2614,7 @@ int main() {
 
                 const bool creativeToggleDown = glfwGetKey(window, GLFW_KEY_F) == GLFW_PRESS;
                 if (creativeToggleDown && !prevCreativeMenuToggle && !menuOpen && !pauseMenuOpen &&
+                    !mapOpen &&
                     !(creativeMenuVisible && creativeSearchFocused) &&
                     !(recipeMenuVisible && recipeSearchFocused)) {
                     if (!inventoryVisible) {
@@ -2888,7 +3118,8 @@ int main() {
                     prevBlockKeys.fill(false);
                 }
                 const bool dropDown = glfwGetKey(window, GLFW_KEY_Q) == GLFW_PRESS;
-                if (dropDown && !prevDropKey && !menuOpen && !inventoryVisible && !pauseMenuOpen) {
+                if (dropDown && !prevDropKey && !menuOpen && !inventoryVisible && !pauseMenuOpen &&
+                    !mapOpen) {
                     auto &handSlot = inventory.slot(selectedBlockIndex);
                     if (handSlot.id != voxel::AIR && handSlot.count > 0) {
                         glm::vec3 dropPos = camera.position() + camera.forward() * 2.10f +
@@ -2911,6 +3142,329 @@ int main() {
                 const bool left = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
                 const bool right =
                     glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
+
+                if (mapOpen) {
+                    int winW = 1;
+                    int winH = 1;
+                    glfwGetWindowSize(window, &winW, &winH);
+                    double mx = 0.0;
+                    double my = 0.0;
+                    glfwGetCursorPos(window, &mx, &my);
+                    auto closeWaypointEditor = [&]() {
+                        waypointEditorOpen = false;
+                        waypointNameFocused = false;
+                        prevWaypointEnter = false;
+                        prevWaypointEscape = false;
+                        gRecipeSearchText = nullptr;
+                        glfwSetCharCallback(window, nullptr);
+                    };
+                    auto cancelWaypointEdit = [&]() {
+                        if (!waypointEditorOpen) {
+                            return;
+                        }
+                        if (selectedWaypointIndex >= 0 &&
+                            selectedWaypointIndex < static_cast<int>(mapSystem.waypoints().size())) {
+                            if (waypointEditWasNew) {
+                                auto &wps = mapSystem.waypoints();
+                                wps.erase(wps.begin() + selectedWaypointIndex);
+                                selectedWaypointIndex = -1;
+                            } else if (waypointEditHasBackup &&
+                                       waypointEditBackupIndex == selectedWaypointIndex) {
+                                mapSystem.waypoints()[selectedWaypointIndex] = waypointEditBackup;
+                            }
+                        }
+                        waypointEditHasBackup = false;
+                        waypointEditWasNew = false;
+                        waypointEditBackupIndex = -1;
+                        closeWaypointEditor();
+                    };
+                    auto commitWaypointEdit = [&]() {
+                        if (selectedWaypointIndex >= 0 &&
+                            selectedWaypointIndex < static_cast<int>(mapSystem.waypoints().size())) {
+                            auto &wp = mapSystem.waypoints()[selectedWaypointIndex];
+                            if (wp.name.empty()) {
+                                wp.name = "Waypoint";
+                            }
+                            wp.icon = static_cast<std::uint8_t>(wp.icon % 5u);
+                        }
+                        waypointEditHasBackup = false;
+                        waypointEditWasNew = false;
+                        waypointEditBackupIndex = -1;
+                        closeWaypointEditor();
+                    };
+                    const MapOverlayLayout mapLayout = computeMapOverlayLayout(winW, winH, mapZoom);
+                    const WaypointEditorLayout wpLayout = computeWaypointEditorLayout(mapLayout);
+                    const bool inMapGrid = mx >= mapLayout.gridX &&
+                                           mx <= (mapLayout.gridX + mapLayout.gridW) &&
+                                           my >= mapLayout.gridY &&
+                                           my <= (mapLayout.gridY + mapLayout.gridH);
+                    int hoveredWaypointIndex = -1;
+                    float hoveredWaypointDist = 9999.0f;
+                    const int drawCols =
+                        std::max(1, static_cast<int>(std::ceil(mapLayout.gridW / mapLayout.cell)));
+                    const int drawRows =
+                        std::max(1, static_cast<int>(std::ceil(mapLayout.gridH / mapLayout.cell)));
+                    const float centerIx = (static_cast<float>(drawCols) - 1.0f) * 0.5f;
+                    const float centerIz = (static_cast<float>(drawRows) - 1.0f) * 0.5f;
+                    for (int i = 0; i < static_cast<int>(mapSystem.waypoints().size()); ++i) {
+                        const auto &wp = mapSystem.waypoints()[i];
+                        const float px = mapLayout.gridX +
+                                         (static_cast<float>(wp.x) - mapCenterWX + centerIx) *
+                                             mapLayout.cell;
+                        const float py = mapLayout.gridY +
+                                         (static_cast<float>(wp.z) - mapCenterWZ + centerIz) *
+                                             mapLayout.cell;
+                        const float dx = static_cast<float>(mx) - (px + 0.5f);
+                        const float dy = static_cast<float>(my) - (py + 0.5f);
+                        const float d = std::sqrt(dx * dx + dy * dy);
+                        if (d < 13.0f && d < hoveredWaypointDist) {
+                            hoveredWaypointDist = d;
+                            hoveredWaypointIndex = i;
+                        }
+                    }
+                    const bool inWaypointEditor =
+                        waypointEditorOpen && mx >= wpLayout.panelX &&
+                        mx <= (wpLayout.panelX + wpLayout.panelW) && my >= wpLayout.panelY &&
+                        my <= (wpLayout.panelY + wpLayout.panelH);
+                    if (right && !prevRight && inMapGrid) {
+                        const int gx = static_cast<int>(std::floor((mx - mapLayout.gridX) / mapLayout.cell));
+                        const int gz = static_cast<int>(std::floor((my - mapLayout.gridY) / mapLayout.cell));
+                        const int mapCenterWXInt = static_cast<int>(std::round(mapCenterWX));
+                        const int mapCenterWZInt = static_cast<int>(std::round(mapCenterWZ));
+                        const int wx =
+                            mapCenterWXInt + static_cast<int>(std::floor(static_cast<float>(gx) - centerIx));
+                        const int wz =
+                            mapCenterWZInt + static_cast<int>(std::floor(static_cast<float>(gz) - centerIz));
+
+                        selectedWaypointIndex = -1;
+                        int bestDist2 = 999999;
+                        auto &wps = mapSystem.waypoints();
+                        for (int i = 0; i < static_cast<int>(wps.size()); ++i) {
+                            const int dx = wps[i].x - wx;
+                            const int dz = wps[i].z - wz;
+                            const int d2 = dx * dx + dz * dz;
+                            if (d2 <= 4 && d2 < bestDist2) {
+                                bestDist2 = d2;
+                                selectedWaypointIndex = i;
+                            }
+                        }
+                        if (selectedWaypointIndex < 0) {
+                            game::MapSystem::Waypoint wp{};
+                            wp.x = wx;
+                            wp.z = wz;
+                            wp.name = "Waypoint";
+                            wp.r = 255;
+                            wp.g = 96;
+                            wp.b = 96;
+                            wp.icon = 0;
+                            mapSystem.waypoints().push_back(wp);
+                            selectedWaypointIndex = static_cast<int>(mapSystem.waypoints().size()) - 1;
+                            waypointEditWasNew = true;
+                        } else {
+                            waypointEditWasNew = false;
+                        }
+                        if (selectedWaypointIndex >= 0 &&
+                            selectedWaypointIndex < static_cast<int>(mapSystem.waypoints().size())) {
+                            waypointEditHasBackup = true;
+                            waypointEditBackupIndex = selectedWaypointIndex;
+                            waypointEditBackup = mapSystem.waypoints()[selectedWaypointIndex];
+                        }
+                        waypointEditorOpen = true;
+                        waypointNameFocused = true;
+                        if (selectedWaypointIndex >= 0) {
+                            gRecipeSearchText = &mapSystem.waypoints()[selectedWaypointIndex].name;
+                            glfwSetCharCallback(window, onRecipeSearchCharInput);
+                        }
+                    }
+                    if (left && !prevLeft) {
+                        if (waypointEditorOpen && inWaypointEditor &&
+                            selectedWaypointIndex >= 0 &&
+                            selectedWaypointIndex < static_cast<int>(mapSystem.waypoints().size())) {
+                            auto &wp = mapSystem.waypoints()[selectedWaypointIndex];
+                            if (mx >= wpLayout.closeX &&
+                                mx <= (wpLayout.closeX + wpLayout.closeS) &&
+                                my >= wpLayout.closeY &&
+                                my <= (wpLayout.closeY + wpLayout.closeS)) {
+                                cancelWaypointEdit();
+                            } else if (mx >= wpLayout.delX &&
+                                       mx <= (wpLayout.delX + wpLayout.delW) &&
+                                       my >= wpLayout.delY &&
+                                       my <= (wpLayout.delY + wpLayout.delH)) {
+                                auto &wps = mapSystem.waypoints();
+                                wps.erase(wps.begin() + selectedWaypointIndex);
+                                selectedWaypointIndex = -1;
+                                waypointEditHasBackup = false;
+                                waypointEditWasNew = false;
+                                waypointEditBackupIndex = -1;
+                                closeWaypointEditor();
+                            } else if (mx >= wpLayout.nameX &&
+                                       mx <= (wpLayout.nameX + wpLayout.nameW) &&
+                                       my >= wpLayout.nameY &&
+                                       my <= (wpLayout.nameY + wpLayout.nameH)) {
+                                waypointNameFocused = true;
+                                gRecipeSearchText = &wp.name;
+                                glfwSetCharCallback(window, onRecipeSearchCharInput);
+                            } else {
+                                waypointNameFocused = false;
+                                gRecipeSearchText = nullptr;
+                                glfwSetCharCallback(window, nullptr);
+                            }
+                            const glm::vec3 palette[5] = {
+                                {1.00f, 0.38f, 0.38f}, {0.36f, 0.82f, 1.00f}, {0.40f, 0.92f, 0.42f},
+                                {0.96f, 0.90f, 0.34f}, {0.92f, 0.52f, 0.96f},
+                            };
+                            for (int i = 0; i < 5; ++i) {
+                                const float sx = wpLayout.colorX +
+                                                 static_cast<float>(i) *
+                                                     (wpLayout.colorS + wpLayout.colorGap);
+                                if (mx >= sx && mx <= (sx + wpLayout.colorS) &&
+                                    my >= wpLayout.colorY &&
+                                    my <= (wpLayout.colorY + wpLayout.colorS)) {
+                                    wp.r = static_cast<std::uint8_t>(std::round(palette[i].r * 255.0f));
+                                    wp.g = static_cast<std::uint8_t>(std::round(palette[i].g * 255.0f));
+                                    wp.b = static_cast<std::uint8_t>(std::round(palette[i].b * 255.0f));
+                                }
+                            }
+                            for (int i = 0; i < 5; ++i) {
+                                const float sx = wpLayout.iconX +
+                                                 static_cast<float>(i) * (wpLayout.iconS + wpLayout.iconGap);
+                                if (mx >= sx && mx <= (sx + wpLayout.iconS) &&
+                                    my >= wpLayout.iconY && my <= (wpLayout.iconY + wpLayout.iconS)) {
+                                    wp.icon = static_cast<std::uint8_t>(i);
+                                }
+                            }
+                            if (mx >= wpLayout.visibilityX &&
+                                mx <= (wpLayout.visibilityX + wpLayout.visibilityW) &&
+                                my >= wpLayout.visibilityY &&
+                                my <= (wpLayout.visibilityY + wpLayout.visibilityH)) {
+                                wp.visible = !wp.visible;
+                            }
+                            mapDragActive = false;
+                        } else if (inMapGrid) {
+                            waypointNameFocused = false;
+                            gRecipeSearchText = nullptr;
+                            glfwSetCharCallback(window, nullptr);
+                            if (hoveredWaypointIndex >= 0) {
+                                if (selectedWaypointIndex == hoveredWaypointIndex) {
+                                    selectedWaypointIndex = -1;
+                                } else {
+                                    selectedWaypointIndex = hoveredWaypointIndex;
+                                }
+                                mapDragActive = false;
+                            } else {
+                                mapDragActive = true;
+                                mapDragLastMouseX = static_cast<float>(mx);
+                                mapDragLastMouseY = static_cast<float>(my);
+                            }
+                        } else {
+                            mapDragActive = false;
+                        }
+                    }
+                    if (!left) {
+                        mapDragActive = false;
+                    }
+                    if (mapDragActive) {
+                        const float dx = static_cast<float>(mx) - mapDragLastMouseX;
+                        const float dy = static_cast<float>(my) - mapDragLastMouseY;
+                        mapCenterWX -= dx / std::max(1.0f, mapLayout.cell);
+                        mapCenterWZ -= dy / std::max(1.0f, mapLayout.cell);
+                        mapDragLastMouseX = static_cast<float>(mx);
+                        mapDragLastMouseY = static_cast<float>(my);
+                    }
+                    if (waypointNameFocused && selectedWaypointIndex >= 0 &&
+                        selectedWaypointIndex < static_cast<int>(mapSystem.waypoints().size())) {
+                        auto &name = mapSystem.waypoints()[selectedWaypointIndex].name;
+                        if (name.size() > 32) {
+                            name.resize(32);
+                        }
+                        gRecipeSearchText = &name;
+                        glfwSetCharCallback(window, onRecipeSearchCharInput);
+                        const bool backspaceDown = glfwGetKey(window, GLFW_KEY_BACKSPACE) == GLFW_PRESS;
+                        if (backspaceDown && !prevWaypointBackspace && !name.empty()) {
+                            name.pop_back();
+                        }
+                        prevWaypointBackspace = backspaceDown;
+                    } else {
+                        prevWaypointBackspace = false;
+                    }
+                    const bool enterDown = (glfwGetKey(window, GLFW_KEY_ENTER) == GLFW_PRESS) ||
+                                           (glfwGetKey(window, GLFW_KEY_KP_ENTER) == GLFW_PRESS);
+                    if (enterDown && !prevWaypointEnter && waypointEditorOpen) {
+                        commitWaypointEdit();
+                    }
+                    prevWaypointEnter = enterDown;
+                    const bool escDown = glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS;
+                    if (escDown && !prevWaypointEscape && waypointEditorOpen) {
+                        cancelWaypointEdit();
+                    }
+                    prevWaypointEscape = escDown;
+                    const bool delDown = (glfwGetKey(window, GLFW_KEY_DELETE) == GLFW_PRESS) ||
+                                         (!waypointNameFocused && !waypointEditorOpen &&
+                                          glfwGetKey(window, GLFW_KEY_BACKSPACE) == GLFW_PRESS);
+                    int deleteIndex = -1;
+                    if (selectedWaypointIndex >= 0 &&
+                        selectedWaypointIndex < static_cast<int>(mapSystem.waypoints().size())) {
+                        deleteIndex = selectedWaypointIndex;
+                    } else if (hoveredWaypointIndex >= 0) {
+                        deleteIndex = hoveredWaypointIndex;
+                    }
+                    if (delDown && !prevWaypointDelete && deleteIndex >= 0) {
+                        auto &wps = mapSystem.waypoints();
+                        wps.erase(wps.begin() + deleteIndex);
+                        selectedWaypointIndex = -1;
+                        waypointEditHasBackup = false;
+                        waypointEditWasNew = false;
+                        waypointEditBackupIndex = -1;
+                        closeWaypointEditor();
+                    }
+                    prevWaypointDelete = delDown;
+                } else {
+                    mapDragActive = false;
+                    waypointEditorOpen = false;
+                    waypointNameFocused = false;
+                    prevWaypointBackspace = false;
+                    prevWaypointEnter = false;
+                    prevWaypointEscape = false;
+                    prevWaypointDelete = false;
+                    waypointEditHasBackup = false;
+                    waypointEditWasNew = false;
+                    waypointEditBackupIndex = -1;
+                    if (hudVisible && currentCursorMode == GLFW_CURSOR_NORMAL && left && !prevLeft) {
+                        int winW = 1;
+                        int winH = 1;
+                        glfwGetWindowSize(window, &winW, &winH);
+                        double mx = 0.0;
+                        double my = 0.0;
+                        glfwGetCursorPos(window, &mx, &my);
+                        const MiniMapLayout miniMapLayout = computeMiniMapLayout(winW);
+                        if (mx >= miniMapLayout.compassX &&
+                            mx <= (miniMapLayout.compassX + miniMapLayout.compassW) &&
+                            my >= miniMapLayout.compassY &&
+                            my <= (miniMapLayout.compassY + miniMapLayout.compassH)) {
+                            miniMapShowCompass = !miniMapShowCompass;
+                        } else if (mx >= miniMapLayout.followX &&
+                                   mx <= (miniMapLayout.followX + miniMapLayout.followW) &&
+                                   my >= miniMapLayout.followY &&
+                                   my <= (miniMapLayout.followY + miniMapLayout.followH)) {
+                            miniMapNorthLocked = !miniMapNorthLocked;
+                        } else if (mx >= miniMapLayout.waypointX &&
+                                   mx <= (miniMapLayout.waypointX + miniMapLayout.waypointW) &&
+                                   my >= miniMapLayout.waypointY &&
+                                   my <= (miniMapLayout.waypointY + miniMapLayout.waypointH)) {
+                            miniMapShowWaypoints = !miniMapShowWaypoints;
+                        } else if (mx >= miniMapLayout.minusX &&
+                                   mx <= (miniMapLayout.minusX + miniMapLayout.minusW) &&
+                                   my >= miniMapLayout.minusY &&
+                                   my <= (miniMapLayout.minusY + miniMapLayout.minusH)) {
+                            miniMapZoom = std::clamp(miniMapZoom / 1.15f, 0.6f, 2.4f);
+                        } else if (mx >= miniMapLayout.plusX &&
+                                   mx <= (miniMapLayout.plusX + miniMapLayout.plusW) &&
+                                   my >= miniMapLayout.plusY &&
+                                   my <= (miniMapLayout.plusY + miniMapLayout.plusH)) {
+                            miniMapZoom = std::clamp(miniMapZoom * 1.15f, 0.6f, 2.4f);
+                        }
+                    }
+                }
 
                 if (pauseMenuOpen) {
                     int winW = 1;
@@ -4193,6 +4747,9 @@ int main() {
                     hud.renderBreakOverlay(proj, view, highlightedBlock, breakProgress,
                                            breakBlockId, atlas);
                     hud.renderBlockOutline(proj, view, highlightedBlock, breakProgress);
+                    hud.renderWorldWaypoints(
+                        proj, view, mapSystem, camera.position(),
+                        [&](int wx, int wz) { return world.isChunkLoadedAt(wx, wz); });
                 }
                 glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
                 int winW = 1;
@@ -4301,6 +4858,48 @@ int main() {
                     glfwGetCursorPos(window, &pmx, &pmy);
                     hud.renderPauseMenu(winW, winH, static_cast<float>(pmx),
                                         static_cast<float>(pmy));
+                }
+                if (mapOpen) {
+                    const glm::vec3 pos = camera.position();
+                    const int mapWX = static_cast<int>(std::floor(pos.x));
+                    const int mapWZ = static_cast<int>(std::floor(pos.z));
+                    double mapCursorX = 0.0;
+                    double mapCursorY = 0.0;
+                    glfwGetCursorPos(window, &mapCursorX, &mapCursorY);
+                    std::string waypointName;
+                    std::uint8_t waypointR = 255;
+                    std::uint8_t waypointG = 96;
+                    std::uint8_t waypointB = 96;
+                    int waypointIcon = 0;
+                    bool waypointVisible = true;
+                    if (selectedWaypointIndex >= 0 &&
+                        selectedWaypointIndex < static_cast<int>(mapSystem.waypoints().size())) {
+                        const auto &wp = mapSystem.waypoints()[selectedWaypointIndex];
+                        waypointName = wp.name;
+                        waypointR = wp.r;
+                        waypointG = wp.g;
+                        waypointB = wp.b;
+                        waypointIcon = static_cast<int>(wp.icon);
+                        waypointVisible = wp.visible;
+                    }
+                    hud.renderMapOverlay(
+                        winW, winH, mapSystem, static_cast<int>(std::round(mapCenterWX)),
+                        static_cast<int>(std::round(mapCenterWZ)), mapWX, mapWZ, mapZoom,
+                        static_cast<float>(mapCursorX), static_cast<float>(mapCursorY),
+                        selectedWaypointIndex, waypointName, waypointR, waypointG, waypointB,
+                        waypointIcon, waypointVisible, std::atan2(camera.forward().x, -camera.forward().z),
+                        waypointNameFocused,
+                        waypointEditorOpen, hudRegistry, atlas);
+                } else if (hudVisible) {
+                    const glm::vec3 pos = camera.position();
+                    const int mapWX = static_cast<int>(std::floor(pos.x));
+                    const int mapWZ = static_cast<int>(std::floor(pos.z));
+                    const glm::vec3 fwd = camera.forward();
+                    const float miniMapHeadingRad = std::atan2(fwd.x, -fwd.z);
+                    hud.renderMiniMap(winW, winH, mapSystem, mapWX, mapWZ, miniMapZoom,
+                                      miniMapNorthLocked, miniMapShowCompass, miniMapShowWaypoints,
+                                      miniMapHeadingRad,
+                                      hudRegistry, atlas);
                 }
                 debugMenu.render(winW, winH);
                 glfwSwapBuffers(window);

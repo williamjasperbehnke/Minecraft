@@ -2,11 +2,14 @@
 
 #include "game/CraftingSystem.hpp"
 #include "game/Inventory.hpp"
+#include "game/MapSystem.hpp"
 #include "game/SmeltingSystem.hpp"
 #include "gfx/TextureAtlas.hpp"
 #include "voxel/Block.hpp"
 
 #include <array>
+#include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
@@ -23,6 +26,20 @@ class HudRenderer {
                            const std::string &createName, const std::string &createSeed,
                            float cursorX, float cursorY);
     void renderPauseMenu(int width, int height, float cursorX, float cursorY);
+    void renderMapOverlay(int width, int height, const game::MapSystem &map, int mapCenterWX,
+                          int mapCenterWZ, int playerWX, int playerWZ, float zoom, float cursorX,
+                          float cursorY, int selectedWaypoint, const std::string &waypointName,
+                          std::uint8_t waypointR, std::uint8_t waypointG,
+                          std::uint8_t waypointB, int waypointIcon, bool waypointVisible,
+                          float playerHeadingRad,
+                          bool waypointNameFocused,
+                          bool waypointEditorOpen,
+                          const voxel::BlockRegistry &registry, const TextureAtlas &atlas);
+    void renderMiniMap(int width, int height, const game::MapSystem &map, int playerWX,
+                       int playerWZ, float zoom, bool northLocked, bool showCompass,
+                       bool showWaypoints,
+                       float headingRad,
+                       const voxel::BlockRegistry &registry, const TextureAtlas &atlas);
 
     void render2D(int width, int height, int selectedIndex,
                   const std::array<voxel::BlockId, game::Inventory::kHotbarSize> &hotbar,
@@ -59,6 +76,9 @@ class HudRenderer {
 
     void renderBlockOutline(const glm::mat4 &proj, const glm::mat4 &view,
                             const std::optional<glm::ivec3> &block, float breakProgress = 0.0f);
+    void renderWorldWaypoints(const glm::mat4 &proj, const glm::mat4 &view,
+                              const game::MapSystem &map, const glm::vec3 &cameraPos,
+                              const std::function<bool(int, int)> &isChunkLoadedAt);
 
   private:
     struct UiVertex {
@@ -104,6 +124,7 @@ class HudRenderer {
         float v;
         float light;
     };
+
     std::vector<IconVertex> iconVerts_;
 
     std::vector<UiVertex> verts_;

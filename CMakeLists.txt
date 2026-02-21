@@ -63,6 +63,7 @@ add_library(voxel_lib
   src/game/GameRules.cpp
   src/game/PlayerController.cpp
   src/game/Player.cpp
+  src/game/MapSystem.cpp
   src/game/Recipe.cpp
   src/game/ItemDropSystem.cpp
   src/game/Inventory.cpp

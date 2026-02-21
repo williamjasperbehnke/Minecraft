@@ -4,6 +4,9 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
 
+#include <glm/vec3.hpp>
+
+#include <cstdint>
 #include <stdexcept>
 #include <vector>
 
@@ -16,6 +19,49 @@ bool loadImageRgba(const std::string &path, int &width, int &height, unsigned ch
     stbi_set_flip_vertically_on_load(0);
     *data = stbi_load(path.c_str(), &width, &height, &channels, 4);
     return *data != nullptr;
+}
+
+std::vector<glm::vec3> computeTileAverageColors(const unsigned char *pixels, int width, int height,
+                                                int tileW, int tileH, int cols) {
+    std::vector<glm::vec3> out;
+    if (pixels == nullptr || width <= 0 || height <= 0 || tileW <= 0 || tileH <= 0 || cols <= 0) {
+        return out;
+    }
+    const int rows = height / tileH;
+    const int count = cols * rows;
+    out.resize(static_cast<std::size_t>(count), glm::vec3(0.5f, 0.5f, 0.5f));
+    for (int t = 0; t < count; ++t) {
+        const int tx = t % cols;
+        const int ty = t / cols;
+        const int x0 = tx * tileW;
+        const int y0 = ty * tileH;
+        std::uint64_t sumR = 0;
+        std::uint64_t sumG = 0;
+        std::uint64_t sumB = 0;
+        std::uint64_t sumA = 0;
+        for (int y = 0; y < tileH; ++y) {
+            for (int x = 0; x < tileW; ++x) {
+                const int ix = x0 + x;
+                const int iy = y0 + y;
+                if (ix < 0 || ix >= width || iy < 0 || iy >= height) {
+                    continue;
+                }
+                const int idx = (iy * width + ix) * 4;
+                const std::uint32_t a = pixels[idx + 3];
+                sumR += static_cast<std::uint64_t>(pixels[idx + 0]) * a;
+                sumG += static_cast<std::uint64_t>(pixels[idx + 1]) * a;
+                sumB += static_cast<std::uint64_t>(pixels[idx + 2]) * a;
+                sumA += a;
+            }
+        }
+        if (sumA > 0) {
+            out[static_cast<std::size_t>(t)] = glm::vec3(
+                static_cast<float>(sumR) / static_cast<float>(sumA) / 255.0f,
+                static_cast<float>(sumG) / static_cast<float>(sumA) / 255.0f,
+                static_cast<float>(sumB) / static_cast<float>(sumA) / 255.0f);
+        }
+    }
+    return out;
 }
 
 } // namespace
@@ -53,10 +99,13 @@ TextureAtlas::TextureAtlas(const std::string &path, int tileW, int tileH)
         }
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width_, height_, 0, GL_RGBA, GL_UNSIGNED_BYTE,
                      fallback.data());
+        tileAverageColors_ =
+            computeTileAverageColors(fallback.data(), width_, height_, tileW_, tileH_, cols_);
     } else {
         cols_ = width_ / tileW_;
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width_, height_, 0, GL_RGBA, GL_UNSIGNED_BYTE,
                      data);
+        tileAverageColors_ = computeTileAverageColors(data, width_, height_, tileW_, tileH_, cols_);
         stbi_image_free(data);
     }
 
@@ -91,6 +140,15 @@ glm::vec4 TextureAtlas::uvRect(unsigned int tileIndex) const {
     return {u0, v0, u1, v1};
 }
 
+glm::vec3 TextureAtlas::tileAverageColor(unsigned int tileIndex) const {
+    if (tileAverageColors_.empty()) {
+        return {0.5f, 0.5f, 0.5f};
+    }
+    const std::size_t idx =
+        static_cast<std::size_t>(tileIndex % static_cast<unsigned int>(tileAverageColors_.size()));
+    return tileAverageColors_[idx];
+}
+
 bool TextureAtlas::reload(const std::string &path) {
     unsigned char *data = nullptr;
     int newW = 0;
@@ -112,6 +170,7 @@ bool TextureAtlas::reload(const std::string &path) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, newW, newH, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
+    tileAverageColors_ = computeTileAverageColors(data, newW, newH, tileW_, tileH_, newW / tileW_);
     stbi_image_free(data);
 
     width_ = newW;
