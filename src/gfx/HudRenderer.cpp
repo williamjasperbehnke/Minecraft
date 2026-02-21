@@ -1253,7 +1253,7 @@ void HudRenderer::render2D(int width, int height, int selectedIndex,
                            const game::Inventory::Slot &craftOutput,
                            const std::string &carryingName, const std::string &selectedName,
                            const std::string &lookedAtText, const std::string &modeText,
-                           float health01, float sprintStamina01,
+                           float health01, float sprintStamina01, float fps,
                            const std::string &compassText, const std::string &coordText,
                            const voxel::BlockRegistry &registry, const TextureAtlas &atlas) {
     init2D();
@@ -2430,10 +2430,13 @@ void HudRenderer::render2D(int width, int height, int selectedIndex,
     const float panelPadY = 8.0f;
     const float lineStep = 14.0f;
     const float textH = 8.0f;
+    const std::string fpsText =
+        "FPS: " + std::to_string(static_cast<int>(std::lround(std::max(0.0f, fps))));
     const float maxLineW = std::max(std::max(textWidthPx(lookedAtText), textWidthPx(modeText)),
-                                    std::max(textWidthPx(compassText), textWidthPx(coordText)));
+                                    std::max(std::max(textWidthPx(compassText), textWidthPx(coordText)),
+                                             textWidthPx(fpsText)));
     const float panelW = maxLineW + panelPadX * 2.0f;
-    const float panelH = panelPadY * 2.0f + textH + lineStep * 3.0f;
+    const float panelH = panelPadY * 2.0f + textH + lineStep * 4.0f;
     drawRect(panelX, panelY, panelW, panelH, 0.03f, 0.04f, 0.05f, 0.58f);
     drawText(panelX + panelPadX, panelY + panelPadY + lineStep * 0.0f, lookedAtText, 235, 239, 247,
              255);
@@ -2443,6 +2446,7 @@ void HudRenderer::render2D(int width, int height, int selectedIndex,
              255);
     drawText(panelX + panelPadX, panelY + panelPadY + lineStep * 3.0f, coordText, 216, 222, 236,
              255);
+    drawText(panelX + panelPadX, panelY + panelPadY + lineStep * 4.0f, fpsText, 216, 222, 236, 255);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glDisable(GL_DEPTH_TEST);

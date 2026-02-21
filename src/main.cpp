@@ -2251,6 +2251,9 @@ int main() {
             std::vector<std::pair<int, game::Inventory::Slot>> inventoryRightSpreadOriginalSlots;
 
             float lastTime = static_cast<float>(glfwGetTime());
+            float fpsAccumSeconds = 0.0f;
+            int fpsAccumFrames = 0;
+            float fpsAvgDisplay = 0.0f;
             float titleAccum = 0.0f;
             float dayClockSeconds = 120.0f;
             constexpr float kDayLengthSeconds = 900.0f;
@@ -2273,6 +2276,17 @@ int main() {
                 const float dt = now - lastTime;
                 lastTime = now;
                 const float fps = (dt > 0.0f) ? (1.0f / dt) : 0.0f;
+                fpsAccumSeconds += std::max(0.0f, dt);
+                ++fpsAccumFrames;
+                if (fpsAccumSeconds >= 1.0f) {
+                    fpsAvgDisplay = (fpsAccumSeconds > 0.0f)
+                                        ? (static_cast<float>(fpsAccumFrames) / fpsAccumSeconds)
+                                        : 0.0f;
+                    fpsAccumSeconds = 0.0f;
+                    fpsAccumFrames = 0;
+                } else if (fpsAvgDisplay <= 0.0f) {
+                    fpsAvgDisplay = fps;
+                }
 
                 glfwPollEvents();
                 debugMenu.update(window, debugCfg, stats, fps, dt * 1000.0f);
@@ -4849,7 +4863,7 @@ int main() {
                                      ? "Empty Slot"
                                      : game::blockName(selectedPlaceBlock),
                                  lookedAt, modeText, player.health01(), player.sprintStamina01(),
-                                 compassText, coord.str(), hudRegistry, atlas);
+                                 fpsAvgDisplay, compassText, coord.str(), hudRegistry, atlas);
                 }
                 if (pauseMenuOpen) {
                     double pmx = 0.0;

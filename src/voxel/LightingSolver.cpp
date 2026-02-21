@@ -289,7 +289,9 @@ void LightingSolver::buildExtendedBlockLight() {
         if (lx >= Chunk::SX && lz >= Chunk::SZ && neighbors_.pxpz != nullptr) {
             return neighbors_.pxpz->getUnchecked(lx - Chunk::SX, y, lz - Chunk::SZ);
         }
-        return AIR;
+        // Missing neighbor chunks are unknown, not empty space. Treat as opaque
+        // to avoid false light leakage across chunk borders before neighbors load.
+        return STONE;
     };
 
     extBlockLight_.assign(kExtSX * Chunk::SY * kExtSZ, 0);
@@ -390,7 +392,9 @@ void LightingSolver::buildExtendedSkyLight() {
         if (lx >= Chunk::SX && lz >= Chunk::SZ && neighbors_.pxpz != nullptr) {
             return neighbors_.pxpz->getUnchecked(lx - Chunk::SX, y, lz - Chunk::SZ);
         }
-        return AIR;
+        // Missing neighbor chunks are unknown, not empty space. Treat as opaque
+        // to avoid false skylight leakage across chunk borders before neighbors load.
+        return STONE;
     };
 
     extSkyLight_.assign(kExtSX * Chunk::SY * kExtSZ, 0);
