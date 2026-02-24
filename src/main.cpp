@@ -1890,6 +1890,14 @@ int pauseMenuButtonAtCursor(double mx, double my, int width, int height) {
 //    - Water is slightly shorter than a full block (lowered top surface)
 //    - Water sides ARE rendered, and their top edge is lowered to match the shorter height
 //    - IMPORTANT: solids treat WATER like AIR for face visibility, so you can see river/lake floors & walls through water
+//
+// ✅ Texture Atlas (NEW):
+//    - Vertex format: [x y z u v shade alpha]
+//    - Greedy mesher generates UVs into a single atlas texture
+//    - Fragment shader samples atlas + applies shade + alpha
+//    - Atlas matches the provided 128x128 image (8x8 tiles, 16px each)
+//
+// Build: make sure stb_image.h is available and atlas.png is next to the executable (or adjust path).
 
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
@@ -1912,6 +1920,9 @@ int pauseMenuButtonAtCursor(double mx, double my, int width, int height) {
 #include <unordered_set>
 #include <vector>
 #include <deque>
+
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
 
 // ----------------------------
 // Mouse look + camera front
@@ -1954,10 +1965,10 @@ static void mouse_callback(GLFWwindow*, double xpos, double ypos)
 }
 
 // ----------------------------
-// Mesh data (RGBA per-vertex)
+// Mesh data (UV + shade + alpha)
 // ----------------------------
 struct ChunkMesh2 {
-    std::vector<float> verts;        // [x y z r g b a]...
+    std::vector<float> verts;        // [x y z u v shade a]...
     std::vector<uint32_t> indices;   // triangles
 };
 
@@ -1972,28 +1983,153 @@ static inline int idx3(int x, int y, int z, int sx, int /*sy*/, int sz) {
 
 static inline void pushVertex(std::vector<float>& v,
                               float x, float y, float z,
-                              float r, float g, float b, float a) {
+                              float u, float vv,
+                              float shade, float a) {
     v.push_back(x); v.push_back(y); v.push_back(z);
-    v.push_back(r); v.push_back(g); v.push_back(b); v.push_back(a);
+    v.push_back(u); v.push_back(vv);
+    v.push_back(shade);
+    v.push_back(a);
+}
+
+// ============================================================
+// Texture atlas layout (matches provided atlas: 128x128, 8x8 tiles)
+// Tile coords are (tx, ty) with ty from TOP row = 0.
+// ============================================================
+static constexpr int ATLAS_TILES_X = 8;
+static constexpr int ATLAS_TILES_Y = 8;
+
+// With NEAREST + CLAMP_TO_EDGE you can keep this tiny or 0.
+// If you ever add mipmaps, increase a bit to reduce bleeding.
+static constexpr float ATLAS_UV_INSET = 0.0010f;
+
+enum Face : int { PX=0, NX=1, PY=2, NY=3, PZ=4, NZ=5 };
+
+static inline Face faceFromAxisDir(int axis, int dir) {
+    if (axis == 0) return (dir > 0) ? PX : NX;
+    if (axis == 1) return (dir > 0) ? PY : NY;
+    return (dir > 0) ? PZ : NZ;
+}
+
+static inline glm::vec2 atlasUV_fromTopLeftTile(glm::ivec2 tileTopLeft, glm::vec2 local01) {
+    // Convert "tile from top-left" into GL UV space (origin bottom-left).
+    // We flip the tile row here so you can reason about tiles as shown in the atlas image.
+    int tx = tileTopLeft.x;
+    int tyTop = tileTopLeft.y;
+    int ty = (ATLAS_TILES_Y - 1) - tyTop;
+
+    float tw = 1.0f / float(ATLAS_TILES_X);
+    float th = 1.0f / float(ATLAS_TILES_Y);
+
+    float insetU = ATLAS_UV_INSET * tw;
+    float insetV = ATLAS_UV_INSET * th;
+
+    float u0 = tx * tw + insetU;
+    float v0 = ty * th + insetV;
+    float u1 = (tx + 1) * tw - insetU;
+    float v1 = (ty + 1) * th - insetV;
+
+    return {
+        u0 + (u1 - u0) * local01.x,
+        v0 + (v1 - v0) * local01.y
+    };
+}
+
+// Map block+face -> atlas tile (tx,ty) where ty is TOP row=0
+static inline glm::ivec2 atlasTileFor(uint8_t blockId, Face f) {
+    // Based on your provided atlas (with grid labels shown earlier):
+    // Grass side: (1,0) ; Grass top: (2,0) ; Dirt: (3,0) ; Stone: (4,0)
+    // Water: (6,0) ; Log/wood side: (0,1) ; Log top: (5,2)
+    // Leaves: (2,3) ; Sand: (4,3)
+
+    switch (blockId) {
+        case 1: // GRASS
+            if (f == PY) return {2,0};   // grass top
+            if (f == NY) return {3,0};   // bottom = dirt
+            return {1,0};                // grass side
+        case 2: // DIRT
+            return {3,0};
+        case 3: // STONE
+            return {4,0};
+        case 4: // WATER
+            return {6,0};
+        case 5: // WOOD (log)
+            if (f == PY || f == NY) return {0,1}; // log top
+            return {7,0};                         // log side
+        case 6: // LEAVES
+            return {1,1};
+        case 7: // SAND
+            return {5,0};
+        default:
+            return {0,0};
+    }
 }
 
 static void addQuad(ChunkMesh2& m,
                     glm::vec3 a, glm::vec3 b,
                     glm::vec3 c, glm::vec3 d,
-                    const glm::vec3& rgb, float alpha,
+                    float shade, float alpha,
+                    glm::ivec2 tile,
                     int axis, int dir)
 {
-    // Winding fix
+    // Winding fix (keep)
     glm::vec3 axisVec(0.0f); axisVec[axis] = 1.0f;
     glm::vec3 expected = axisVec * float(dir);
     glm::vec3 n = glm::cross(b - a, c - a);
     if (glm::dot(n, expected) < 0.0f) std::swap(b, d);
 
+    // Pick which world axes define the face plane UV basis:
+    //  - ±Y faces (top/bottom): U=X, V=Z
+    //  - ±X faces (east/west):  U=Z, V=Y
+    //  - ±Z faces (north/south):U=X, V=Y
+    int uAxis = 0, vAxis = 1;
+    if (axis == 1) { uAxis = 0; vAxis = 2; }      // Y face: XZ
+    else if (axis == 0) { uAxis = 2; vAxis = 1; } // X face: ZY
+    else { uAxis = 0; vAxis = 1; }                // Z face: XY
+
+    auto proj = [&](const glm::vec3& p) -> glm::vec2 {
+        return glm::vec2(p[uAxis], p[vAxis]);
+    };
+
+    glm::vec2 pa = proj(a), pb = proj(b), pc = proj(c), pd = proj(d);
+
+    float minU = std::min(std::min(pa.x, pb.x), std::min(pc.x, pd.x));
+    float maxU = std::max(std::max(pa.x, pb.x), std::max(pc.x, pd.x));
+    float minV = std::min(std::min(pa.y, pb.y), std::min(pc.y, pd.y));
+    float maxV = std::max(std::max(pa.y, pb.y), std::max(pc.y, pd.y));
+
+    float du = std::max(1e-6f, maxU - minU);
+    float dv = std::max(1e-6f, maxV - minV);
+
+    auto normUV = [&](const glm::vec2& p) -> glm::vec2 {
+        return glm::vec2((p.x - minU) / du, (p.y - minV) / dv);
+    };
+
+    glm::vec2 uva = normUV(pa);
+    glm::vec2 uvb = normUV(pb);
+    glm::vec2 uvc = normUV(pc);
+    glm::vec2 uvd = normUV(pd);
+
+    // Optional: flip U for negative-facing sides to keep “handedness” consistent
+    // (prevents some faces appearing mirrored/rotated depending on world direction)
+    if (axis != 1 && dir < 0) {
+        uva.x = 1.0f - uva.x;
+        uvb.x = 1.0f - uvb.x;
+        uvc.x = 1.0f - uvc.x;
+        uvd.x = 1.0f - uvd.x;
+    }
+
+    // Convert 0..1 local UV into atlas UV
+    glm::vec2 A = atlasUV_fromTopLeftTile(tile, uva);
+    glm::vec2 B = atlasUV_fromTopLeftTile(tile, uvb);
+    glm::vec2 C = atlasUV_fromTopLeftTile(tile, uvc);
+    glm::vec2 D = atlasUV_fromTopLeftTile(tile, uvd);
+
     uint32_t base = (uint32_t)(m.verts.size() / 7);
-    pushVertex(m.verts, a.x,a.y,a.z, rgb.r,rgb.g,rgb.b, alpha);
-    pushVertex(m.verts, b.x,b.y,b.z, rgb.r,rgb.g,rgb.b, alpha);
-    pushVertex(m.verts, c.x,c.y,c.z, rgb.r,rgb.g,rgb.b, alpha);
-    pushVertex(m.verts, d.x,d.y,d.z, rgb.r,rgb.g,rgb.b, alpha);
+
+    pushVertex(m.verts, a.x,a.y,a.z, A.x,A.y, shade, alpha);
+    pushVertex(m.verts, b.x,b.y,b.z, B.x,B.y, shade, alpha);
+    pushVertex(m.verts, c.x,c.y,c.z, C.x,C.y, shade, alpha);
+    pushVertex(m.verts, d.x,d.y,d.z, D.x,D.y, shade, alpha);
 
     m.indices.push_back(base + 0);
     m.indices.push_back(base + 1);
@@ -2057,9 +2193,18 @@ static void uploadMeshToGPU(GLuint& vao, GLuint& vbo, GLuint& ebo, const ChunkMe
     // aPos (vec3)
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 7 * sizeof(float), (void*)0);
     glEnableVertexAttribArray(0);
-    // aColor (vec4)
-    glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, 7 * sizeof(float), (void*)(3 * sizeof(float)));
+
+    // aUV (vec2)
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 7 * sizeof(float), (void*)(3 * sizeof(float)));
     glEnableVertexAttribArray(1);
+
+    // aShade (float)
+    glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, 7 * sizeof(float), (void*)(5 * sizeof(float)));
+    glEnableVertexAttribArray(2);
+
+    // aAlpha (float)
+    glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, 7 * sizeof(float), (void*)(6 * sizeof(float)));
+    glEnableVertexAttribArray(3);
 
     glBindVertexArray(0);
 }
@@ -2250,19 +2395,6 @@ struct ChunkSnapshot {
     std::vector<uint8_t> blocks;
 };
 
-static glm::vec3 blockBaseColor(uint8_t id) {
-    switch (id) {
-        default: return glm::vec3(1.0f);
-        case 1:  return glm::vec3(0.25f, 0.80f, 0.25f); // grass
-        case 2:  return glm::vec3(0.55f, 0.40f, 0.25f); // dirt
-        case 3:  return glm::vec3(0.55f, 0.55f, 0.55f); // stone
-        case 4:  return glm::vec3(0.15f, 0.35f, 0.95f); // water
-        case 5:  return glm::vec3(0.45f, 0.30f, 0.18f); // wood
-        case 6:  return glm::vec3(0.15f, 0.65f, 0.20f); // leaves
-        case 7:  return glm::vec3(0.85f, 0.80f, 0.55f); // sand
-    }
-}
-
 static float faceShade(int axis, int dir) {
     if (axis == 1 && dir > 0) return 1.05f;
     if (axis == 1 && dir < 0) return 0.70f;
@@ -2326,8 +2458,12 @@ static ChunkMeshes buildChunkMeshesGreedy_3x3Snapshots(
         }
 
         const float s = blockSize;
-        glm::vec3 col = blockBaseColor(blockId) * faceShade(axis, dir);
-        col = glm::clamp(col, glm::vec3(0.0f), glm::vec3(1.0f));
+
+        float shade = faceShade(axis, dir);
+        float alpha = (blockId == WATER) ? WATER_ALPHA : 1.0f;
+
+        Face face = faceFromAxisDir(axis, dir);
+        glm::ivec2 tile = atlasTileFor(blockId, face);
 
         int uAxis = (axis + 1) % 3;
         int vAxis = (axis + 2) % 3;
@@ -2355,18 +2491,7 @@ static ChunkMeshes buildChunkMeshesGreedy_3x3Snapshots(
         // - Top face: lower all vertices by WATER_TOP_OFFSET
         // - Side faces: lower ONLY the top edge vertices (those at y == +0.5*s in local cube space)
         if (blockId == WATER) {
-            // Since these are axis-aligned faces on unit cubes, "top edge" vertices have y near (originY + ... + 0.5*s).
             auto lowerIfTop = [&](glm::vec3& p) {
-                // Compare to nearest cube top plane by using fractional position within the block:
-                // We know cube top is at ... + 0.5*s, so if vertex is on that plane, lower it.
-                // Tolerance is small to avoid missing due to float.
-                float frac = std::fmod(p.y + 100000.0f, s); // stable-ish
-                // But because positions are aligned to s, "top" is exactly (k*s + 0.5*s) after shift.
-                // Use direct check against 0.5*s with tolerance:
-                float local = p.y / s;
-                float nearestHalf = std::round(local * 2.0f) * 0.5f;
-                // If on a half-grid line that corresponds to +0.5 in block-local space, it will be an odd half-step.
-                // Easier: just check if p.y is within epsilon of (n*s + 0.5*s).
                 float n = std::floor((p.y) / s);
                 float topPlane = n * s + 0.5f * s;
                 if (std::abs(p.y - topPlane) < 1e-4f) p.y += WATER_TOP_OFFSET;
@@ -2385,9 +2510,9 @@ static ChunkMeshes buildChunkMeshesGreedy_3x3Snapshots(
         }
 
         if (blockId == WATER) {
-            addQuad(out.water, a, b, c, d, col, WATER_ALPHA, axis, dir);
+            addQuad(out.water, a, b, c, d, shade, alpha, tile, axis, dir);
         } else {
-            addQuad(out.solid, a, b, c, d, col, 1.0f, axis, dir);
+            addQuad(out.solid, a, b, c, d, shade, alpha, tile, axis, dir);
         }
     };
 
@@ -2443,7 +2568,6 @@ static ChunkMeshes buildChunkMeshesGreedy_3x3Snapshots(
                     }
 
                     // Extra rule: if this is a WATER bottom face (axis==Y, dir==-1), skip it.
-                    // You want to see the bed, not an extra water "floor".
                     if (cell.id == WATER && axis == 1 && cell.dir == -1) {
                         cell = {};
                     }
@@ -2543,21 +2667,39 @@ int main() {
     bool f1WasDown = false;
 
     // ----------------------------
-    // Shader program (RGBA vertex color)
+    // Shader program (texture atlas)
     // ----------------------------
     const char* vs =
         "#version 330 core\n"
         "layout(location = 0) in vec3 aPos;\n"
-        "layout(location = 1) in vec4 aColor;\n"
+        "layout(location = 1) in vec2 aUV;\n"
+        "layout(location = 2) in float aShade;\n"
+        "layout(location = 3) in float aAlpha;\n"
         "uniform mat4 MVP;\n"
-        "out vec4 vColor;\n"
-        "void main(){ gl_Position = MVP * vec4(aPos,1.0); vColor=aColor; }\n";
+        "out vec2 vUV;\n"
+        "out float vShade;\n"
+        "out float vAlpha;\n"
+        "void main(){\n"
+        "  gl_Position = MVP * vec4(aPos,1.0);\n"
+        "  vUV = aUV;\n"
+        "  vShade = aShade;\n"
+        "  vAlpha = aAlpha;\n"
+        "}\n";
 
     const char* fs =
         "#version 330 core\n"
-        "in vec4 vColor;\n"
+        "in vec2 vUV;\n"
+        "in float vShade;\n"
+        "in float vAlpha;\n"
+        "uniform sampler2D uAtlas;\n"
         "out vec4 FragColor;\n"
-        "void main(){ FragColor = vColor; }\n";
+        "void main(){\n"
+        "  vec4 tex = texture(uAtlas, vUV);\n"
+        "  tex.rgb *= vShade;\n"
+        "  tex.a *= vAlpha;\n"
+        "  if (tex.a <= 0.01) discard;\n"
+        "  FragColor = tex;\n"
+        "}\n";
 
     auto compileProgram = [&](const char* vsrc, const char* fsrc) -> GLuint {
         GLuint v = glCreateShader(GL_VERTEX_SHADER);
@@ -2580,6 +2722,10 @@ int main() {
 
     GLuint program = compileProgram(vs, fs);
     GLint mvpLoc = glGetUniformLocation(program, "MVP");
+    GLint atlasLoc = glGetUniformLocation(program, "uAtlas");
+    glUseProgram(program);
+    glUniform1i(atlasLoc, 0);
+    glUseProgram(0);
 
     // Outline shader (RGB)
     const char* ovs =
@@ -2598,6 +2744,44 @@ int main() {
 
     GLuint outlineProgram = compileProgram(ovs, ofs);
     GLint outlineMvpLoc = glGetUniformLocation(outlineProgram, "MVP");
+
+    // ----------------------------
+    // Load atlas texture (atlas.png)
+    // ----------------------------
+    GLuint atlasTex = 0;
+    auto loadAtlas = [&](const char* path) -> bool {
+        int w=0, h=0, n=0;
+
+        // NOTE: We already flip tile-Y in atlasUV_fromTopLeftTile(),
+        // so we want the image loaded in its natural orientation.
+        // If your atlas looks upside-down, toggle this to true.
+        stbi_set_flip_vertically_on_load(true);
+
+        unsigned char* data = stbi_load(path, &w, &h, &n, 4);
+        if (!data) {
+            std::cout << "Failed to load atlas: " << path << "\n";
+            return false;
+        }
+
+        glGenTextures(1, &atlasTex);
+        glBindTexture(GL_TEXTURE_2D, atlasTex);
+
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
+
+        // Crisp pixels
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+        // Avoid sampling across tile borders
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+        stbi_image_free(data);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        return true;
+    };
+
+    loadAtlas("/Users/williambehnke/voxel/assets/textures/atlas.png");
 
     // ============================================================
     // World config
@@ -2637,6 +2821,7 @@ int main() {
 
     // Worldgen flags
     const bool USE_3_LAYERS_NOISE = true;
+    (void)USE_3_LAYERS_NOISE;
     const uint32_t NOISE_SEED = 1337u;
 
     // ============================================================
@@ -3172,11 +3357,18 @@ int main() {
                         uint8_t id = STONE;
 
                         if (yy == groundH - 1) {
-                            id = exposedStone ? STONE : GRASS;
-                        } else if (yy >= stoneTop) {
-                            id = DIRT;
-                        } else {
-                            id = STONE;
+                            if (exposedStone) {
+                                id = STONE;
+                            }
+                            else if (groundH - 1 < WATER_LEVEL) {
+                                if (WATER_LEVEL - (groundH - 1) > 5)
+                                    id = STONE;  // deep underwater
+                                else
+                                    id = SAND;   // shallow
+                            }
+                            else {
+                                id = GRASS;  // dry land surface
+                            }
                         }
 
                         ch->blocks[idx3(xx, yy, zz, CHUNK_X, CHUNK_Y, CHUNK_Z)] = id;
@@ -3455,9 +3647,9 @@ int main() {
     };
 
     auto scheduleStreaming = [&](int pcx, int pcz){
-        int GEN_RADIUS = LOAD_RADIUS + 1;
+        int GEN_RADIUS_LOCAL = LOAD_RADIUS + 1;
 
-        for (int r=0; r<=GEN_RADIUS; ++r) {
+        for (int r=0; r<=GEN_RADIUS_LOCAL; ++r) {
             for (int dz=-r; dz<=r; ++dz) {
                 for (int dx=-r; dx<=r; ++dx) {
                     if (std::max(std::abs(dx), std::abs(dz)) != r) continue;
@@ -3682,6 +3874,9 @@ int main() {
         // PASS 1: SOLIDS
         glUseProgram(program);
         glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, &mvp[0][0]);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, atlasTex);
+
         glDisable(GL_BLEND);
         glDepthMask(GL_TRUE);
 
@@ -3709,8 +3904,7 @@ int main() {
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-        // Keep depth test ON so water doesn't draw through walls,
-        // but don't write depth so it doesn't "seal" later transparent passes.
+        // Keep depth test ON; don't write depth for transparency ordering sanity
         glDepthMask(GL_FALSE);
 
         for (GpuChunk* ch : drawList) {
@@ -3772,6 +3966,8 @@ int main() {
 
     if (outlineVAO) glDeleteVertexArrays(1, &outlineVAO);
     if (outlineVBO) glDeleteBuffers(1, &outlineVBO);
+
+    if (atlasTex) glDeleteTextures(1, &atlasTex);
 
     glDeleteProgram(program);
     glDeleteProgram(outlineProgram);
