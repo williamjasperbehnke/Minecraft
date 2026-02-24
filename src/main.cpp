@@ -1876,35 +1876,48 @@ int pauseMenuButtonAtCursor(double mx, double my, int width, int height) {
 } // namespace
 
 // Camera state variables for mouse callback
-static float gYaw = -90.0f;
-static float gPitch = 0.0f;
-static float gLastX = 400.0f;
-static float gLastY = 300.0f;
-static bool gFirstMouse = true;
-static glm::vec3 gCameraFront = glm::vec3(0.0f, 0.0f, -1.0f);
+glm::vec3 gCameraFront(0.0f, 0.0f, -1.0f);
 
-void mouse_callback(GLFWwindow* window, double xpos, double ypos) {
+float gYaw   = -90.0f;  // looking toward -Z
+float gPitch =  0.0f;
+
+float gLastX = 0.0f;
+float gLastY = 0.0f;
+bool  gFirstMouse = true;
+
+float gMouseSensitivity = 0.10f;
+
+static void mouse_callback(GLFWwindow* window, double xpos, double ypos)
+{
+    (void)window;
+
     if (gFirstMouse) {
-        gLastX = xpos;
-        gLastY = ypos;
+        gLastX = (float)xpos;
+        gLastY = (float)ypos;
         gFirstMouse = false;
     }
-    float xoffset = xpos - gLastX;
-    float yoffset = gLastY - ypos;
-    gLastX = xpos;
-    gLastY = ypos;
-    float sensitivity = 0.1f;
-    xoffset *= sensitivity;
-    yoffset *= sensitivity;
-    gYaw += xoffset;
+
+    float xoffset = (float)xpos - gLastX;
+    float yoffset = gLastY - (float)ypos; // reversed: y goes down on screen
+
+    gLastX = (float)xpos;
+    gLastY = (float)ypos;
+
+    xoffset *= gMouseSensitivity;
+    yoffset *= gMouseSensitivity;
+
+    gYaw   += xoffset;
     gPitch += yoffset;
-    if (gPitch > 89.0f) gPitch = 89.0f;
+
+    // clamp pitch so you don't flip
+    if (gPitch > 89.0f)  gPitch = 89.0f;
     if (gPitch < -89.0f) gPitch = -89.0f;
-    glm::vec3 direction;
-    direction.x = cos(glm::radians(gYaw)) * cos(glm::radians(gPitch));
-    direction.y = sin(glm::radians(gPitch));
-    direction.z = sin(glm::radians(gYaw)) * cos(glm::radians(gPitch));
-    gCameraFront = glm::normalize(direction);
+
+    glm::vec3 front;
+    front.x = cos(glm::radians(gYaw)) * cos(glm::radians(gPitch));
+    front.y = sin(glm::radians(gPitch));
+    front.z = sin(glm::radians(gYaw)) * cos(glm::radians(gPitch));
+    gCameraFront = glm::normalize(front);
 }
 
 static inline uint32_t hash_u32(uint32_t x) {
@@ -1926,19 +1939,10 @@ struct ChunkMesh2 {
 };
 
 static inline int idx3(int x, int y, int z, int sx, int sy, int sz) {
-    return x + sx * (z + sz * y); // (x,z,y) layout; any consistent layout is fine
+    return x + sx * (z + sz * y); // (x,z,y)
 }
 
-static inline bool inBounds(int x, int y, int z, int sx, int sy, int sz) {
-    return (x >= 0 && x < sx && y >= 0 && y < sy && z >= 0 && z < sz);
-}
-
-static inline bool isSolid(const std::vector<uint8_t>& blocks, int x, int y, int z, int sx, int sy, int sz) {
-    if (!inBounds(x,y,z,sx,sy,sz)) return false; // outside chunk = air
-    return blocks[idx3(x,y,z,sx,sy,sz)] != 0;
-}
-
-static void pushVertex(std::vector<float>& v, float x, float y, float z, float r, float g, float b) {
+static inline void pushVertex(std::vector<float>& v, float x, float y, float z, float r, float g, float b) {
     v.push_back(x); v.push_back(y); v.push_back(z);
     v.push_back(r); v.push_back(g); v.push_back(b);
 }
@@ -1964,71 +1968,10 @@ static void addQuad(ChunkMesh2& m,
     m.indices.push_back(base + 3);
 }
 
-static ChunkMesh2 buildChunkMesh(const std::vector<uint8_t>& blocks,
-                               int sx, int sy, int sz,
-                               const glm::vec3& origin,
-                               float blockSize)
-{
-    ChunkMesh2 mesh;
-    mesh.verts.reserve(6 * 4 * 1024);    // rough; grows as needed
-    mesh.indices.reserve(6 * 6 * 1024);
-
-    // Keep original cube face colors:
-// Front (+Z) = cyan, Back (-Z) = red, Left (-X) = green, Right (+X) = blue,
-// Bottom (-Y) = yellow, Top (+Y) = magenta
-const glm::vec3 colRight   = {0.0f, 0.0f, 1.0f}; // +X
-const glm::vec3 colLeft    = {0.0f, 1.0f, 0.0f}; // -X
-const glm::vec3 colTop     = {1.0f, 0.0f, 1.0f}; // +Y
-const glm::vec3 colBottom  = {1.0f, 1.0f, 0.0f}; // -Y
-const glm::vec3 colFront   = {0.0f, 1.0f, 1.0f}; // +Z
-const glm::vec3 colBack    = {1.0f, 0.0f, 0.0f}; // -Z
-
-    const float s = blockSize;
-    const float hs = 0.5f * s;
-
-    for (int y = 0; y < sy; ++y) {
-        for (int z = 0; z < sz; ++z) {
-            for (int x = 0; x < sx; ++x) {
-
-                if (!isSolid(blocks, x,y,z, sx,sy,sz)) continue;
-
-                glm::vec3 c = origin + glm::vec3(x*s, y*s, z*s);
-
-                // cube corners around center c
-                glm::vec3 p000 = c + glm::vec3(-hs,-hs,-hs);
-                glm::vec3 p001 = c + glm::vec3(-hs,-hs, hs);
-                glm::vec3 p010 = c + glm::vec3(-hs, hs,-hs);
-                glm::vec3 p011 = c + glm::vec3(-hs, hs, hs);
-                glm::vec3 p100 = c + glm::vec3( hs,-hs,-hs);
-                glm::vec3 p101 = c + glm::vec3( hs,-hs, hs);
-                glm::vec3 p110 = c + glm::vec3( hs, hs,-hs);
-                glm::vec3 p111 = c + glm::vec3( hs, hs, hs);
-
-                // Only emit a face if the neighbor in that direction is air.
-
-                // +X
-                if (!isSolid(blocks, x+1,y,z, sx,sy,sz)) addQuad(mesh, p101, p100, p110, p111, colRight);
-                // -X
-                if (!isSolid(blocks, x-1,y,z, sx,sy,sz)) addQuad(mesh, p001, p011, p010, p000, colLeft);
-                // +Y
-                if (!isSolid(blocks, x,y+1,z, sx,sy,sz)) addQuad(mesh, p011, p111, p110, p010, colTop);
-                // -Y
-                if (!isSolid(blocks, x,y-1,z, sx,sy,sz)) addQuad(mesh, p001, p000, p100, p101, colBottom);
-                // +Z
-                if (!isSolid(blocks, x,y,z+1, sx,sy,sz)) addQuad(mesh, p001, p101, p111, p011, colFront);
-                // -Z
-                if (!isSolid(blocks, x,y,z-1, sx,sy,sz)) addQuad(mesh, p000, p010, p110, p100, colBack);
-            }
-        }
-    }
-
-    return mesh;
-}
-
 static ChunkMesh2 buildChunkMeshGreedy(const std::vector<uint8_t>& blocks,
-                                     int sx, int sy, int sz,
-                                     const glm::vec3& origin,
-                                     float blockSize)
+                                      int sx, int sy, int sz,
+                                      const glm::vec3& origin,
+                                      float blockSize)
 {
     ChunkMesh2 mesh;
 
@@ -2055,18 +1998,14 @@ static ChunkMesh2 buildChunkMeshGreedy(const std::vector<uint8_t>& blocks,
     };
 
     // Greedy meshing sweep over each axis
-    // We build faces where A is solid and B (neighbor along axis) is air.
     struct MaskCell { uint8_t id = 0; int dir = 0; }; // dir: +1 or -1, id: block id (0=none)
 
     const int dims[3] = { sx, sy, sz };
 
-    // Temporary mask sized to the largest possible 2D slice
     std::vector<MaskCell> mask;
-    mask.resize(std::max(sx, std::max(sy, sz)) * std::max(sx, std::max(sy, sz)));
+    int maxDim = std::max(sx, std::max(sy, sz));
+    mask.resize(maxDim * maxDim);
 
-    // Helper to emit a quad for a merged rectangle in the mask.
-    // axis: sweep axis, dir: +/-1 normal direction
-    // i: plane coordinate along axis, u0..u1, v0..v1 define rectangle in the other two axes.
     auto emitQuad = [&](int axis, int dir, int i,
                         int u0, int v0, int u1, int v1)
     {
@@ -2084,7 +2023,6 @@ static ChunkMesh2 buildChunkMeshGreedy(const std::vector<uint8_t>& blocks,
             return origin + glm::vec3(float(c[0]) * s, float(c[1]) * s, float(c[2]) * s);
         };
 
-        // Corners in a consistent grid order (p00 -> p10 -> p11 -> p01)
         glm::vec3 p00 = corner(i,  u0, v0);
         glm::vec3 p10 = corner(i,  u1, v0);
         glm::vec3 p11 = corner(i,  u1, v1);
@@ -2097,22 +2035,18 @@ static ChunkMesh2 buildChunkMeshGreedy(const std::vector<uint8_t>& blocks,
         glm::vec3 c = p11 + shift;
         glm::vec3 d = p01 + shift;
 
-        // Expected outward normal direction
         glm::vec3 axisVec(0.0f);
         axisVec[axis] = 1.0f;
         glm::vec3 expected = axisVec * float(dir);
 
-        // If winding is wrong, flip it (swap b and d)
         glm::vec3 n = glm::cross(b - a, c - a);
         if (glm::dot(n, expected) < 0.0f) {
             std::swap(b, d);
-            // (a,b,c,d) now has opposite winding
         }
 
         addQuad(mesh, a, b, c, d, col);
     };
 
-    // Sweep each axis
     for (int axis = 0; axis < 3; ++axis) {
         int uAxis = (axis + 1) % 3;
         int vAxis = (axis + 2) % 3;
@@ -2121,17 +2055,13 @@ static ChunkMesh2 buildChunkMeshGreedy(const std::vector<uint8_t>& blocks,
         int U = dims[uAxis];
         int V = dims[vAxis];
 
-        // We sweep planes from 0..A (note: planes are between voxels)
         for (int i = 0; i <= A; ++i) {
 
-            // Build mask for this plane: size U*V
-            // Each cell indicates a face exists on this plane and its direction.
             for (int v = 0; v < V; ++v) {
                 for (int u = 0; u < U; ++u) {
                     int c0[3] = {0,0,0};
                     int c1[3] = {0,0,0};
 
-                    // c0 is voxel on "negative" side of plane, c1 is voxel on "positive" side
                     c0[axis] = i - 1;
                     c1[axis] = i;
 
@@ -2142,22 +2072,20 @@ static ChunkMesh2 buildChunkMeshGreedy(const std::vector<uint8_t>& blocks,
                     uint8_t b = solidAt(c1[0], c1[1], c1[2]);
 
                     MaskCell cell;
-                    if (a && !b) { cell.id = a; cell.dir = +1; }  // face points +axis
-                    else if (!a && b) { cell.id = b; cell.dir = -1; } // face points -axis
+                    if (a && !b) { cell.id = a; cell.dir = +1; }
+                    else if (!a && b) { cell.id = b; cell.dir = -1; }
                     else { cell.id = 0; cell.dir = 0; }
 
                     mask[u + U * v] = cell;
                 }
             }
 
-            // Greedy merge rectangles in mask
             for (int v = 0; v < V; ++v) {
                 for (int u = 0; u < U; ) {
 
                     MaskCell cur = mask[u + U * v];
                     if (cur.id == 0) { ++u; continue; }
 
-                    // width
                     int w = 1;
                     while (u + w < U) {
                         MaskCell nxt = mask[(u + w) + U * v];
@@ -2165,7 +2093,6 @@ static ChunkMesh2 buildChunkMeshGreedy(const std::vector<uint8_t>& blocks,
                         ++w;
                     }
 
-                    // height
                     int h = 1;
                     bool done = false;
                     while (v + h < V && !done) {
@@ -2176,13 +2103,8 @@ static ChunkMesh2 buildChunkMeshGreedy(const std::vector<uint8_t>& blocks,
                         if (!done) ++h;
                     }
 
-                    // Emit merged quad: [u,u+w] x [v,v+h] on plane i
-                    // Need to map (axis,u,v) to real axes:
-                    // axis plane coordinate is i; u maps to uAxis; v maps to vAxis.
-                    // emitQuad expects (u0,v0,u1,v1) in the (uAxis,vAxis) coordinate system.
                     emitQuad(axis, cur.dir, i, u, v, u + w, v + h);
 
-                    // Clear mask area
                     for (int dv = 0; dv < h; ++dv)
                         for (int du = 0; du < w; ++du)
                             mask[(u + du) + U * (v + dv)] = {};
@@ -2196,29 +2118,62 @@ static ChunkMesh2 buildChunkMeshGreedy(const std::vector<uint8_t>& blocks,
     return mesh;
 }
 
-int main() {
-    if (!glfwInit()) {
-        return -1;
+// ============================================================
+// NEW: multi-chunk world container (fixed grid)
+// ============================================================
+
+struct GpuChunk {
+    glm::ivec2 cpos;              // (cx, cz)
+    glm::vec3 origin;             // world-space origin
+    std::vector<uint8_t> blocks;  // CHUNK_X * CHUNK_Y * CHUNK_Z
+    ChunkMesh2 mesh;
+
+    unsigned int vao=0, vbo=0, ebo=0;
+};
+
+static void uploadChunkMesh(GpuChunk& c) {
+    if (c.vao == 0) {
+        glGenVertexArrays(1, &c.vao);
+        glGenBuffers(1, &c.vbo);
+        glGenBuffers(1, &c.ebo);
     }
+
+    glBindVertexArray(c.vao);
+
+    glBindBuffer(GL_ARRAY_BUFFER, c.vbo);
+    glBufferData(GL_ARRAY_BUFFER,
+                 c.mesh.verts.size() * sizeof(float),
+                 c.mesh.verts.data(),
+                 GL_STATIC_DRAW);
+
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, c.ebo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER,
+                 c.mesh.indices.size() * sizeof(uint32_t),
+                 c.mesh.indices.data(),
+                 GL_STATIC_DRAW);
+
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)(3 * sizeof(float)));
+    glEnableVertexAttribArray(1);
+
+    glBindVertexArray(0);
+}
+
+int main() {
+    if (!glfwInit()) return -1;
 
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 
-    // --- Fullscreen ---
+    // Fullscreen
     GLFWmonitor* monitor = glfwGetPrimaryMonitor();
     const GLFWvidmode* mode = glfwGetVideoMode(monitor);
-    if (!monitor || !mode) {
-        glfwTerminate();
-        return -1;
-    }
+    if (!monitor || !mode) { glfwTerminate(); return -1; }
 
-    GLFWwindow* window = glfwCreateWindow(mode->width, mode->height, "Triangle", monitor, nullptr);
-    if (!window) {
-        glfwTerminate();
-        return -1;
-    }
-
+    GLFWwindow* window = glfwCreateWindow(mode->width, mode->height, "Voxel World", monitor, nullptr);
+    if (!window) { glfwTerminate(); return -1; }
     glfwMakeContextCurrent(window);
 
     if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
@@ -2227,100 +2182,27 @@ int main() {
         return -1;
     }
 
-    glViewport(0, 0, mode->width, mode->height);
-    glfwSetFramebufferSizeCallback(window, onFramebufferResize);
     glfwSetCursorPosCallback(window, mouse_callback);
+    glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+
+    glViewport(0, 0, mode->width, mode->height);
+    // glfwSetFramebufferSizeCallback(window, onFramebufferResize);
+    // glfwSetCursorPosCallback(window, mouse_callback);
     glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
 
     glEnable(GL_DEPTH_TEST);
 
-    glm::vec3 cameraPos = glm::vec3(0.0f, 0.0f, 3.0f);
+    glm::vec3 cameraPos = glm::vec3(0.0f, 40.0f, 80.0f);
     glm::vec3 cameraUp  = glm::vec3(0.0f, 1.0f, 0.0f);
-    float cameraSpeed   = 2.5f;
+    float cameraSpeed   = 25.0f;
     float deltaTime     = 0.0f;
     float lastFrame     = 0.0f;
 
     bool wireframe = false;
     bool f1WasDown = false;
 
-    // --- FPS tracking ---
-    double fps_prev_time = glfwGetTime();
-    int fps_frames = 0;
-    double fps_value = 0.0;
-
-    // --- Persistent wall state (fixed in world once spawned) ---
-    bool wallSpawned = false;
-    glm::vec3 wallCenter(0.0f);
-    glm::vec3 wallRight(1.0f, 0.0f, 0.0f);
-    glm::vec3 wallUp(0.0f, 1.0f, 0.0f);
-    glm::vec3 wallForward(0.0f, 0.0f, -1.0f);
-
     // ----------------------------
-    // Cube data
-    // ----------------------------
-    float cubeVertices[] = {
-        // Front face (cyan)
-        -0.5f, -0.5f,  0.5f,  0.0f, 1.0f, 1.0f,
-         0.5f, -0.5f,  0.5f,  0.0f, 1.0f, 1.0f,
-         0.5f,  0.5f,  0.5f,  0.0f, 1.0f, 1.0f,
-        -0.5f,  0.5f,  0.5f,  0.0f, 1.0f, 1.0f,
-        // Back face (red)
-        -0.5f, -0.5f, -0.5f,  1.0f, 0.0f, 0.0f,
-         0.5f, -0.5f, -0.5f,  1.0f, 0.0f, 0.0f,
-         0.5f,  0.5f, -0.5f,  1.0f, 0.0f, 0.0f,
-        -0.5f,  0.5f, -0.5f,  1.0f, 0.0f, 0.0f,
-        // Left face (green)
-        -0.5f, -0.5f, -0.5f,  0.0f, 1.0f, 0.0f,
-        -0.5f,  0.5f, -0.5f,  0.0f, 1.0f, 0.0f,
-        -0.5f,  0.5f,  0.5f,  0.0f, 1.0f, 0.0f,
-        -0.5f, -0.5f,  0.5f,  0.0f, 1.0f, 0.0f,
-        // Right face (blue)
-         0.5f, -0.5f, -0.5f,  0.0f, 0.0f, 1.0f,
-         0.5f,  0.5f, -0.5f,  0.0f, 0.0f, 1.0f,
-         0.5f,  0.5f,  0.5f,  0.0f, 0.0f, 1.0f,
-         0.5f, -0.5f,  0.5f,  0.0f, 0.0f, 1.0f,
-        // Bottom face (yellow)
-        -0.5f, -0.5f, -0.5f,  1.0f, 1.0f, 0.0f,
-         0.5f, -0.5f, -0.5f,  1.0f, 1.0f, 0.0f,
-         0.5f, -0.5f,  0.5f,  1.0f, 1.0f, 0.0f,
-        -0.5f, -0.5f,  0.5f,  1.0f, 1.0f, 0.0f,
-        // Top face (magenta)
-        -0.5f,  0.5f, -0.5f,  1.0f, 0.0f, 1.0f,
-         0.5f,  0.5f, -0.5f,  1.0f, 0.0f, 1.0f,
-         0.5f,  0.5f,  0.5f,  1.0f, 0.0f, 1.0f,
-        -0.5f,  0.5f,  0.5f,  1.0f, 0.0f, 1.0f
-    };
-
-    unsigned int cubeIndices[] = {
-        0, 1, 2, 0, 2, 3,
-        4, 5, 6, 4, 6, 7,
-        8, 9,10, 8,10,11,
-       12,13,14,12,14,15,
-       16,17,18,16,18,19,
-       20,21,22,20,22,23
-    };
-
-    unsigned int VBO, VAO, EBO;
-    glGenVertexArrays(1, &VAO);
-    glGenBuffers(1, &VBO);
-    glGenBuffers(1, &EBO);
-
-    glBindVertexArray(VAO);
-
-    glBindBuffer(GL_ARRAY_BUFFER, VBO);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(cubeVertices), cubeVertices, GL_STATIC_DRAW);
-
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(cubeIndices), cubeIndices, GL_STATIC_DRAW);
-
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)0);
-    glEnableVertexAttribArray(0);
-
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)(3 * sizeof(float)));
-    glEnableVertexAttribArray(1);
-
-    // ----------------------------
-    // Cube shaders
+    // Cube shader program (reused for chunks)
     // ----------------------------
     const char* cubeVS =
         "#version 330 core\n"
@@ -2349,186 +2231,88 @@ int main() {
     glAttachShader(cubeProgram, cubeFrag);
     glLinkProgram(cubeProgram);
 
-    // ----------------------------
-    // Chunk data + mesh buffers
-    // ----------------------------
+    glDeleteShader(cubeVert);
+    glDeleteShader(cubeFrag);
+
+    // ============================================================
+    // NEW: Build a fixed grid of chunks ONCE (no streaming)
+    // ============================================================
     const int CHUNK_X = 16;
     const int CHUNK_Z = 16;
     const int CHUNK_Y = 128;
+    const float BLOCK = 1.0f;
 
-    std::vector<uint8_t> blocks(CHUNK_X * CHUNK_Y * CHUNK_Z, 0);
+    const int WORLD_CX = 16; // increase for more chunks
+    const int WORLD_CZ = 16;
 
-    // Simple terrain fill (edit however you want)
-    auto heightAt = [&](int x, int z) -> int {
-        float fx = float(x) * 0.35f;
-        float fz = float(z) * 0.35f;
-        float h = (sinf(fx) + cosf(fz)) * 6.0f + 20.0f;
+    std::vector<GpuChunk> worldChunks;
+    worldChunks.reserve(WORLD_CX * WORLD_CZ);
+
+    auto heightAtWorld = [&](int wx, int wz) -> int {
+        // world-space height function (continuous across chunk borders)
+        float fx = float(wx) * 0.08f;
+        float fz = float(wz) * 0.08f;
+        float h  = (sinf(fx) + cosf(fz)) * 10.0f + 32.0f;
         int hi = (int)h;
         if (hi < 0) hi = 0;
         if (hi > CHUNK_Y) hi = CHUNK_Y;
         return hi;
     };
 
-    for (int z = 0; z < CHUNK_Z; ++z) {
-        for (int x = 0; x < CHUNK_X; ++x) {
-            int h = heightAt(x, z);
-            for (int y = 0; y < h; ++y) {
-                blocks[idx3(x,y,z, CHUNK_X,CHUNK_Y,CHUNK_Z)] = 1;
+    const float worldWidth = float(WORLD_CX * CHUNK_X) * BLOCK;
+    const float worldDepth = float(WORLD_CZ * CHUNK_Z) * BLOCK;
+    glm::vec3 worldOrigin(-worldWidth * 0.5f, 0.0f, -worldDepth * 0.5f);
+
+    for (int cz = 0; cz < WORLD_CZ; ++cz) {
+        for (int cx = 0; cx < WORLD_CX; ++cx) {
+            GpuChunk ch;
+            ch.cpos = glm::ivec2(cx, cz);
+            ch.origin = worldOrigin + glm::vec3(
+                float(cx * CHUNK_X) * BLOCK,
+                0.0f,
+                float(cz * CHUNK_Z) * BLOCK
+            );
+
+            ch.blocks.assign(CHUNK_X * CHUNK_Y * CHUNK_Z, 0);
+
+            int baseWX = cx * CHUNK_X;
+            int baseWZ = cz * CHUNK_Z;
+
+            for (int z = 0; z < CHUNK_Z; ++z) {
+                for (int x = 0; x < CHUNK_X; ++x) {
+                    int wx = baseWX + x;
+                    int wz = baseWZ + z;
+
+                    int h = heightAtWorld(wx, wz);
+                    for (int y = 0; y < h; ++y) {
+                        ch.blocks[idx3(x,y,z, CHUNK_X,CHUNK_Y,CHUNK_Z)] = 1;
+                    }
+                }
             }
+
+            ch.mesh = buildChunkMeshGreedy(ch.blocks, CHUNK_X,CHUNK_Y,CHUNK_Z, ch.origin, BLOCK);
+            uploadChunkMesh(ch);
+
+            worldChunks.push_back(std::move(ch));
         }
     }
 
-    // Place chunk near origin, centered in XZ
-    const float BLOCK = 1.0f;
-    glm::vec3 chunkOrigin(0.0f, 0.0f, 0.0f);
-    chunkOrigin.x -= (CHUNK_X * BLOCK) * 0.5f;
-    chunkOrigin.z -= (CHUNK_Z * BLOCK) * 0.5f;
-
-    // Build mesh ONCE (rebuild when blocks change)
-    ChunkMesh2 chunkMesh2 = buildChunkMeshGreedy(blocks, CHUNK_X,CHUNK_Y,CHUNK_Z, chunkOrigin, BLOCK);
-    unsigned int chunkVAO=0, chunkVBO=0, chunkEBO=0;
-    glGenVertexArrays(1, &chunkVAO);
-    glGenBuffers(1, &chunkVBO);
-    glGenBuffers(1, &chunkEBO);
-
-    glBindVertexArray(chunkVAO);
-
-    glBindBuffer(GL_ARRAY_BUFFER, chunkVBO);
-    glBufferData(GL_ARRAY_BUFFER, chunkMesh2.verts.size() * sizeof(float), chunkMesh2.verts.data(), GL_STATIC_DRAW);
-
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, chunkEBO);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, chunkMesh2.indices.size() * sizeof(uint32_t), chunkMesh2.indices.data(), GL_STATIC_DRAW);
-
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)0);
-    glEnableVertexAttribArray(0);
-
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)(3 * sizeof(float)));
-    glEnableVertexAttribArray(1);
-
-    glBindVertexArray(0);
-
-    glDeleteShader(cubeVert);
-    glDeleteShader(cubeFrag);
-
-    // ----------------------------
-    // FPS overlay (7-seg) line renderer (OpenGL 3.3 core)
-    // ----------------------------
-    const char* lineVS =
-        "#version 330 core\n"
-        "layout(location=0) in vec2 aPos;\n"
-        "uniform vec2 uScreen;\n"
-        "void main(){\n"
-        "  vec2 ndc = vec2((aPos.x / uScreen.x) * 2.0 - 1.0,\n"
-        "                 1.0 - (aPos.y / uScreen.y) * 2.0);\n"
-        "  gl_Position = vec4(ndc, 0.0, 1.0);\n"
-        "}\n";
-
-    const char* lineFS =
-        "#version 330 core\n"
-        "out vec4 FragColor;\n"
-        "uniform vec4 uColor;\n"
-        "void main(){ FragColor = uColor; }\n";
-
-    unsigned int lineVert = glCreateShader(GL_VERTEX_SHADER);
-    glShaderSource(lineVert, 1, &lineVS, nullptr);
-    glCompileShader(lineVert);
-
-    unsigned int lineFrag = glCreateShader(GL_FRAGMENT_SHADER);
-    glShaderSource(lineFrag, 1, &lineFS, nullptr);
-    glCompileShader(lineFrag);
-
-    unsigned int lineProgram = glCreateProgram();
-    glAttachShader(lineProgram, lineVert);
-    glAttachShader(lineProgram, lineFrag);
-    glLinkProgram(lineProgram);
-
-    glDeleteShader(lineVert);
-    glDeleteShader(lineFrag);
-
-    unsigned int lineVAO = 0, lineVBO = 0;
-    glGenVertexArrays(1, &lineVAO);
-    glGenBuffers(1, &lineVBO);
-
-    glBindVertexArray(lineVAO);
-    glBindBuffer(GL_ARRAY_BUFFER, lineVBO);
-    glBufferData(GL_ARRAY_BUFFER, 1024 * sizeof(float), nullptr, GL_DYNAMIC_DRAW); // will resize as needed
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
-    glEnableVertexAttribArray(0);
-
-    auto pushLine = [](std::vector<float>& v, float x0, float y0, float x1, float y1) {
-        v.push_back(x0); v.push_back(y0);
-        v.push_back(x1); v.push_back(y1);
-    };
-
-    // 7 segments: a,b,c,d,e,f,g using bitmask
-    //  a
-    // f b
-    //  g
-    // e c
-    //  d
-    const uint8_t segMask[10] = {
-        0b0111111, // 0: a b c d e f
-        0b0000110, // 1: b c
-        0b1011011, // 2: a b d e g
-        0b1001111, // 3: a b c d g
-        0b1100110, // 4: b c f g
-        0b1101101, // 5: a c d f g
-        0b1111101, // 6: a c d e f g
-        0b0000111, // 7: a b c
-        0b1111111, // 8: all
-        0b1101111  // 9: a b c d f g
-    };
-
-    auto drawDigit7Seg = [&](std::vector<float>& v, int digit, float x, float y, float w, float h) {
-        if (digit < 0 || digit > 9) return;
-        uint8_t m = segMask[digit];
-
-        float x0 = x,     x1 = x + w;
-        float y0 = y,     y1 = y + h;
-        float ym = y + h * 0.5f;
-
-        // a: top
-        if (m & (1 << 0)) pushLine(v, x0, y0, x1, y0);
-        // b: upper-right
-        if (m & (1 << 1)) pushLine(v, x1, y0, x1, ym);
-        // c: lower-right
-        if (m & (1 << 2)) pushLine(v, x1, ym, x1, y1);
-        // d: bottom
-        if (m & (1 << 3)) pushLine(v, x0, y1, x1, y1);
-        // e: lower-left
-        if (m & (1 << 4)) pushLine(v, x0, ym, x0, y1);
-        // f: upper-left
-        if (m & (1 << 5)) pushLine(v, x0, y0, x0, ym);
-        // g: middle
-        if (m & (1 << 6)) pushLine(v, x0, ym, x1, ym);
-    };
-
-    auto snap = [](float v, float step) { return std::round(v / step) * step; };
-
-    // ============================
-    // Main Loop
-    // ============================
+    // ============================================================
+    // Main loop
+    // ============================================================
     while (!glfwWindowShouldClose(window)) {
 
         float currentFrame = (float)glfwGetTime();
         deltaTime = currentFrame - lastFrame;
         lastFrame = currentFrame;
 
-        // Toggle wireframe on F1 (edge-triggered)
         bool f1Down = glfwGetKey(window, GLFW_KEY_F1) == GLFW_PRESS;
-        if (f1Down && !f1WasDown) {
-            wireframe = !wireframe;
-        }
+        if (f1Down && !f1WasDown) wireframe = !wireframe;
         f1WasDown = f1Down;
 
-        // Apply polygon mode for 3D rendering
         glPolygonMode(GL_FRONT_AND_BACK, wireframe ? GL_LINE : GL_FILL);
 
-        // Respawn wall in front of you with R
-        if (glfwGetKey(window, GLFW_KEY_R) == GLFW_PRESS)
-            wallSpawned = false;
-
-        // Movement
+        // Movement (assumes gCameraFront exists)
         if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
             cameraPos += cameraSpeed * deltaTime * gCameraFront;
         if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS)
@@ -2538,7 +2322,6 @@ int main() {
         if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)
             cameraPos += glm::normalize(glm::cross(gCameraFront, cameraUp)) * cameraSpeed * deltaTime;
 
-        // Up / down
         if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS)
             cameraPos.y += cameraSpeed * deltaTime;
 
@@ -2546,25 +2329,22 @@ int main() {
             glfwGetKey(window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS)
             cameraPos.y -= cameraSpeed * deltaTime;
 
-        // Render prep
         glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-        // framebuffer size (HiDPI safe)
-        int fbW = 0, fbH = 0;
+        int fbW=0, fbH=0;
         glfwGetFramebufferSize(window, &fbW, &fbH);
         if (fbW <= 0) fbW = mode->width;
         if (fbH <= 0) fbH = mode->height;
 
         // ----------------------------
-        // Draw chunk mesh
+        // Draw ALL chunk meshes
         // ----------------------------
         glUseProgram(cubeProgram);
-        glBindVertexArray(chunkVAO);
 
         glm::vec3 forwardNow = glm::normalize(gCameraFront);
         glm::mat4 view = glm::lookAt(cameraPos, cameraPos + forwardNow, cameraUp);
-        glm::mat4 proj = glm::perspective(glm::radians(45.0f), float(fbW) / float(fbH), 0.1f, 2000.0f);
+        glm::mat4 proj = glm::perspective(glm::radians(45.0f), float(fbW) / float(fbH), 0.1f, 5000.0f);
 
         glm::mat4 modelM(1.0f);
         glm::mat4 mvp = proj * view * modelM;
@@ -2572,156 +2352,29 @@ int main() {
         int mvpLoc = glGetUniformLocation(cubeProgram, "MVP");
         glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, &mvp[0][0]);
 
-        glDrawElements(GL_TRIANGLES, (GLsizei)chunkMesh2.indices.size(), GL_UNSIGNED_INT, 0);
-
+        for (auto& ch : worldChunks) {
+            if (ch.mesh.indices.empty()) continue;
+            glBindVertexArray(ch.vao);
+            glDrawElements(GL_TRIANGLES, (GLsizei)ch.mesh.indices.size(), GL_UNSIGNED_INT, 0);
+        }
         glBindVertexArray(0);
 
-        // ---- Chunk parameters ----
-        const int CHUNK_X = 16;
-        const int CHUNK_Z = 16;
-        const int CHUNK_Y = 128;
-
-        // cube centers spacing: 1.0 means cubes touch (since your cube is size 1 from -0.5..0.5)
-        const float BLOCK = 1.0f;
-
-        // Put chunk near origin (ground at y=0)
-        glm::vec3 chunkOrigin(0.0f, 0.0f, 0.0f);
-
-        // Optional: center chunk around X/Z = 0
-        chunkOrigin.x -= (CHUNK_X * BLOCK) * 0.5f;
-        chunkOrigin.z -= (CHUNK_Z * BLOCK) * 0.5f;
-
-        // Optional: simple terrain so it’s not 32768 cubes every frame.
-        // If you want a solid chunk, set this to CHUNK_Y.
-        auto heightAt = [&](int x, int z) -> int {
-            // simple cheap height function (0..31-fish)
-            float fx = float(x) * 0.35f;
-            float fz = float(z) * 0.35f;
-            float h  = (sinf(fx) + cosf(fz)) * 6.0f + 20.0f;
-            int hi = (int)h;
-            if (hi < 0) hi = 0;
-            if (hi > CHUNK_Y) hi = CHUNK_Y;
-            return hi;
-        };
-
-        // Draw blocks
-        for (int z = 0; z < CHUNK_Z; ++z) {
-            for (int x = 0; x < CHUNK_X; ++x) {
-
-                int colHeight = heightAt(x, z); // terrain column height
-                // For a FULL SOLID chunk, do: int colHeight = CHUNK_Y;
-
-                for (int y = 0; y < colHeight; ++y) {
-
-                    glm::vec3 pos =
-                        chunkOrigin +
-                        glm::vec3(float(x) * BLOCK, float(y) * BLOCK, float(z) * BLOCK);
-
-                    glm::mat4 modelM(1.0f);
-                    modelM = glm::translate(modelM, pos);
-
-                    glm::mat4 mvp = proj * view * modelM;
-                    glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, &mvp[0][0]);
-
-                    glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_INT, 0);
-                }
-            }
-        }
-    done_wall: ;
-
-        // ----------------------------
-        // FPS calculation
-        // ----------------------------
-        double now = glfwGetTime();
-        fps_frames++;
-        double elapsed = now - fps_prev_time;
-        if (elapsed >= 0.25) {
-            fps_value = fps_frames / elapsed;
-            fps_prev_time = now;
-            fps_frames = 0;
-        }
-
-        // ----------------------------
-        // Draw FPS overlay (top-left) as 7-seg digits
-        // ----------------------------
-        // Format like "144.1"
-        char fpsStr[32];
-        snprintf(fpsStr, sizeof(fpsStr), "%.1f", fps_value);
-
-        std::vector<float> lineVerts;
-        lineVerts.reserve(512);
-
-        float startX = 20.0f;
-        float startY = 20.0f;
-        float digitW = 18.0f;
-        float digitH = 32.0f;
-        float gapX   = 8.0f;
-
-        float x = startX;
-        float y = startY;
-
-        for (const char* p = fpsStr; *p; ++p) {
-            if (*p >= '0' && *p <= '9') {
-                drawDigit7Seg(lineVerts, *p - '0', x, y, digitW, digitH);
-                x += digitW + gapX;
-            } else if (*p == '.') {
-                float size = 3.0f;
-                float eps  = 0.3f;   // overlap amount (tweak 0.3–1.0)
-
-                float dx = x;
-                float dy = y + digitH * 0.9f;
-
-                // top
-                pushLine(lineVerts, dx,       dy,       dx + size + eps, dy);
-                // right
-                pushLine(lineVerts, dx + size,      dy - eps, dx + size,       dy + size + eps);
-                // bottom
-                pushLine(lineVerts, dx,       dy + size, dx + size + eps, dy + size);
-                // left
-                pushLine(lineVerts, dx,             dy - eps, dx,              dy + size + eps);
-
-                x += size + gapX;
-            } else {
-                x += digitW + gapX;
-            }
-        }
-
-        glUseProgram(lineProgram);
-        glBindVertexArray(lineVAO);
-
-        int uScreenLoc = glGetUniformLocation(lineProgram, "uScreen");
-        int uColorLoc  = glGetUniformLocation(lineProgram, "uColor");
-        glUniform2f(uScreenLoc, (float)fbW, (float)fbH);
-        glUniform4f(uColorLoc, 1.0f, 1.0f, 1.0f, 1.0f);
-
-        glDisable(GL_DEPTH_TEST);
-        glEnable(GL_CULL_FACE);
-        glCullFace(GL_BACK);          // Cull back faces
-        glFrontFace(GL_CCW);          // Counter-clockwise vertices are front faces
-        glLineWidth(2.0f);
-        
-        glBindBuffer(GL_ARRAY_BUFFER, lineVBO);
-        glBufferData(GL_ARRAY_BUFFER, lineVerts.size() * sizeof(float), lineVerts.data(), GL_DYNAMIC_DRAW);
-
-        // Each vertex is (x,y). GL_LINES => 2 vertices per line segment.
-        glDrawArrays(GL_LINES, 0, (GLsizei)(lineVerts.size() / 2));
-
-        glEnable(GL_DEPTH_TEST);
+        // IMPORTANT:
+        // Remove/comment out your old per-cube triple loop draw path.
+        // That path draws each cube individually and will not scale.
 
         glfwSwapBuffers(window);
         glfwPollEvents();
     }
 
-    // Cleanup
-    glDeleteVertexArrays(1, &VAO);
-    glDeleteBuffers(1, &VBO);
-    glDeleteBuffers(1, &EBO);
-
-    glDeleteVertexArrays(1, &lineVAO);
-    glDeleteBuffers(1, &lineVBO);
+    // Cleanup world chunk GPU buffers
+    for (auto& ch : worldChunks) {
+        if (ch.vao) glDeleteVertexArrays(1, &ch.vao);
+        if (ch.vbo) glDeleteBuffers(1, &ch.vbo);
+        if (ch.ebo) glDeleteBuffers(1, &ch.ebo);
+    }
 
     glDeleteProgram(cubeProgram);
-    glDeleteProgram(lineProgram);
 
     glfwDestroyWindow(window);
     glfwTerminate();
