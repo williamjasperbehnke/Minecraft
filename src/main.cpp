@@ -1874,6 +1874,36 @@ int pauseMenuButtonAtCursor(double mx, double my, int width, int height) {
 }
 
 } // namespace
+// main.cpp — closest-first streaming + background GEN + background MESH (CPU) + main-thread GPU upload
+// ✅ GEN (blocks) on worker threads
+// ✅ MESH (greedy) on worker threads (CPU only)
+// ✅ OpenGL upload (VBO/EBO/VAO) on main thread only
+// ✅ Prioritize chunks closest to player (min-heap PQ)
+// ✅ Never draw "unseen" faces on chunk borders (UNKNOWN suppress rule)
+// ✅ Never draw bottom-of-world face (-Y at worldY==0)
+// ✅ Fixed: initial scheduling + delta scheduling + meshDone locking (your "nothing renders" bug)
+
+#include <glad/glad.h>
+#include <GLFW/glfw3.h>
+
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+
+#include <algorithm>
+#include <atomic>
+#include <cstdint>
+#include <cmath>
+#include <condition_variable>
+#include <functional>
+#include <iostream>
+#include <memory>
+#include <mutex>
+#include <queue>
+#include <thread>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+#include <deque>
 
 // ----------------------------
 // Mouse look + camera front
@@ -1952,11 +1982,9 @@ static void addQuad(ChunkMesh2& m,
 }
 
 // ============================================================
-// WORLD-AWARE greedy mesher (UPDATED)
-// - x/z can be outside chunk bounds and will query neighboring chunk blocks
-// - y is world y (same across chunks since you only chunk in XZ here)
-// - IMPORTANT: if either side of a potential face is UNKNOWN (neighbor chunk not ready),
-//   we DO NOT emit that face. This prevents temporary "walls" on chunk borders.
+// WORLD-AWARE greedy mesher
+// - Suppresses faces if either side is UNKNOWN (255): prevents border "walls" into missing chunks
+// - Never draws the bottom-of-world face (-Y at worldY==0)
 // ============================================================
 static ChunkMesh2 buildChunkMeshGreedy_WorldAware(
     const std::vector<uint8_t>& /*blocksLocalNotUsed*/,
@@ -1968,7 +1996,8 @@ static ChunkMesh2 buildChunkMeshGreedy_WorldAware(
 ) {
     ChunkMesh2 mesh;
 
-    // Face colors preserved
+    static constexpr uint8_t UNKNOWN = 255;
+
     const glm::vec3 colRight  = {0.0f, 0.0f, 1.0f}; // +X
     const glm::vec3 colLeft   = {0.0f, 1.0f, 0.0f}; // -X
     const glm::vec3 colTop    = {1.0f, 0.0f, 1.0f}; // +Y
@@ -1982,17 +2011,13 @@ static ChunkMesh2 buildChunkMeshGreedy_WorldAware(
         return          (dir > 0) ? colFront  : colBack;
     };
 
-    // Local (x,y,z) -> World (wx,wy,wz)
     auto solidAt = [&](int x, int y, int z) -> uint8_t {
         int wx = baseWX + x;
         int wz = baseWZ + z;
         return solidAtWorldFn(wx, y, wz);
     };
 
-    // IMPORTANT: we treat 255 as UNKNOWN (neighbor chunk not present/ready)
-    static constexpr uint8_t UNKNOWN = 255;
-
-    struct MaskCell { uint8_t id = 0; int dir = 0; }; // dir: +1 or -1
+    struct MaskCell { uint8_t id = 0; int dir = 0; };
     const int dims[3] = { sx, sy, sz };
 
     int maxDim = std::max(sx, std::max(sy, sz));
@@ -2001,6 +2026,12 @@ static ChunkMesh2 buildChunkMeshGreedy_WorldAware(
     auto emitQuad = [&](int axis, int dir, int i,
                         int u0, int v0, int u1, int v1)
     {
+        // Never draw bottom-of-world face (-Y at worldY==0)
+        if (axis == 1 && dir == -1) {
+            int worldY = (i - 1);
+            if (worldY <= 0) return;
+        }
+
         const float s = blockSize;
         const glm::vec3 col = faceColor(axis, dir);
 
@@ -2020,7 +2051,6 @@ static ChunkMesh2 buildChunkMeshGreedy_WorldAware(
         glm::vec3 p11 = corner(i,  u1, v1);
         glm::vec3 p01 = corner(i,  u0, v1);
 
-        // Centered cubes convention (-0.5..0.5)
         glm::vec3 shift(-0.5f * s, -0.5f * s, -0.5f * s);
         glm::vec3 a = p00 + shift;
         glm::vec3 b = p10 + shift;
@@ -2062,10 +2092,9 @@ static ChunkMesh2 buildChunkMeshGreedy_WorldAware(
 
                     MaskCell cell;
 
-                    // UPDATED: suppress faces if either side is UNKNOWN
+                    // If either side unknown -> emit nothing
                     if (aS == UNKNOWN || bS == UNKNOWN) {
-                        cell.id = 0;
-                        cell.dir = 0;
+                        cell.id = 0; cell.dir = 0;
                     }
                     else if (aS && !bS) { cell.id = aS; cell.dir = +1; }
                     else if (!aS && bS) { cell.id = bS; cell.dir = -1; }
@@ -2098,18 +2127,7 @@ static ChunkMesh2 buildChunkMeshGreedy_WorldAware(
                         if (!done) ++h;
                     }
 
-                    bool skip = false;
-
-                    if (axis == 1 && cur.dir == -1) {  // -Y face
-                        int worldY = i - 1;            // block below slice
-                        if (worldY <= 0) {
-                            skip = true;
-                        }
-                    }
-
-                    if (!skip) {
-                        emitQuad(axis, cur.dir, i, u, v, u + w, v + h);
-                    }
+                    emitQuad(axis, cur.dir, i, u, v, u + w, v + h);
 
                     for (int dv = 0; dv < h; ++dv)
                         for (int du = 0; du < w; ++du)
@@ -2125,21 +2143,29 @@ static ChunkMesh2 buildChunkMeshGreedy_WorldAware(
 }
 
 // ----------------------------
-// Chunk GPU container
+// Chunk container
 // ----------------------------
 struct GpuChunk {
-    glm::ivec2 cpos;              // (cx, cz)
-    glm::vec3 origin;             // world-space origin
-    std::vector<uint8_t> blocks;  // CHUNK_X * CHUNK_Y * CHUNK_Z
+    glm::ivec2 cpos;
+    glm::vec3 origin;
+    std::vector<uint8_t> blocks;
+
     ChunkMesh2 mesh;
     GLuint vao=0, vbo=0, ebo=0;
 
-    bool hasBlocks = false;
-    bool hasMesh   = false;
-    bool dirtyMesh = true;
+    std::atomic<bool> inGen{false};
+    std::atomic<bool> inMesh{false};
+    std::atomic<int>  pins{0};
+
+    std::atomic<bool> hasBlocks{false};
+    std::atomic<bool> hasMesh{false};
+    std::atomic<bool> dirtyMesh{true};
+
+    ChunkMesh2 stagedMesh;
+    std::atomic<bool> stagedReady{false};
+    std::mutex stagedMutex;
 };
 
-// Orphan + subdata to reduce stalls when updating
 static void uploadChunkMesh(GpuChunk& c) {
     if (c.vao == 0) {
         glGenVertexArrays(1, &c.vao);
@@ -2167,28 +2193,31 @@ static void uploadChunkMesh(GpuChunk& c) {
     glBindVertexArray(0);
 }
 
-// ----------------------------
-// Chunk map + queue helpers
-// ----------------------------
-struct ChunkKey {
-    int cx=0, cz=0;
-    bool operator==(const ChunkKey& o) const { return cx==o.cx && cz==o.cz; }
-};
+static void unloadChunkGL(GpuChunk& ch) {
+    if (ch.vao) glDeleteVertexArrays(1, &ch.vao);
+    if (ch.vbo) glDeleteBuffers(1, &ch.vbo);
+    if (ch.ebo) glDeleteBuffers(1, &ch.ebo);
+    ch.vao = ch.vbo = ch.ebo = 0;
 
-struct ChunkKeyHash {
-    size_t operator()(const ChunkKey& k) const noexcept {
-        uint64_t x = (uint32_t)k.cx;
-        uint64_t z = (uint32_t)k.cz;
-        uint64_t h = (x << 32) ^ z;
-        h ^= (h >> 33);
-        h *= 0xff51afd7ed558ccdULL;
-        h ^= (h >> 33);
-        h *= 0xc4ceb9fe1a85ec53ULL;
-        h ^= (h >> 33);
-        return (size_t)h;
+    ch.blocks.clear();
+    ch.mesh.verts.clear();
+    ch.mesh.indices.clear();
+
+    {
+        std::lock_guard<std::mutex> lock(ch.stagedMutex);
+        ch.stagedMesh.verts.clear();
+        ch.stagedMesh.indices.clear();
+        ch.stagedReady.store(false, std::memory_order_release);
     }
-};
 
+    ch.hasBlocks.store(false, std::memory_order_release);
+    ch.hasMesh.store(false, std::memory_order_release);
+    ch.dirtyMesh.store(true, std::memory_order_release);
+}
+
+// ----------------------------
+// Helpers
+// ----------------------------
 static inline uint64_t key64(int cx, int cz) {
     return (uint64_t)(uint32_t)cx << 32 | (uint32_t)cz;
 }
@@ -2206,20 +2235,22 @@ static inline int worldToChunkCoord(float world, float chunkWorldSize) {
 
 static inline int clampi(int v, int lo, int hi) { return std::max(lo, std::min(hi, v)); }
 
-static void unloadChunkGL(GpuChunk& ch) {
-    if (ch.vao) glDeleteVertexArrays(1, &ch.vao);
-    if (ch.vbo) glDeleteBuffers(1, &ch.vbo);
-    if (ch.ebo) glDeleteBuffers(1, &ch.ebo);
-    ch.vao = ch.vbo = ch.ebo = 0;
+struct WorkItem { int dist2; uint32_t seq; int cx, cz; };
 
-    ch.blocks.clear();
-    ch.mesh.verts.clear();
-    ch.mesh.indices.clear();
+struct WorkCmp {
+    bool operator()(const WorkItem& a, const WorkItem& b) const {
+        if (a.dist2 != b.dist2) return a.dist2 > b.dist2;
+        return a.seq > b.seq;
+    }
+};
 
-    ch.hasBlocks = false;
-    ch.hasMesh   = false;
-    ch.dirtyMesh = true;
+static inline int dist2Chunks(int cx, int cz, int pcx, int pcz) {
+    int dx = cx - pcx;
+    int dz = cz - pcz;
+    return dx*dx + dz*dz;
 }
+
+struct MeshDone { int cx, cz; };
 
 int main() {
     if (!glfwInit()) return -1;
@@ -2258,7 +2289,7 @@ int main() {
     bool f1WasDown = false;
 
     // ----------------------------
-    // Shader program (same as yours)
+    // Shader program
     // ----------------------------
     const char* vs =
         "#version 330 core\n"
@@ -2290,7 +2321,6 @@ int main() {
     glDeleteShader(vert);
     glDeleteShader(frag);
 
-    // Cache uniform location (don’t call glGetUniformLocation every frame)
     GLint mvpLoc = glGetUniformLocation(program, "MVP");
 
     // ============================================================
@@ -2304,90 +2334,154 @@ int main() {
     const float CHUNK_WORLD_X = float(CHUNK_X) * BLOCK;
     const float CHUNK_WORLD_Z = float(CHUNK_Z) * BLOCK;
 
-    // Streaming distances (in chunk units)
-    const int LOAD_RADIUS   = 16;              // draw + ensure mesh inside this
-    const int GEN_RADIUS    = LOAD_RADIUS+1;  // ensure neighbor blocks exist for border culling
-    const int UNLOAD_RADIUS = LOAD_RADIUS+3;  // hysteresis (prevents thrash)
+    const int LOAD_RADIUS   = 16;
+    const int GEN_RADIUS    = LOAD_RADIUS + 1;
+    const int UNLOAD_RADIUS = LOAD_RADIUS + 3;
 
-    // Per-frame streaming work budget (TUNE THESE)
-    const int GEN_PER_FRAME  = 1; // generate blocks for N chunks per frame
-    const int MESH_PER_FRAME = 1; // mesh+upload N chunks per frame
-    // If you still hitch, set these to 1/1, or do time-budgeted loop via glfwGetTime.
+    static constexpr uint8_t AIR     = 0;
+    static constexpr uint8_t SOLID   = 1;
+    static constexpr uint8_t UNKNOWN = 255;
 
-    // Chunk storage
-    std::unordered_map<ChunkKey, GpuChunk, ChunkKeyHash> chunks;
+    // ============================================================
+    // Chunk storage (pointer-stable)
+    // ============================================================
+    std::unordered_map<uint64_t, std::unique_ptr<GpuChunk>> chunks;
+    std::mutex chunksMutex;
 
-    auto getChunkPtr = [&](int cx, int cz) -> GpuChunk* {
-        auto it = chunks.find(ChunkKey{cx, cz});
-        if (it == chunks.end()) return nullptr;
-        return &it->second;
-    };
-
-    auto createChunkIfMissing = [&](int cx, int cz) -> GpuChunk& {
-        ChunkKey k{cx, cz};
+    auto createChunkIfMissing = [&](int cx, int cz) -> GpuChunk* {
+        std::lock_guard<std::mutex> lock(chunksMutex);
+        uint64_t k = key64(cx, cz);
         auto it = chunks.find(k);
         if (it == chunks.end()) {
-            GpuChunk c;
-            c.cpos = {cx, cz};
-            c.origin = glm::vec3(float(cx * CHUNK_X) * BLOCK, 0.0f, float(cz * CHUNK_Z) * BLOCK);
+            auto c = std::make_unique<GpuChunk>();
+            c->cpos = {cx, cz};
+            c->origin = glm::vec3(float(cx * CHUNK_X) * BLOCK, 0.0f, float(cz * CHUNK_Z) * BLOCK);
             auto [it2, _] = chunks.emplace(k, std::move(c));
-            return it2->second;
+            return it2->second.get();
         }
-        return it->second;
+        return it->second.get();
     };
 
-    // Queues (to time-slice work)
-    std::deque<ChunkKey> genQueue;
-    std::deque<ChunkKey> meshQueue;
-    std::unordered_set<uint64_t> genQueued;
-    std::unordered_set<uint64_t> meshQueued;
-
-    auto queueGen = [&](int cx, int cz){
-        uint64_t k = key64(cx, cz);
-        if (genQueued.insert(k).second) genQueue.push_back({cx,cz});
-    };
-    auto queueMesh = [&](int cx, int cz){
-        uint64_t k = key64(cx, cz);
-        if (meshQueued.insert(k).second) meshQueue.push_back({cx,cz});
+    // Pinning prevents main thread from deleting while workers use a chunk pointer
+    auto pinChunk = [&](int cx, int cz) -> GpuChunk* {
+        std::lock_guard<std::mutex> lock(chunksMutex);
+        auto it = chunks.find(key64(cx, cz));
+        if (it == chunks.end()) return nullptr;
+        GpuChunk* ch = it->second.get();
+        ch->pins.fetch_add(1, std::memory_order_acq_rel);
+        return ch;
     };
 
-    // Continuous height across chunk borders (uses WORLD block coords)
+    auto unpinChunk = [&](GpuChunk* ch) {
+        if (!ch) return;
+        ch->pins.fetch_sub(1, std::memory_order_acq_rel);
+    };
+
+    // ============================================================
+    // Height function
+    // ============================================================
     auto heightAtWorld = [&](int wx, int wz) -> int {
         float fx = float(wx) * 0.08f;
         float fz = float(wz) * 0.08f;
         float h  = (sinf(fx) + cosf(fz)) * 10.0f + 32.0f;
-        int hi = (int)h;
-        return clampi(hi, 0, CHUNK_Y);
+        return clampi((int)h, 0, CHUNK_Y);
     };
 
-static constexpr uint8_t AIR     = 0;
-static constexpr uint8_t SOLID   = 1;
-static constexpr uint8_t UNKNOWN = 255;
+    // ============================================================
+    // World accessor for mesher:
+    // - returns UNKNOWN if neighbor chunk missing/unready/generating
+    // ============================================================
+    auto solidAtWorld = [&](int wx, int wy, int wz) -> uint8_t {
+        if (wy < 0 || wy >= CHUNK_Y) return AIR;
 
-auto solidAtWorld = [&](int wx, int wy, int wz) -> uint8_t {
-    if (wy < 0 || wy >= CHUNK_Y) return AIR;
+        int cx = floorDivInt(wx, CHUNK_X);
+        int cz = floorDivInt(wz, CHUNK_Z);
 
-    int cx = floorDivInt(wx, CHUNK_X);
-    int cz = floorDivInt(wz, CHUNK_Z);
+        int lx = wx - cx * CHUNK_X;
+        int lz = wz - cz * CHUNK_Z;
+        if (lx < 0) lx += CHUNK_X;
+        if (lz < 0) lz += CHUNK_Z;
 
-    int lx = wx - cx * CHUNK_X;
-    int lz = wz - cz * CHUNK_Z;
-    if (lx < 0) lx += CHUNK_X;
-    if (lz < 0) lz += CHUNK_Z;
+        GpuChunk* ch = pinChunk(cx, cz);
+        if (!ch) return UNKNOWN;
 
-    GpuChunk* ch = getChunkPtr(cx, cz);
-    if (!ch || !ch->hasBlocks) return UNKNOWN; // <-- key change
+        uint8_t out = UNKNOWN;
+        if (ch->hasBlocks.load(std::memory_order_acquire) && !ch->inGen.load(std::memory_order_acquire)) {
+            out = ch->blocks[idx3(lx, wy, lz, CHUNK_X, CHUNK_Y, CHUNK_Z)] ? SOLID : AIR;
+        }
 
-    return ch->blocks[idx3(lx, wy, lz, CHUNK_X, CHUNK_Y, CHUNK_Z)] ? SOLID : AIR;
-};
+        unpinChunk(ch);
+        return out;
+    };
 
-    auto ensureBlocks = [&](GpuChunk& ch) {
-        if (ch.hasBlocks) return;
+    // ============================================================
+    // GEN queue (worker consumed)
+    // ============================================================
+    std::priority_queue<WorkItem, std::vector<WorkItem>, WorkCmp> genPQ;
+    std::unordered_map<uint64_t, int> bestGenDist2;
+    std::mutex genMutex;
+    std::condition_variable genCV;
+    uint32_t genSeq = 0;
 
-        ch.blocks.assign(CHUNK_X * CHUNK_Y * CHUNK_Z, 0);
+    // MESH queue (worker consumed)
+    std::priority_queue<WorkItem, std::vector<WorkItem>, WorkCmp> meshPQ;
+    std::unordered_map<uint64_t, int> bestMeshDist2;
+    std::mutex meshMutex;
+    std::condition_variable meshCV;
+    uint32_t meshSeq = 0;
 
-        int baseWX = ch.cpos.x * CHUNK_X;
-        int baseWZ = ch.cpos.y * CHUNK_Z;
+    // Completed meshes waiting for main-thread upload (deduped)
+    std::deque<MeshDone> meshDoneQ;
+    std::mutex meshDoneMutex;
+    std::unordered_set<uint64_t> meshDoneSet;
+
+    // Player chunk coords visible to workers
+    std::atomic<int> gPlayerCX{0}, gPlayerCZ{0};
+
+    auto queueGen = [&](int cx, int cz, int pcx, int pcz) {
+        uint64_t k = key64(cx, cz);
+        int d2 = dist2Chunks(cx, cz, pcx, pcz);
+        {
+            std::lock_guard<std::mutex> lock(genMutex);
+            auto it = bestGenDist2.find(k);
+            if (it == bestGenDist2.end() || d2 < it->second) {
+                bestGenDist2[k] = d2;
+                genPQ.push(WorkItem{d2, genSeq++, cx, cz});
+            }
+        }
+        genCV.notify_one();
+    };
+
+    auto queueMesh = [&](int cx, int cz, int pcx, int pcz) {
+        uint64_t k = key64(cx, cz);
+        int d2 = dist2Chunks(cx, cz, pcx, pcz);
+        {
+            std::lock_guard<std::mutex> lock(meshMutex);
+            auto it = bestMeshDist2.find(k);
+            if (it == bestMeshDist2.end() || d2 < it->second) {
+                bestMeshDist2[k] = d2;
+                meshPQ.push(WorkItem{d2, meshSeq++, cx, cz});
+            }
+        }
+        meshCV.notify_one();
+    };
+
+    // ============================================================
+    // GEN worker threads
+    // ============================================================
+    std::atomic<bool> genStop{false};
+    int GEN_THREADS = (int)std::max(1u, std::thread::hardware_concurrency());
+    GEN_THREADS = std::min(GEN_THREADS, 8);
+
+    auto generateBlocksForChunk = [&](GpuChunk* ch) {
+        bool expected = false;
+        if (!ch->inGen.compare_exchange_strong(expected, true)) return;
+        if (ch->hasBlocks.load(std::memory_order_acquire)) { ch->inGen.store(false); return; }
+
+        ch->blocks.assign(CHUNK_X * CHUNK_Y * CHUNK_Z, 0);
+
+        int baseWX = ch->cpos.x * CHUNK_X;
+        int baseWZ = ch->cpos.y * CHUNK_Z;
 
         for (int z = 0; z < CHUNK_Z; ++z) {
             for (int x = 0; x < CHUNK_X; ++x) {
@@ -2395,111 +2489,199 @@ auto solidAtWorld = [&](int wx, int wy, int wz) -> uint8_t {
                 int wz = baseWZ + z;
                 int h  = heightAtWorld(wx, wz);
                 for (int y = 0; y < h; ++y) {
-                    ch.blocks[idx3(x, y, z, CHUNK_X, CHUNK_Y, CHUNK_Z)] = 1;
+                    ch->blocks[idx3(x, y, z, CHUNK_X, CHUNK_Y, CHUNK_Z)] = 1;
                 }
             }
         }
 
-        ch.hasBlocks = true;
-        ch.dirtyMesh = true;
+        ch->dirtyMesh.store(true, std::memory_order_release);
+        ch->hasBlocks.store(true, std::memory_order_release);
+        ch->inGen.store(false, std::memory_order_release);
     };
 
-    auto rebuildMeshIfDirty = [&](GpuChunk& ch) {
-        if (!ch.hasBlocks) return;
-        if (!ch.dirtyMesh) return;
+    std::vector<std::thread> genWorkers;
 
-        int baseWX = ch.cpos.x * CHUNK_X;
-        int baseWZ = ch.cpos.y * CHUNK_Z;
+    auto genWorkerMain = [&]() {
+        while (!genStop.load()) {
+            WorkItem wi;
+            {
+                std::unique_lock<std::mutex> lock(genMutex);
+                genCV.wait(lock, [&]{ return genStop.load() || !genPQ.empty(); });
+                if (genStop.load()) return;
 
-        ch.mesh = buildChunkMeshGreedy_WorldAware(
-            ch.blocks,
-            CHUNK_X, CHUNK_Y, CHUNK_Z,
-            ch.origin, BLOCK,
-            baseWX, baseWZ,
-            solidAtWorld
-        );
+                wi = genPQ.top();
+                genPQ.pop();
 
-        uploadChunkMesh(ch);
-        ch.hasMesh = true;
-        ch.dirtyMesh = false;
+                uint64_t k = key64(wi.cx, wi.cz);
+                auto it = bestGenDist2.find(k);
+                if (it == bestGenDist2.end() || it->second != wi.dist2) continue;
+                bestGenDist2.erase(k);
+            }
+
+            int pcx = gPlayerCX.load();
+            int pcz = gPlayerCZ.load();
+            if (std::abs(wi.cx - pcx) > GEN_RADIUS || std::abs(wi.cz - pcz) > GEN_RADIUS) continue;
+
+            createChunkIfMissing(wi.cx, wi.cz);
+            GpuChunk* ch = pinChunk(wi.cx, wi.cz);
+            if (!ch) continue;
+
+            generateBlocksForChunk(ch);
+            unpinChunk(ch);
+
+            // Re-mesh this and neighbors (border correctness)
+            pcx = gPlayerCX.load();
+            pcz = gPlayerCZ.load();
+            queueMesh(wi.cx, wi.cz, pcx, pcz);
+            for (int nz=-1; nz<=1; ++nz)
+                for (int nx=-1; nx<=1; ++nx)
+                    queueMesh(wi.cx + nx, wi.cz + nz, pcx, pcz);
+        }
+    };
+
+    for (int t=0; t<GEN_THREADS; ++t) genWorkers.emplace_back(genWorkerMain);
+
+    // ============================================================
+    // MESH worker threads
+    // ============================================================
+    std::atomic<bool> meshStop{false};
+    int MESH_THREADS = (int)std::max(1u, std::thread::hardware_concurrency());
+    MESH_THREADS = std::min(MESH_THREADS, 8);
+
+    std::vector<std::thread> meshWorkers;
+
+    auto meshWorkerMain = [&]() {
+        while (!meshStop.load()) {
+            WorkItem wi;
+            {
+                std::unique_lock<std::mutex> lock(meshMutex);
+                meshCV.wait(lock, [&]{ return meshStop.load() || !meshPQ.empty(); });
+                if (meshStop.load()) return;
+
+                wi = meshPQ.top();
+                meshPQ.pop();
+
+                uint64_t k = key64(wi.cx, wi.cz);
+                auto it = bestMeshDist2.find(k);
+                if (it == bestMeshDist2.end() || it->second != wi.dist2) continue;
+                bestMeshDist2.erase(k);
+            }
+
+            int pcx = gPlayerCX.load();
+            int pcz = gPlayerCZ.load();
+            if (std::abs(wi.cx - pcx) > LOAD_RADIUS || std::abs(wi.cz - pcz) > LOAD_RADIUS) continue;
+
+            GpuChunk* ch = pinChunk(wi.cx, wi.cz);
+            if (!ch) continue;
+
+            if (!ch->hasBlocks.load(std::memory_order_acquire) || ch->inGen.load(std::memory_order_acquire)) {
+                unpinChunk(ch);
+                continue;
+            }
+
+            bool expected = false;
+            if (!ch->inMesh.compare_exchange_strong(expected, true)) {
+                unpinChunk(ch);
+                continue;
+            }
+
+            if (!ch->dirtyMesh.load(std::memory_order_acquire)) {
+                ch->inMesh.store(false, std::memory_order_release);
+                unpinChunk(ch);
+                continue;
+            }
+
+            int baseWX = ch->cpos.x * CHUNK_X;
+            int baseWZ = ch->cpos.y * CHUNK_Z;
+
+            ChunkMesh2 built = buildChunkMeshGreedy_WorldAware(
+                ch->blocks,
+                CHUNK_X, CHUNK_Y, CHUNK_Z,
+                ch->origin, BLOCK,
+                baseWX, baseWZ,
+                solidAtWorld
+            );
+
+            {
+                std::lock_guard<std::mutex> lock(ch->stagedMutex);
+                ch->stagedMesh = std::move(built);
+                ch->stagedReady.store(true, std::memory_order_release);
+            }
+
+            // enqueue upload once (dedupe)
+            {
+                uint64_t kk = key64(wi.cx, wi.cz);
+                std::lock_guard<std::mutex> lock(meshDoneMutex);
+                if (meshDoneSet.insert(kk).second) {
+                    meshDoneQ.push_back(MeshDone{wi.cx, wi.cz});
+                }
+            }
+
+            ch->inMesh.store(false, std::memory_order_release);
+            unpinChunk(ch);
+        }
+    };
+
+    for (int t=0; t<MESH_THREADS; ++t) meshWorkers.emplace_back(meshWorkerMain);
+
+    // ============================================================
+    // Streaming scheduling
+    // ============================================================
+    auto scheduleDelta = [&](int oldCX, int oldCZ, int newCX, int newCZ) {
+        auto inOldGen = [&](int cx, int cz) {
+            return std::abs(cx - oldCX) <= GEN_RADIUS && std::abs(cz - oldCZ) <= GEN_RADIUS;
+        };
+        auto inOldMesh = [&](int cx, int cz) {
+            return std::abs(cx - oldCX) <= LOAD_RADIUS && std::abs(cz - oldCZ) <= LOAD_RADIUS;
+        };
+
+        for (int cz = newCZ - GEN_RADIUS; cz <= newCZ + GEN_RADIUS; ++cz) {
+            for (int cx = newCX - GEN_RADIUS; cx <= newCX + GEN_RADIUS; ++cx) {
+                if (inOldGen(cx, cz)) continue;
+                createChunkIfMissing(cx, cz);
+                queueGen(cx, cz, newCX, newCZ);
+            }
+        }
+
+        for (int cz = newCZ - LOAD_RADIUS; cz <= newCZ + LOAD_RADIUS; ++cz) {
+            for (int cx = newCX - LOAD_RADIUS; cx <= newCX + LOAD_RADIUS; ++cx) {
+                if (inOldMesh(cx, cz)) continue;
+                queueMesh(cx, cz, newCX, newCZ);
+            }
+        }
     };
 
     auto scheduleStreaming = [&](int pcx, int pcz){
-        // Schedule GEN in "rings" (near-first)
         for (int r=0; r<=GEN_RADIUS; ++r) {
             for (int dz=-r; dz<=r; ++dz) {
                 for (int dx=-r; dx<=r; ++dx) {
                     if (std::max(std::abs(dx), std::abs(dz)) != r) continue;
-                    queueGen(pcx + dx, pcz + dz);
+                    int cx = pcx + dx;
+                    int cz = pcz + dz;
+                    createChunkIfMissing(cx, cz);
+                    queueGen(cx, cz, pcx, pcz);
                 }
             }
         }
 
-        // Schedule mesh in rings (near-first)
         for (int r=0; r<=LOAD_RADIUS; ++r) {
             for (int dz=-r; dz<=r; ++dz) {
                 for (int dx=-r; dx<=r; ++dx) {
                     if (std::max(std::abs(dx), std::abs(dz)) != r) continue;
-                    queueMesh(pcx + dx, pcz + dz);
+                    queueMesh(pcx + dx, pcz + dz, pcx, pcz);
                 }
             }
         }
     };
 
-    auto processStreamingBudget = [&](int pcx, int pcz){
-        // Generate a few chunks per frame
-        for (int i=0; i<GEN_PER_FRAME && !genQueue.empty(); ++i) {
-            ChunkKey ck = genQueue.front(); genQueue.pop_front();
-            genQueued.erase(key64(ck.cx, ck.cz));
-
-            // If it is now far away, skip it (player moved)
-            if (std::abs(ck.cx - pcx) > GEN_RADIUS || std::abs(ck.cz - pcz) > GEN_RADIUS) continue;
-
-            GpuChunk& ch = createChunkIfMissing(ck.cx, ck.cz);
-            ensureBlocks(ch);
-
-            // Since this chunk now exists, re-mesh itself + neighbors eventually (border faces)
-            for (int nz=-1; nz<=1; ++nz)
-                for (int nx=-1; nx<=1; ++nx)
-                    queueMesh(ck.cx + nx, ck.cz + nz);
-        }
-
-        // Mesh+upload a few chunks per frame
-        for (int i=0; i<MESH_PER_FRAME && !meshQueue.empty(); ++i) {
-            ChunkKey ck = meshQueue.front(); meshQueue.pop_front();
-            meshQueued.erase(key64(ck.cx, ck.cz));
-
-            if (std::abs(ck.cx - pcx) > LOAD_RADIUS || std::abs(ck.cz - pcz) > LOAD_RADIUS) continue;
-
-            if (GpuChunk* ch = getChunkPtr(ck.cx, ck.cz)) {
-                if (ch->hasBlocks) {
-                    ch->dirtyMesh = true;
-                    rebuildMeshIfDirty(*ch);
-                }
-            }
-        }
-
-        // Unload far chunks (do it after doing a tiny amount of work so we don't churn)
-        std::vector<ChunkKey> toErase;
-        toErase.reserve(128);
-
-        for (auto& kv : chunks) {
-            const ChunkKey& k = kv.first;
-            if (std::abs(k.cx - pcx) > UNLOAD_RADIUS || std::abs(k.cz - pcz) > UNLOAD_RADIUS) {
-                unloadChunkGL(kv.second);
-                toErase.push_back(k);
-
-                // remove from queued sets if present (optional, keeps sets smaller)
-                genQueued.erase(key64(k.cx,k.cz));
-                meshQueued.erase(key64(k.cx,k.cz));
-            }
-        }
-        for (auto& k : toErase) chunks.erase(k);
-    };
-
-    // Prime initial streaming
+    // ============================================================
+    // Prime initial streaming (IMPORTANT: full schedule first time!)
+    // ============================================================
     int playerCX = worldToChunkCoord(cameraPos.x, CHUNK_WORLD_X);
     int playerCZ = worldToChunkCoord(cameraPos.z, CHUNK_WORLD_Z);
+    gPlayerCX.store(playerCX);
+    gPlayerCZ.store(playerCZ);
+
     scheduleStreaming(playerCX, playerCZ);
 
     // ============================================================
@@ -2513,7 +2695,6 @@ auto solidAtWorld = [&](int wx, int wy, int wz) -> uint8_t {
         bool f1Down = glfwGetKey(window, GLFW_KEY_F1) == GLFW_PRESS;
         if (f1Down && !f1WasDown) wireframe = !wireframe;
         f1WasDown = f1Down;
-
         glPolygonMode(GL_FRONT_AND_BACK, wireframe ? GL_LINE : GL_FILL);
 
         // Movement
@@ -2532,18 +2713,84 @@ auto solidAtWorld = [&](int wx, int wy, int wz) -> uint8_t {
             glfwGetKey(window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS)
             cameraPos.y -= cameraSpeed * deltaTime;
 
-        // Detect chunk change and schedule (cheap)
+        // Chunk change (FIXED: old coords captured BEFORE updating)
         int newCX = worldToChunkCoord(cameraPos.x, CHUNK_WORLD_X);
         int newCZ = worldToChunkCoord(cameraPos.z, CHUNK_WORLD_Z);
         if (newCX != playerCX || newCZ != playerCZ) {
+            int oldCX = playerCX;
+            int oldCZ = playerCZ;
+
             playerCX = newCX;
             playerCZ = newCZ;
-            scheduleStreaming(playerCX, playerCZ);
+
+            gPlayerCX.store(playerCX);
+            gPlayerCZ.store(playerCZ);
+
+            scheduleDelta(oldCX, oldCZ, playerCX, playerCZ);
+        } else {
+            gPlayerCX.store(playerCX);
+            gPlayerCZ.store(playerCZ);
         }
 
-        // Process a tiny bit of chunk work every frame (this is the hitch fix)
-        processStreamingBudget(playerCX, playerCZ);
+        // Upload budget (time-sliced)
+        const double UPLOAD_BUDGET_MS = 2.0;
+        double t0 = glfwGetTime();
+        while (true) {
+            double elapsedMs = (glfwGetTime() - t0) * 1000.0;
+            if (elapsedMs > UPLOAD_BUDGET_MS) break;
 
+            MeshDone md;
+            {
+                std::lock_guard<std::mutex> lock(meshDoneMutex);
+                if (meshDoneQ.empty()) break;
+                md = meshDoneQ.front();
+                meshDoneQ.pop_front();
+                meshDoneSet.erase(key64(md.cx, md.cz));
+            }
+
+            GpuChunk* ch = pinChunk(md.cx, md.cz);
+            if (!ch) continue;
+
+            if (!ch->stagedReady.load(std::memory_order_acquire)) { unpinChunk(ch); continue; }
+
+            {
+                std::lock_guard<std::mutex> lock(ch->stagedMutex);
+                if (!ch->stagedReady.load(std::memory_order_acquire)) { unpinChunk(ch); continue; }
+                ch->mesh = std::move(ch->stagedMesh);
+                ch->stagedMesh.verts.clear();
+                ch->stagedMesh.indices.clear();
+                ch->stagedReady.store(false, std::memory_order_release);
+            }
+
+            uploadChunkMesh(*ch);
+            ch->hasMesh.store(true, std::memory_order_release);
+            ch->dirtyMesh.store(false, std::memory_order_release);
+
+            unpinChunk(ch);
+        }
+
+        // Unload far chunks (only if no one is using them)
+        std::vector<uint64_t> toErase;
+        toErase.reserve(256);
+        {
+            std::lock_guard<std::mutex> lock(chunksMutex);
+            for (auto& kv : chunks) {
+                GpuChunk* ch = kv.second.get();
+                int cx = ch->cpos.x;
+                int cz = ch->cpos.y;
+
+                if (std::abs(cx - playerCX) > UNLOAD_RADIUS || std::abs(cz - playerCZ) > UNLOAD_RADIUS) {
+                    if (ch->pins.load(std::memory_order_acquire) != 0) continue;
+                    if (ch->inGen.load(std::memory_order_acquire) || ch->inMesh.load(std::memory_order_acquire)) continue;
+
+                    unloadChunkGL(*ch);
+                    toErase.push_back(kv.first);
+                }
+            }
+            for (uint64_t k : toErase) chunks.erase(k);
+        }
+
+        // Render
         glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
@@ -2552,7 +2799,6 @@ auto solidAtWorld = [&](int wx, int wy, int wz) -> uint8_t {
         if (fbW <= 0) fbW = mode->width;
         if (fbH <= 0) fbH = mode->height;
 
-        // Draw loaded chunk meshes
         glUseProgram(program);
 
         glm::mat4 view = glm::lookAt(cameraPos, cameraPos + glm::normalize(gCameraFront), cameraUp);
@@ -2560,17 +2806,31 @@ auto solidAtWorld = [&](int wx, int wy, int wz) -> uint8_t {
         glm::mat4 mvp  = proj * view;
         glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, &mvp[0][0]);
 
-        for (auto& kv : chunks) {
-            GpuChunk& ch = kv.second;
+        // Snapshot draw list
+        std::vector<GpuChunk*> drawList;
+        drawList.reserve(2048);
+        {
+            std::lock_guard<std::mutex> lock(chunksMutex);
+            for (auto& kv : chunks) drawList.push_back(kv.second.get());
+        }
 
-            // Only draw within load radius to keep draw calls stable
-            if (std::abs(ch.cpos.x - playerCX) > LOAD_RADIUS || std::abs(ch.cpos.y - playerCZ) > LOAD_RADIUS)
+        for (GpuChunk* ch : drawList) {
+            ch->pins.fetch_add(1, std::memory_order_acq_rel);
+
+            if (std::abs(ch->cpos.x - playerCX) > LOAD_RADIUS || std::abs(ch->cpos.y - playerCZ) > LOAD_RADIUS) {
+                ch->pins.fetch_sub(1, std::memory_order_acq_rel);
                 continue;
+            }
 
-            if (!ch.hasMesh || ch.vao == 0 || ch.mesh.indices.empty()) continue;
+            if (!ch->hasMesh.load(std::memory_order_acquire) || ch->vao == 0 || ch->mesh.indices.empty()) {
+                ch->pins.fetch_sub(1, std::memory_order_acq_rel);
+                continue;
+            }
 
-            glBindVertexArray(ch.vao);
-            glDrawElements(GL_TRIANGLES, (GLsizei)ch.mesh.indices.size(), GL_UNSIGNED_INT, 0);
+            glBindVertexArray(ch->vao);
+            glDrawElements(GL_TRIANGLES, (GLsizei)ch->mesh.indices.size(), GL_UNSIGNED_INT, 0);
+
+            ch->pins.fetch_sub(1, std::memory_order_acq_rel);
         }
         glBindVertexArray(0);
 
@@ -2578,9 +2838,21 @@ auto solidAtWorld = [&](int wx, int wy, int wz) -> uint8_t {
         glfwPollEvents();
     }
 
-    // Cleanup
-    for (auto& kv : chunks) unloadChunkGL(kv.second);
-    chunks.clear();
+    // Shutdown workers
+    genStop = true;
+    genCV.notify_all();
+    for (auto& t : genWorkers) t.join();
+
+    meshStop = true;
+    meshCV.notify_all();
+    for (auto& t : meshWorkers) t.join();
+
+    // Cleanup GL
+    {
+        std::lock_guard<std::mutex> lock(chunksMutex);
+        for (auto& kv : chunks) unloadChunkGL(*kv.second);
+        chunks.clear();
+    }
 
     glDeleteProgram(program);
     glfwDestroyWindow(window);
