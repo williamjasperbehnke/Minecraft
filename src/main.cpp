@@ -1964,6 +1964,9 @@ int main() {
     float deltaTime     = 0.0f;
     float lastFrame     = 0.0f;
 
+    bool wireframe = false;
+    bool f1WasDown = false;
+
     // --- FPS tracking ---
     double fps_prev_time = glfwGetTime();
     int fps_frames = 0;
@@ -2176,6 +2179,16 @@ int main() {
         float currentFrame = (float)glfwGetTime();
         deltaTime = currentFrame - lastFrame;
         lastFrame = currentFrame;
+
+        // Toggle wireframe on F1 (edge-triggered)
+        bool f1Down = glfwGetKey(window, GLFW_KEY_F1) == GLFW_PRESS;
+        if (f1Down && !f1WasDown) {
+            wireframe = !wireframe;
+        }
+        f1WasDown = f1Down;
+
+        // Apply polygon mode for 3D rendering
+        glPolygonMode(GL_FRONT_AND_BACK, wireframe ? GL_LINE : GL_FILL);
 
         // Respawn wall in front of you with R
         if (glfwGetKey(window, GLFW_KEY_R) == GLFW_PRESS)
