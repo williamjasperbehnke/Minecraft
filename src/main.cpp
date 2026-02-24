@@ -2002,6 +2002,9 @@ static constexpr int ATLAS_TILES_Y = 8;
 // If you ever add mipmaps, increase a bit to reduce bleeding.
 static constexpr float ATLAS_UV_INSET = 0.0010f;
 
+static constexpr float ATLAS_TW = 1.0f / float(ATLAS_TILES_X);
+static constexpr float ATLAS_TH = 1.0f / float(ATLAS_TILES_Y);
+
 enum Face : int { PX=0, NX=1, PY=2, NY=3, PZ=4, NZ=5 };
 
 static inline Face faceFromAxisDir(int axis, int dir) {
@@ -2064,23 +2067,53 @@ static inline glm::ivec2 atlasTileFor(uint8_t blockId, Face f) {
     }
 }
 
+static inline float wrapTile01(float t) {
+    // t is in "blocks" along the face plane (0..N)
+    float f = t - std::floor(t); // fract
+
+    constexpr float eps = 1e-6f;
+
+    // If we're exactly on an integer boundary:
+    // - If t==0 => keep 0
+    // - If t>0 => we want the "end" of the tile, not the start
+    if (f < eps) {
+        if (t > 0.0f) return 1.0f - eps;
+        return 0.0f + eps; // tiny nudge helps avoid exact border too
+    }
+
+    // Also avoid landing exactly on 1.0 due to FP noise
+    if (f > 1.0f - eps) f = 1.0f - eps;
+
+    return f;
+}
+
+static inline glm::vec2 atlasUV_repeatInTile(glm::ivec2 tileTopLeft, glm::vec2 uvBlocks01Repeating) {
+    // uvBlocks01Repeating is already in [0,1) per-block after fract
+    return atlasUV_fromTopLeftTile(tileTopLeft, uvBlocks01Repeating);
+}
+
 static void addQuad(ChunkMesh2& m,
                     glm::vec3 a, glm::vec3 b,
                     glm::vec3 c, glm::vec3 d,
                     float shade, float alpha,
-                    glm::ivec2 tile,
-                    int axis, int dir)
+                    glm::ivec2 tileTopLeft,
+                    int axis, int dir,
+                    float blockSize)
 {
+    // ----------------------------
     // Winding fix (keep)
+    // ----------------------------
     glm::vec3 axisVec(0.0f); axisVec[axis] = 1.0f;
     glm::vec3 expected = axisVec * float(dir);
     glm::vec3 n = glm::cross(b - a, c - a);
     if (glm::dot(n, expected) < 0.0f) std::swap(b, d);
 
-    // Pick which world axes define the face plane UV basis:
-    //  - ±Y faces (top/bottom): U=X, V=Z
-    //  - ±X faces (east/west):  U=Z, V=Y
-    //  - ±Z faces (north/south):U=X, V=Y
+    // ----------------------------
+    // Choose face-plane UV basis
+    //  - ±Y faces: U=X, V=Z
+    //  - ±X faces: U=Z, V=Y
+    //  - ±Z faces: U=X, V=Y
+    // ----------------------------
     int uAxis = 0, vAxis = 1;
     if (axis == 1) { uAxis = 0; vAxis = 2; }      // Y face: XZ
     else if (axis == 0) { uAxis = 2; vAxis = 1; } // X face: ZY
@@ -2092,44 +2125,61 @@ static void addQuad(ChunkMesh2& m,
 
     glm::vec2 pa = proj(a), pb = proj(b), pc = proj(c), pd = proj(d);
 
+    // ----------------------------
+    // TILE-SPACE UVs (for greedy tiling in the FRAGMENT shader)
+    //
+    // vUV = (tileIndex + distanceInBlocks)
+    // Fragment shader does:
+    //   tile  = floor(vUV)
+    //   local = fract(vUV)  -> repeats every 1 block
+    //   atlasUV = tileToAtlas(tile, local)
+    //
+    // IMPORTANT: tileTopLeft is in "top-left origin" coordinates,
+    // so we flip Y here to match GL bottom-left UV convention.
+    // ----------------------------
+    int tx = tileTopLeft.x;
+    int tyTop = tileTopLeft.y;
+    int ty = (ATLAS_TILES_Y - 1) - tyTop;
+
+    // Anchor the per-block distances to the minimum corner of the quad.
+    // This makes the UVs stable and ensures the greedy quad repeats per block.
     float minU = std::min(std::min(pa.x, pb.x), std::min(pc.x, pd.x));
-    float maxU = std::max(std::max(pa.x, pb.x), std::max(pc.x, pd.x));
     float minV = std::min(std::min(pa.y, pb.y), std::min(pc.y, pd.y));
-    float maxV = std::max(std::max(pa.y, pb.y), std::max(pc.y, pd.y));
 
-    float du = std::max(1e-6f, maxU - minU);
-    float dv = std::max(1e-6f, maxV - minV);
-
-    auto normUV = [&](const glm::vec2& p) -> glm::vec2 {
-        return glm::vec2((p.x - minU) / du, (p.y - minV) / dv);
+    auto uvTileSpace = [&](const glm::vec2& p) -> glm::vec2 {
+        float uBlocks = (p.x - minU) / blockSize; // 0..N across the merged quad
+        float vBlocks = (p.y - minV) / blockSize; // 0..M across the merged quad
+        return glm::vec2(float(tx) + uBlocks, float(ty) + vBlocks);
     };
 
-    glm::vec2 uva = normUV(pa);
-    glm::vec2 uvb = normUV(pb);
-    glm::vec2 uvc = normUV(pc);
-    glm::vec2 uvd = normUV(pd);
+    glm::vec2 A = uvTileSpace(pa);
+    glm::vec2 B = uvTileSpace(pb);
+    glm::vec2 C = uvTileSpace(pc);
+    glm::vec2 D = uvTileSpace(pd);
 
-    // Optional: flip U for negative-facing sides to keep “handedness” consistent
-    // (prevents some faces appearing mirrored/rotated depending on world direction)
+    // Optional: flip U for negative-facing side faces to keep orientation consistent
+    // This flips only the fractional part (within the tile), so it remains compatible
+    // with the fragment shader's floor/fract logic.
     if (axis != 1 && dir < 0) {
-        uva.x = 1.0f - uva.x;
-        uvb.x = 1.0f - uvb.x;
-        uvc.x = 1.0f - uvc.x;
-        uvd.x = 1.0f - uvd.x;
+        auto flipU = [&](glm::vec2& uv) {
+            float tileU = std::floor(uv.x);
+            float local = uv.x - tileU;          // fract
+            uv.x = tileU + (1.0f - local);
+        };
+        flipU(A); flipU(B); flipU(C); flipU(D);
     }
 
-    // Convert 0..1 local UV into atlas UV
-    glm::vec2 A = atlasUV_fromTopLeftTile(tile, uva);
-    glm::vec2 B = atlasUV_fromTopLeftTile(tile, uvb);
-    glm::vec2 C = atlasUV_fromTopLeftTile(tile, uvc);
-    glm::vec2 D = atlasUV_fromTopLeftTile(tile, uvd);
-
+    // ----------------------------
+    // Emit vertices + indices
+    // Vertex format: [x y z u v shade alpha]
+    // Here u,v are tile-space uv (NOT final atlas uv)
+    // ----------------------------
     uint32_t base = (uint32_t)(m.verts.size() / 7);
 
-    pushVertex(m.verts, a.x,a.y,a.z, A.x,A.y, shade, alpha);
-    pushVertex(m.verts, b.x,b.y,b.z, B.x,B.y, shade, alpha);
-    pushVertex(m.verts, c.x,c.y,c.z, C.x,C.y, shade, alpha);
-    pushVertex(m.verts, d.x,d.y,d.z, D.x,D.y, shade, alpha);
+    pushVertex(m.verts, a.x, a.y, a.z, A.x, A.y, shade, alpha);
+    pushVertex(m.verts, b.x, b.y, b.z, B.x, B.y, shade, alpha);
+    pushVertex(m.verts, c.x, c.y, c.z, C.x, C.y, shade, alpha);
+    pushVertex(m.verts, d.x, d.y, d.z, D.x, D.y, shade, alpha);
 
     m.indices.push_back(base + 0);
     m.indices.push_back(base + 1);
@@ -2510,9 +2560,9 @@ static ChunkMeshes buildChunkMeshesGreedy_3x3Snapshots(
         }
 
         if (blockId == WATER) {
-            addQuad(out.water, a, b, c, d, shade, alpha, tile, axis, dir);
+            addQuad(out.water, a, b, c, d, shade, alpha, tile, axis, dir, s);
         } else {
-            addQuad(out.solid, a, b, c, d, shade, alpha, tile, axis, dir);
+            addQuad(out.solid, a, b, c, d, shade, alpha, tile, axis, dir, s);
         }
     };
 
@@ -2693,8 +2743,17 @@ int main() {
         "in float vAlpha;\n"
         "uniform sampler2D uAtlas;\n"
         "out vec4 FragColor;\n"
+        "const float tilesX = 8.0;\n"
+        "const float tilesY = 8.0;\n"
+        "const float inset  = 0.0010;\n"
         "void main(){\n"
-        "  vec4 tex = texture(uAtlas, vUV);\n"
+        "  vec2 tile = floor(vUV);\n"
+        "  vec2 local = fract(vUV);\n"
+        "  vec2 tw = vec2(1.0/tilesX, 1.0/tilesY);\n"
+        "  vec2 uv0 = tile * tw + inset * tw;\n"
+        "  vec2 uv1 = (tile + 1.0) * tw - inset * tw;\n"
+        "  vec2 atlasUV = mix(uv0, uv1, local);\n"
+        "  vec4 tex = texture(uAtlas, atlasUV);\n"
         "  tex.rgb *= vShade;\n"
         "  tex.a *= vAlpha;\n"
         "  if (tex.a <= 0.01) discard;\n"
