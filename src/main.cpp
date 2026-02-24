@@ -1875,13 +1875,20 @@ int pauseMenuButtonAtCursor(double mx, double my, int width, int height) {
 
 } // namespace
 // main.cpp — closest-first streaming + background GEN + background MESH (CPU) + main-thread GPU upload
-// ✅ GEN (blocks) on worker threads
-// ✅ MESH (greedy) on worker threads (CPU only)
-// ✅ OpenGL upload (VBO/EBO/VAO) on main thread only
+// ✅ GEN (blocks) on worker threads (priority + urgent lane)
+// ✅ MESH (greedy) on worker threads (priority + urgent lane)
+// ✅ OpenGL upload (VBO/EBO/VAO) on main thread only (urgent uploads first)
 // ✅ Prioritize chunks closest to player (min-heap PQ)
-// ✅ Never draw "unseen" faces on chunk borders (UNKNOWN suppress rule)
+// ✅ Never draw "unseen" faces on chunk borders: UNKNOWN suppression
 // ✅ Never draw bottom-of-world face (-Y at worldY==0)
-// ✅ Fixed: initial scheduling + delta scheduling + meshDone locking (your "nothing renders" bug)
+// ✅ Raycast (voxel DDA) + block breaking (LMB) + placing (RMB)
+// ✅ Highlight selected block with a white wireframe outline
+//
+// FIXED: slow mine/place while chunks loading
+// - edits now enqueue URGENT MESH for the edited chunk and edge neighbors
+// - AND enqueue URGENT GEN for any neighbor chunks that are missing/unready when you edit on a border
+// - mesh workers pop urgent first (dist2 = -1)
+// - main thread uploads urgent meshes first, with a bigger upload budget while urgent uploads exist
 
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
@@ -1894,10 +1901,10 @@ int pauseMenuButtonAtCursor(double mx, double my, int width, int height) {
 #include <cstdint>
 #include <cmath>
 #include <condition_variable>
-#include <functional>
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <queue>
 #include <thread>
 #include <unordered_map>
@@ -1946,7 +1953,7 @@ static void mouse_callback(GLFWwindow*, double xpos, double ypos)
 }
 
 // ----------------------------
-// Meshing utilities
+// Mesh data
 // ----------------------------
 struct ChunkMesh2 {
     std::vector<float> verts;        // [x y z r g b]...
@@ -1981,21 +1988,151 @@ static void addQuad(ChunkMesh2& m,
     m.indices.push_back(base + 3);
 }
 
+// ----------------------------
+// Chunk container
+// ----------------------------
+struct GpuChunk {
+    glm::ivec2 cpos;
+    glm::vec3 origin;
+
+    std::vector<uint8_t> blocks;
+    std::mutex blocksMutex;
+
+    ChunkMesh2 mesh;
+    GLuint vao=0, vbo=0, ebo=0;
+
+    std::atomic<bool> inGen{false};
+    std::atomic<bool> inMesh{false};
+    std::atomic<int>  pins{0};
+
+    std::atomic<bool> hasBlocks{false};
+    std::atomic<bool> hasMesh{false};
+    std::atomic<bool> dirtyMesh{true};
+
+    ChunkMesh2 stagedMesh;
+    std::atomic<bool> stagedReady{false};
+    std::mutex stagedMutex;
+};
+
+// OpenGL upload (main thread only)
+static void uploadChunkMesh(GpuChunk& c) {
+    if (c.vao == 0) {
+        glGenVertexArrays(1, &c.vao);
+        glGenBuffers(1, &c.vbo);
+        glGenBuffers(1, &c.ebo);
+    }
+
+    glBindVertexArray(c.vao);
+
+    glBindBuffer(GL_ARRAY_BUFFER, c.vbo);
+    GLsizeiptr vbytes = (GLsizeiptr)(c.mesh.verts.size() * sizeof(float));
+    glBufferData(GL_ARRAY_BUFFER, vbytes, nullptr, GL_DYNAMIC_DRAW);
+    if (vbytes > 0) glBufferSubData(GL_ARRAY_BUFFER, 0, vbytes, c.mesh.verts.data());
+
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, c.ebo);
+    GLsizeiptr ibytes = (GLsizeiptr)(c.mesh.indices.size() * sizeof(uint32_t));
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, ibytes, nullptr, GL_DYNAMIC_DRAW);
+    if (ibytes > 0) glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, ibytes, c.mesh.indices.data());
+
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)(3 * sizeof(float)));
+    glEnableVertexAttribArray(1);
+
+    glBindVertexArray(0);
+}
+
+static void unloadChunkGL(GpuChunk& ch) {
+    if (ch.vao) glDeleteVertexArrays(1, &ch.vao);
+    if (ch.vbo) glDeleteBuffers(1, &ch.vbo);
+    if (ch.ebo) glDeleteBuffers(1, &ch.ebo);
+    ch.vao = ch.vbo = ch.ebo = 0;
+
+    {
+        std::lock_guard<std::mutex> bl(ch.blocksMutex);
+        ch.blocks.clear();
+    }
+
+    ch.mesh.verts.clear();
+    ch.mesh.indices.clear();
+
+    {
+        std::lock_guard<std::mutex> lock(ch.stagedMutex);
+        ch.stagedMesh.verts.clear();
+        ch.stagedMesh.indices.clear();
+        ch.stagedReady.store(false, std::memory_order_release);
+    }
+
+    ch.hasBlocks.store(false, std::memory_order_release);
+    ch.hasMesh.store(false, std::memory_order_release);
+    ch.dirtyMesh.store(true, std::memory_order_release);
+}
+
+// ----------------------------
+// Helpers
+// ----------------------------
+static inline uint64_t key64(int cx, int cz) {
+    return (uint64_t)(uint32_t)cx << 32 | (uint32_t)cz;
+}
+
+static inline int floorDivInt(int a, int b) {
+    int q = a / b;
+    int r = a % b;
+    if ((r != 0) && ((r > 0) != (b > 0))) q -= 1;
+    return q;
+}
+
+static inline int worldToChunkCoord(float world, float chunkWorldSize) {
+    return (int)std::floor(world / chunkWorldSize);
+}
+
+static inline int clampi(int v, int lo, int hi) { return std::max(lo, std::min(hi, v)); }
+
+// ----------------------------
+// Priority work items
+// ----------------------------
+struct WorkItem {
+    int dist2;      // -1 => URGENT
+    uint32_t seq;
+    int cx, cz;
+};
+
+struct WorkCmp {
+    bool operator()(const WorkItem& a, const WorkItem& b) const {
+        if (a.dist2 != b.dist2) return a.dist2 > b.dist2; // min-heap
+        return a.seq > b.seq;
+    }
+};
+
+static inline int dist2Chunks(int cx, int cz, int pcx, int pcz) {
+    int dx = cx - pcx;
+    int dz = cz - pcz;
+    return dx*dx + dz*dz;
+}
+
+struct MeshDone { int cx, cz; };
+
 // ============================================================
-// WORLD-AWARE greedy mesher
-// - Suppresses faces if either side is UNKNOWN (255): prevents border "walls" into missing chunks
-// - Never draws the bottom-of-world face (-Y at worldY==0)
+// Refactored greedy mesher (NO world callback)
+// - Inputs are snapshots of 3x3 neighbor chunk blocks (copies)
+// - UNKNOWN suppression: if either side UNKNOWN => don't emit face
+// - Bottom face suppression: don't emit -Y faces at worldY==0
 // ============================================================
-static ChunkMesh2 buildChunkMeshGreedy_WorldAware(
-    const std::vector<uint8_t>& /*blocksLocalNotUsed*/,
+struct ChunkSnapshot {
+    bool ready = false;
+    std::vector<uint8_t> blocks;
+};
+
+static ChunkMesh2 buildChunkMeshGreedy_3x3Snapshots(
+    const ChunkSnapshot neigh[3][3],   // neigh[1][1] is center
     int sx, int sy, int sz,
     const glm::vec3& origin,
-    float blockSize,
-    int baseWX, int baseWZ, // chunk base world coords in blocks
-    const std::function<uint8_t(int wx, int wy, int wz)>& solidAtWorldFn
+    float blockSize
 ) {
     ChunkMesh2 mesh;
 
+    static constexpr uint8_t AIR     = 0;
+    static constexpr uint8_t SOLID   = 1;
     static constexpr uint8_t UNKNOWN = 255;
 
     const glm::vec3 colRight  = {0.0f, 0.0f, 1.0f}; // +X
@@ -2011,10 +2148,29 @@ static ChunkMesh2 buildChunkMeshGreedy_WorldAware(
         return          (dir > 0) ? colFront  : colBack;
     };
 
-    auto solidAt = [&](int x, int y, int z) -> uint8_t {
-        int wx = baseWX + x;
-        int wz = baseWZ + z;
-        return solidAtWorldFn(wx, y, wz);
+    auto sample = [&](int x, int y, int z) -> uint8_t {
+        if (y < 0 || y >= sy) return AIR;
+
+        int ox = 0, oz = 0;
+        int lx = x, lz = z;
+
+        if (lx < 0)        { ox = -1; lx += sx; }
+        else if (lx >= sx) { ox = +1; lx -= sx; }
+
+        if (lz < 0)        { oz = -1; lz += sz; }
+        else if (lz >= sz) { oz = +1; lz -= sz; }
+
+        if (lx < 0 || lx >= sx || lz < 0 || lz >= sz) return UNKNOWN;
+
+        int ni = ox + 1;
+        int nj = oz + 1;
+        if (ni < 0 || ni > 2 || nj < 0 || nj > 2) return UNKNOWN;
+
+        const ChunkSnapshot& sn = neigh[ni][nj];
+        if (!sn.ready) return UNKNOWN;
+
+        const int id = idx3(lx, y, lz, sx, sy, sz);
+        return sn.blocks[id] ? SOLID : AIR;
     };
 
     struct MaskCell { uint8_t id = 0; int dir = 0; };
@@ -2023,10 +2179,8 @@ static ChunkMesh2 buildChunkMeshGreedy_WorldAware(
     int maxDim = std::max(sx, std::max(sy, sz));
     std::vector<MaskCell> mask(maxDim * maxDim);
 
-    auto emitQuad = [&](int axis, int dir, int i,
-                        int u0, int v0, int u1, int v1)
-    {
-        // Never draw bottom-of-world face (-Y at worldY==0)
+    auto emitQuad = [&](int axis, int dir, int i, int u0, int v0, int u1, int v1) {
+        // Never draw bottom-of-world face
         if (axis == 1 && dir == -1) {
             int worldY = (i - 1);
             if (worldY <= 0) return;
@@ -2075,7 +2229,6 @@ static ChunkMesh2 buildChunkMeshGreedy_WorldAware(
         int V = dims[vAxis];
 
         for (int i = 0; i <= A; ++i) {
-            // Build mask
             for (int v = 0; v < V; ++v) {
                 for (int u = 0; u < U; ++u) {
                     int c0[3] = {0,0,0};
@@ -2087,24 +2240,23 @@ static ChunkMesh2 buildChunkMeshGreedy_WorldAware(
                     c0[uAxis] = u; c0[vAxis] = v;
                     c1[uAxis] = u; c1[vAxis] = v;
 
-                    uint8_t aS = solidAt(c0[0], c0[1], c0[2]);
-                    uint8_t bS = solidAt(c1[0], c1[1], c1[2]);
+                    uint8_t aS = sample(c0[0], c0[1], c0[2]);
+                    uint8_t bS = sample(c1[0], c1[1], c1[2]);
 
-                    MaskCell cell;
-
-                    // If either side unknown -> emit nothing
+                    MaskCell cell{};
                     if (aS == UNKNOWN || bS == UNKNOWN) {
-                        cell.id = 0; cell.dir = 0;
+                        cell = {};
+                    } else if (aS == SOLID && bS == AIR) {
+                        cell.id = SOLID; cell.dir = +1;
+                    } else if (aS == AIR && bS == SOLID) {
+                        cell.id = SOLID; cell.dir = -1;
+                    } else {
+                        cell = {};
                     }
-                    else if (aS && !bS) { cell.id = aS; cell.dir = +1; }
-                    else if (!aS && bS) { cell.id = bS; cell.dir = -1; }
-                    else { cell.id = 0; cell.dir = 0; }
-
                     mask[u + U * v] = cell;
                 }
             }
 
-            // Greedy merge + emit
             for (int v = 0; v < V; ++v) {
                 for (int u = 0; u < U; ) {
                     MaskCell cur = mask[u + U * v];
@@ -2141,116 +2293,6 @@ static ChunkMesh2 buildChunkMeshGreedy_WorldAware(
 
     return mesh;
 }
-
-// ----------------------------
-// Chunk container
-// ----------------------------
-struct GpuChunk {
-    glm::ivec2 cpos;
-    glm::vec3 origin;
-    std::vector<uint8_t> blocks;
-
-    ChunkMesh2 mesh;
-    GLuint vao=0, vbo=0, ebo=0;
-
-    std::atomic<bool> inGen{false};
-    std::atomic<bool> inMesh{false};
-    std::atomic<int>  pins{0};
-
-    std::atomic<bool> hasBlocks{false};
-    std::atomic<bool> hasMesh{false};
-    std::atomic<bool> dirtyMesh{true};
-
-    ChunkMesh2 stagedMesh;
-    std::atomic<bool> stagedReady{false};
-    std::mutex stagedMutex;
-};
-
-static void uploadChunkMesh(GpuChunk& c) {
-    if (c.vao == 0) {
-        glGenVertexArrays(1, &c.vao);
-        glGenBuffers(1, &c.vbo);
-        glGenBuffers(1, &c.ebo);
-    }
-
-    glBindVertexArray(c.vao);
-
-    glBindBuffer(GL_ARRAY_BUFFER, c.vbo);
-    GLsizeiptr vbytes = (GLsizeiptr)(c.mesh.verts.size() * sizeof(float));
-    glBufferData(GL_ARRAY_BUFFER, vbytes, nullptr, GL_DYNAMIC_DRAW);
-    if (vbytes > 0) glBufferSubData(GL_ARRAY_BUFFER, 0, vbytes, c.mesh.verts.data());
-
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, c.ebo);
-    GLsizeiptr ibytes = (GLsizeiptr)(c.mesh.indices.size() * sizeof(uint32_t));
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, ibytes, nullptr, GL_DYNAMIC_DRAW);
-    if (ibytes > 0) glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, ibytes, c.mesh.indices.data());
-
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)0);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)(3 * sizeof(float)));
-    glEnableVertexAttribArray(1);
-
-    glBindVertexArray(0);
-}
-
-static void unloadChunkGL(GpuChunk& ch) {
-    if (ch.vao) glDeleteVertexArrays(1, &ch.vao);
-    if (ch.vbo) glDeleteBuffers(1, &ch.vbo);
-    if (ch.ebo) glDeleteBuffers(1, &ch.ebo);
-    ch.vao = ch.vbo = ch.ebo = 0;
-
-    ch.blocks.clear();
-    ch.mesh.verts.clear();
-    ch.mesh.indices.clear();
-
-    {
-        std::lock_guard<std::mutex> lock(ch.stagedMutex);
-        ch.stagedMesh.verts.clear();
-        ch.stagedMesh.indices.clear();
-        ch.stagedReady.store(false, std::memory_order_release);
-    }
-
-    ch.hasBlocks.store(false, std::memory_order_release);
-    ch.hasMesh.store(false, std::memory_order_release);
-    ch.dirtyMesh.store(true, std::memory_order_release);
-}
-
-// ----------------------------
-// Helpers
-// ----------------------------
-static inline uint64_t key64(int cx, int cz) {
-    return (uint64_t)(uint32_t)cx << 32 | (uint32_t)cz;
-}
-
-static inline int floorDivInt(int a, int b) {
-    int q = a / b;
-    int r = a % b;
-    if ((r != 0) && ((r > 0) != (b > 0))) q -= 1;
-    return q;
-}
-
-static inline int worldToChunkCoord(float world, float chunkWorldSize) {
-    return (int)std::floor(world / chunkWorldSize);
-}
-
-static inline int clampi(int v, int lo, int hi) { return std::max(lo, std::min(hi, v)); }
-
-struct WorkItem { int dist2; uint32_t seq; int cx, cz; };
-
-struct WorkCmp {
-    bool operator()(const WorkItem& a, const WorkItem& b) const {
-        if (a.dist2 != b.dist2) return a.dist2 > b.dist2;
-        return a.seq > b.seq;
-    }
-};
-
-static inline int dist2Chunks(int cx, int cz, int pcx, int pcz) {
-    int dx = cx - pcx;
-    int dz = cz - pcz;
-    return dx*dx + dz*dz;
-}
-
-struct MeshDone { int cx, cz; };
 
 int main() {
     if (!glfwInit()) return -1;
@@ -2334,9 +2376,12 @@ int main() {
     const float CHUNK_WORLD_X = float(CHUNK_X) * BLOCK;
     const float CHUNK_WORLD_Z = float(CHUNK_Z) * BLOCK;
 
-    const int LOAD_RADIUS   = 16;
+    const int LOAD_RADIUS   = 64;
     const int GEN_RADIUS    = LOAD_RADIUS + 1;
     const int UNLOAD_RADIUS = LOAD_RADIUS + 3;
+
+    const double UPLOAD_BUDGET_MS_NORMAL = 2.0;
+    const double UPLOAD_BUDGET_MS_URGENT = 10.0;
 
     static constexpr uint8_t AIR     = 0;
     static constexpr uint8_t SOLID   = 1;
@@ -2362,7 +2407,6 @@ int main() {
         return it->second.get();
     };
 
-    // Pinning prevents main thread from deleting while workers use a chunk pointer
     auto pinChunk = [&](int cx, int cz) -> GpuChunk* {
         std::lock_guard<std::mutex> lock(chunksMutex);
         auto it = chunks.find(key64(cx, cz));
@@ -2387,35 +2431,11 @@ int main() {
         return clampi((int)h, 0, CHUNK_Y);
     };
 
-    // ============================================================
-    // World accessor for mesher:
-    // - returns UNKNOWN if neighbor chunk missing/unready/generating
-    // ============================================================
-    auto solidAtWorld = [&](int wx, int wy, int wz) -> uint8_t {
-        if (wy < 0 || wy >= CHUNK_Y) return AIR;
-
-        int cx = floorDivInt(wx, CHUNK_X);
-        int cz = floorDivInt(wz, CHUNK_Z);
-
-        int lx = wx - cx * CHUNK_X;
-        int lz = wz - cz * CHUNK_Z;
-        if (lx < 0) lx += CHUNK_X;
-        if (lz < 0) lz += CHUNK_Z;
-
-        GpuChunk* ch = pinChunk(cx, cz);
-        if (!ch) return UNKNOWN;
-
-        uint8_t out = UNKNOWN;
-        if (ch->hasBlocks.load(std::memory_order_acquire) && !ch->inGen.load(std::memory_order_acquire)) {
-            out = ch->blocks[idx3(lx, wy, lz, CHUNK_X, CHUNK_Y, CHUNK_Z)] ? SOLID : AIR;
-        }
-
-        unpinChunk(ch);
-        return out;
-    };
+    // Player chunk coords visible to workers
+    std::atomic<int> gPlayerCX{0}, gPlayerCZ{0};
 
     // ============================================================
-    // GEN queue (worker consumed)
+    // GEN / MESH queues
     // ============================================================
     std::priority_queue<WorkItem, std::vector<WorkItem>, WorkCmp> genPQ;
     std::unordered_map<uint64_t, int> bestGenDist2;
@@ -2423,20 +2443,18 @@ int main() {
     std::condition_variable genCV;
     uint32_t genSeq = 0;
 
-    // MESH queue (worker consumed)
     std::priority_queue<WorkItem, std::vector<WorkItem>, WorkCmp> meshPQ;
     std::unordered_map<uint64_t, int> bestMeshDist2;
     std::mutex meshMutex;
     std::condition_variable meshCV;
     uint32_t meshSeq = 0;
 
-    // Completed meshes waiting for main-thread upload (deduped)
+    // Done queues: urgent uploads first
+    std::deque<MeshDone> meshDoneUrgentQ;
+    std::unordered_set<uint64_t> meshDoneUrgentSet;
     std::deque<MeshDone> meshDoneQ;
-    std::mutex meshDoneMutex;
     std::unordered_set<uint64_t> meshDoneSet;
-
-    // Player chunk coords visible to workers
-    std::atomic<int> gPlayerCX{0}, gPlayerCZ{0};
+    std::mutex meshDoneMutex;
 
     auto queueGen = [&](int cx, int cz, int pcx, int pcz) {
         uint64_t k = key64(cx, cz);
@@ -2448,6 +2466,17 @@ int main() {
                 bestGenDist2[k] = d2;
                 genPQ.push(WorkItem{d2, genSeq++, cx, cz});
             }
+        }
+        genCV.notify_one();
+    };
+
+    auto queueGenUrgent = [&](int cx, int cz) {
+        uint64_t k = key64(cx, cz);
+        int d2 = -1;
+        {
+            std::lock_guard<std::mutex> lock(genMutex);
+            bestGenDist2[k] = d2;
+            genPQ.push(WorkItem{d2, genSeq++, cx, cz});
         }
         genCV.notify_one();
     };
@@ -2466,6 +2495,285 @@ int main() {
         meshCV.notify_one();
     };
 
+    auto queueMeshUrgent = [&](int cx, int cz) {
+        uint64_t k = key64(cx, cz);
+        int d2 = -1;
+        {
+            std::lock_guard<std::mutex> lock(meshMutex);
+            bestMeshDist2[k] = d2;
+            meshPQ.push(WorkItem{d2, meshSeq++, cx, cz});
+        }
+        meshCV.notify_one();
+    };
+
+    // ============================================================
+    // World accessor for raycast / edits (rare)
+    // ============================================================
+    auto solidAtWorld = [&](int wx, int wy, int wz) -> uint8_t {
+        if (wy < 0 || wy >= CHUNK_Y) return AIR;
+
+        int cx = floorDivInt(wx, CHUNK_X);
+        int cz = floorDivInt(wz, CHUNK_Z);
+
+        int lx = wx - cx * CHUNK_X;
+        int lz = wz - cz * CHUNK_Z;
+        if (lx < 0) lx += CHUNK_X;
+        if (lz < 0) lz += CHUNK_Z;
+
+        GpuChunk* ch = pinChunk(cx, cz);
+        if (!ch) return UNKNOWN;
+
+        uint8_t out = UNKNOWN;
+        if (ch->hasBlocks.load(std::memory_order_acquire) && !ch->inGen.load(std::memory_order_acquire)) {
+            std::lock_guard<std::mutex> bl(ch->blocksMutex);
+            out = ch->blocks[idx3(lx, wy, lz, CHUNK_X, CHUNK_Y, CHUNK_Z)] ? SOLID : AIR;
+        }
+
+        unpinChunk(ch);
+        return out;
+    };
+
+    // ============================================================
+    // Border correctness helper
+    // ============================================================
+    auto dirtyAndQueueMesh = [&](int cx, int cz, bool urgent) {
+        int pcx = gPlayerCX.load();
+        int pcz = gPlayerCZ.load();
+
+        if (GpuChunk* ch = pinChunk(cx, cz)) {
+            if (ch->hasBlocks.load(std::memory_order_acquire) && !ch->inGen.load(std::memory_order_acquire)) {
+                ch->dirtyMesh.store(true, std::memory_order_release);
+            }
+            unpinChunk(ch);
+        }
+        if (urgent) queueMeshUrgent(cx, cz);
+        else        queueMesh(cx, cz, pcx, pcz);
+    };
+
+    // If an edit touches a chunk border and the neighbor is missing/unready, urgently generate it
+    auto ensureNeighborGeneratedUrgent = [&](int ncx, int ncz) {
+        // create placeholder so it exists in map
+        createChunkIfMissing(ncx, ncz);
+
+        if (GpuChunk* n = pinChunk(ncx, ncz)) {
+            bool ready = n->hasBlocks.load(std::memory_order_acquire) && !n->inGen.load(std::memory_order_acquire);
+            unpinChunk(n);
+            if (!ready) queueGenUrgent(ncx, ncz);
+        } else {
+            queueGenUrgent(ncx, ncz);
+        }
+    };
+
+    // ============================================================
+    // World block editing
+    // ============================================================
+    auto worldToLocalXZ = [&](int wx, int wz, int& cx, int& cz, int& lx, int& lz) {
+        cx = floorDivInt(wx, CHUNK_X);
+        cz = floorDivInt(wz, CHUNK_Z);
+        lx = wx - cx * CHUNK_X;
+        lz = wz - cz * CHUNK_Z;
+        if (lx < 0) lx += CHUNK_X;
+        if (lz < 0) lz += CHUNK_Z;
+    };
+
+    auto setBlockWorld = [&](int wx, int wy, int wz, uint8_t value) -> bool {
+        if (wy < 0 || wy >= CHUNK_Y) return false;
+
+        int cx, cz, lx, lz;
+        worldToLocalXZ(wx, wz, cx, cz, lx, lz);
+
+        GpuChunk* ch = pinChunk(cx, cz);
+        if (!ch) return false;
+
+        if (!ch->hasBlocks.load(std::memory_order_acquire) || ch->inGen.load(std::memory_order_acquire)) {
+            unpinChunk(ch);
+            return false;
+        }
+
+        {
+            std::lock_guard<std::mutex> bl(ch->blocksMutex);
+            ch->blocks[idx3(lx, wy, lz, CHUNK_X, CHUNK_Y, CHUNK_Z)] = value;
+        }
+
+        ch->dirtyMesh.store(true, std::memory_order_release);
+
+        // URGENT remesh self
+        dirtyAndQueueMesh(cx, cz, true);
+
+        // If border edit, urgently generate + urgent remesh neighbor so the seam updates ASAP
+        if (lx == 0) {
+            ensureNeighborGeneratedUrgent(cx - 1, cz);
+            dirtyAndQueueMesh(cx - 1, cz, true);
+        }
+        if (lx == CHUNK_X - 1) {
+            ensureNeighborGeneratedUrgent(cx + 1, cz);
+            dirtyAndQueueMesh(cx + 1, cz, true);
+        }
+        if (lz == 0) {
+            ensureNeighborGeneratedUrgent(cx, cz - 1);
+            dirtyAndQueueMesh(cx, cz - 1, true);
+        }
+        if (lz == CHUNK_Z - 1) {
+            ensureNeighborGeneratedUrgent(cx, cz + 1);
+            dirtyAndQueueMesh(cx, cz + 1, true);
+        }
+
+        unpinChunk(ch);
+        return true;
+    };
+
+    // ============================================================
+    // Raycast (voxel DDA)
+    // ============================================================
+    struct RayHit {
+        int wx=0, wy=0, wz=0;
+        int nx=0, ny=0, nz=0;
+        float t=0.0f;
+    };
+
+    auto ifloor = [&](float v) -> int { return (int)std::floor(v); };
+
+    auto raycastBlocks = [&](const glm::vec3& origin, const glm::vec3& dir, float maxDist) -> std::optional<RayHit> {
+        glm::vec3 d = glm::normalize(dir);
+        if (!std::isfinite(d.x) || !std::isfinite(d.y) || !std::isfinite(d.z)) return std::nullopt;
+
+        int x = ifloor(origin.x);
+        int y = ifloor(origin.y);
+        int z = ifloor(origin.z);
+
+        int stepX = (d.x > 0) ? 1 : (d.x < 0 ? -1 : 0);
+        int stepY = (d.y > 0) ? 1 : (d.y < 0 ? -1 : 0);
+        int stepZ = (d.z > 0) ? 1 : (d.z < 0 ? -1 : 0);
+
+        auto invAbs = [&](float a) -> float { return (a != 0.0f) ? (1.0f / std::abs(a)) : 1e30f; };
+
+        float tDeltaX = invAbs(d.x);
+        float tDeltaY = invAbs(d.y);
+        float tDeltaZ = invAbs(d.z);
+
+        auto nextBoundaryT = [&](float o, float dv, int cell, int step) -> float {
+            if (step == 0) return 1e30f;
+            float boundary = (step > 0) ? float(cell + 1) : float(cell);
+            return (boundary - o) / dv;
+        };
+
+        float tMaxX = nextBoundaryT(origin.x, d.x, x, stepX);
+        float tMaxY = nextBoundaryT(origin.y, d.y, y, stepY);
+        float tMaxZ = nextBoundaryT(origin.z, d.z, z, stepZ);
+
+        int lastNX=0, lastNY=0, lastNZ=0;
+        float t = 0.0f;
+
+        // starting cell check
+        {
+            uint8_t s = solidAtWorld(x, y, z);
+            if (s == SOLID) {
+                RayHit hit; hit.wx=x; hit.wy=y; hit.wz=z; hit.nx=0; hit.ny=0; hit.nz=0; hit.t=0.0f;
+                return hit;
+            }
+        }
+
+        while (t <= maxDist) {
+            if (tMaxX < tMaxY && tMaxX < tMaxZ) {
+                x += stepX;
+                t = tMaxX;
+                tMaxX += tDeltaX;
+                lastNX = -stepX; lastNY = 0; lastNZ = 0;
+            } else if (tMaxY < tMaxZ) {
+                y += stepY;
+                t = tMaxY;
+                tMaxY += tDeltaY;
+                lastNX = 0; lastNY = -stepY; lastNZ = 0;
+            } else {
+                z += stepZ;
+                t = tMaxZ;
+                tMaxZ += tDeltaZ;
+                lastNX = 0; lastNY = 0; lastNZ = -stepZ;
+            }
+
+            if (t > maxDist) break;
+
+            uint8_t s = solidAtWorld(x, y, z);
+            // do NOT treat UNKNOWN as a hit (prevents border interactions into missing chunks)
+            if (s == SOLID) {
+                RayHit hit;
+                hit.wx=x; hit.wy=y; hit.wz=z;
+                hit.nx=lastNX; hit.ny=lastNY; hit.nz=lastNZ;
+                hit.t=t;
+                return hit;
+            }
+        }
+
+        return std::nullopt;
+    };
+
+    // ============================================================
+    // Outline (selected block highlight) — GL_LINES
+    // ============================================================
+    GLuint outlineVAO = 0, outlineVBO = 0;
+
+    auto initOutlineGL = [&]() {
+        if (outlineVAO != 0) return;
+        glGenVertexArrays(1, &outlineVAO);
+        glGenBuffers(1, &outlineVBO);
+
+        glBindVertexArray(outlineVAO);
+        glBindBuffer(GL_ARRAY_BUFFER, outlineVBO);
+        glBufferData(GL_ARRAY_BUFFER, 24 * 6 * sizeof(float), nullptr, GL_DYNAMIC_DRAW);
+
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)0);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)(3 * sizeof(float)));
+        glEnableVertexAttribArray(1);
+
+        glBindVertexArray(0);
+    };
+
+    auto uploadOutlineBox = [&](int wx, int wy, int wz, float blockSize) {
+        float s = blockSize;
+        float e = 0.02f * s;
+
+        float x0 = (float)wx - 0.5f * s - e;
+        float y0 = (float)wy - 0.5f * s - e;
+        float z0 = (float)wz - 0.5f * s - e;
+
+        float x1 = (float)wx + 0.5f * s + e;
+        float y1 = (float)wy + 0.5f * s + e;
+        float z1 = (float)wz + 0.5f * s + e;
+
+        float r=1.0f, g=1.0f, b=1.0f;
+
+        float v[24 * 6];
+        int n = 0;
+        auto push = [&](float x, float y, float z) {
+            v[n++] = x; v[n++] = y; v[n++] = z;
+            v[n++] = r; v[n++] = g; v[n++] = b;
+        };
+
+        // bottom
+        push(x0,y0,z0); push(x1,y0,z0);
+        push(x1,y0,z0); push(x1,y0,z1);
+        push(x1,y0,z1); push(x0,y0,z1);
+        push(x0,y0,z1); push(x0,y0,z0);
+
+        // top
+        push(x0,y1,z0); push(x1,y1,z0);
+        push(x1,y1,z0); push(x1,y1,z1);
+        push(x1,y1,z1); push(x0,y1,z1);
+        push(x0,y1,z1); push(x0,y1,z0);
+
+        // verticals
+        push(x0,y0,z0); push(x0,y1,z0);
+        push(x1,y0,z0); push(x1,y1,z0);
+        push(x1,y0,z1); push(x1,y1,z1);
+        push(x0,y0,z1); push(x0,y1,z1);
+
+        glBindBuffer(GL_ARRAY_BUFFER, outlineVBO);
+        glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(v), v);
+    };
+
+    initOutlineGL();
+
     // ============================================================
     // GEN worker threads
     // ============================================================
@@ -2478,18 +2786,21 @@ int main() {
         if (!ch->inGen.compare_exchange_strong(expected, true)) return;
         if (ch->hasBlocks.load(std::memory_order_acquire)) { ch->inGen.store(false); return; }
 
-        ch->blocks.assign(CHUNK_X * CHUNK_Y * CHUNK_Z, 0);
+        {
+            std::lock_guard<std::mutex> bl(ch->blocksMutex);
+            ch->blocks.assign(CHUNK_X * CHUNK_Y * CHUNK_Z, 0);
 
-        int baseWX = ch->cpos.x * CHUNK_X;
-        int baseWZ = ch->cpos.y * CHUNK_Z;
+            int baseWX = ch->cpos.x * CHUNK_X;
+            int baseWZ = ch->cpos.y * CHUNK_Z;
 
-        for (int z = 0; z < CHUNK_Z; ++z) {
-            for (int x = 0; x < CHUNK_X; ++x) {
-                int wx = baseWX + x;
-                int wz = baseWZ + z;
-                int h  = heightAtWorld(wx, wz);
-                for (int y = 0; y < h; ++y) {
-                    ch->blocks[idx3(x, y, z, CHUNK_X, CHUNK_Y, CHUNK_Z)] = 1;
+            for (int zz = 0; zz < CHUNK_Z; ++zz) {
+                for (int xx = 0; xx < CHUNK_X; ++xx) {
+                    int wx = baseWX + xx;
+                    int wz = baseWZ + zz;
+                    int h  = heightAtWorld(wx, wz);
+                    for (int yy = 0; yy < h; ++yy) {
+                        ch->blocks[idx3(xx, yy, zz, CHUNK_X, CHUNK_Y, CHUNK_Z)] = 1;
+                    }
                 }
             }
         }
@@ -2529,26 +2840,40 @@ int main() {
             generateBlocksForChunk(ch);
             unpinChunk(ch);
 
-            // Re-mesh this and neighbors (border correctness)
-            pcx = gPlayerCX.load();
-            pcz = gPlayerCZ.load();
-            queueMesh(wi.cx, wi.cz, pcx, pcz);
+            // When a chunk becomes known, its neighbors’ seam can change (UNKNOWN -> known).
+            // This is NOT urgent by default.
+            dirtyAndQueueMesh(wi.cx, wi.cz, false);
             for (int nz=-1; nz<=1; ++nz)
                 for (int nx=-1; nx<=1; ++nx)
-                    queueMesh(wi.cx + nx, wi.cz + nz, pcx, pcz);
+                    dirtyAndQueueMesh(wi.cx + nx, wi.cz + nz, false);
         }
     };
 
     for (int t=0; t<GEN_THREADS; ++t) genWorkers.emplace_back(genWorkerMain);
 
     // ============================================================
-    // MESH worker threads
+    // MESH worker threads (snapshot 3x3 once per mesh)
     // ============================================================
     std::atomic<bool> meshStop{false};
     int MESH_THREADS = (int)std::max(1u, std::thread::hardware_concurrency());
     MESH_THREADS = std::min(MESH_THREADS, 8);
 
     std::vector<std::thread> meshWorkers;
+
+    auto snapshotChunkBlocks = [&](int cx, int cz) -> ChunkSnapshot {
+        ChunkSnapshot snap;
+        GpuChunk* ch = pinChunk(cx, cz);
+        if (!ch) return snap;
+
+        if (ch->hasBlocks.load(std::memory_order_acquire) && !ch->inGen.load(std::memory_order_acquire)) {
+            std::lock_guard<std::mutex> bl(ch->blocksMutex);
+            snap.blocks = ch->blocks;
+            snap.ready = (snap.blocks.size() == (size_t)(CHUNK_X * CHUNK_Y * CHUNK_Z));
+        }
+
+        unpinChunk(ch);
+        return snap;
+    };
 
     auto meshWorkerMain = [&]() {
         while (!meshStop.load()) {
@@ -2567,9 +2892,13 @@ int main() {
                 bestMeshDist2.erase(k);
             }
 
+            const bool urgent = (wi.dist2 < 0);
+
             int pcx = gPlayerCX.load();
             int pcz = gPlayerCZ.load();
-            if (std::abs(wi.cx - pcx) > LOAD_RADIUS || std::abs(wi.cz - pcz) > LOAD_RADIUS) continue;
+            if (!urgent) {
+                if (std::abs(wi.cx - pcx) > LOAD_RADIUS || std::abs(wi.cz - pcz) > LOAD_RADIUS) continue;
+            }
 
             GpuChunk* ch = pinChunk(wi.cx, wi.cz);
             if (!ch) continue;
@@ -2585,21 +2914,25 @@ int main() {
                 continue;
             }
 
+            // If not dirty, skip (NOTE: edits set dirtyMesh=true; also dirtyAndQueueMesh marks dirty)
             if (!ch->dirtyMesh.load(std::memory_order_acquire)) {
                 ch->inMesh.store(false, std::memory_order_release);
                 unpinChunk(ch);
                 continue;
             }
 
-            int baseWX = ch->cpos.x * CHUNK_X;
-            int baseWZ = ch->cpos.y * CHUNK_Z;
+            ChunkSnapshot neigh[3][3];
+            for (int dz=-1; dz<=1; ++dz) {
+                for (int dx=-1; dx<=1; ++dx) {
+                    neigh[dx+1][dz+1] = snapshotChunkBlocks(wi.cx + dx, wi.cz + dz);
+                }
+            }
 
-            ChunkMesh2 built = buildChunkMeshGreedy_WorldAware(
-                ch->blocks,
+            ChunkMesh2 built = buildChunkMeshGreedy_3x3Snapshots(
+                neigh,
                 CHUNK_X, CHUNK_Y, CHUNK_Z,
-                ch->origin, BLOCK,
-                baseWX, baseWZ,
-                solidAtWorld
+                ch->origin,
+                BLOCK
             );
 
             {
@@ -2608,12 +2941,18 @@ int main() {
                 ch->stagedReady.store(true, std::memory_order_release);
             }
 
-            // enqueue upload once (dedupe)
+            // enqueue upload (urgent uploads first)
             {
                 uint64_t kk = key64(wi.cx, wi.cz);
                 std::lock_guard<std::mutex> lock(meshDoneMutex);
-                if (meshDoneSet.insert(kk).second) {
-                    meshDoneQ.push_back(MeshDone{wi.cx, wi.cz});
+                if (urgent) {
+                    if (meshDoneUrgentSet.insert(kk).second) {
+                        meshDoneUrgentQ.push_back(MeshDone{wi.cx, wi.cz});
+                    }
+                } else {
+                    if (meshDoneSet.insert(kk).second) {
+                        meshDoneQ.push_back(MeshDone{wi.cx, wi.cz});
+                    }
                 }
             }
 
@@ -2675,14 +3014,21 @@ int main() {
     };
 
     // ============================================================
-    // Prime initial streaming (IMPORTANT: full schedule first time!)
+    // Prime initial streaming
     // ============================================================
     int playerCX = worldToChunkCoord(cameraPos.x, CHUNK_WORLD_X);
     int playerCZ = worldToChunkCoord(cameraPos.z, CHUNK_WORLD_Z);
     gPlayerCX.store(playerCX);
     gPlayerCZ.store(playerCZ);
-
     scheduleStreaming(playerCX, playerCZ);
+
+    // ============================================================
+    // Click + hover
+    // ============================================================
+    bool lmbWasDown = false;
+    bool rmbWasDown = false;
+    const float EDIT_REACH = 10.0f;
+    std::optional<RayHit> hoverHit;
 
     // ============================================================
     // Main loop
@@ -2713,40 +3059,94 @@ int main() {
             glfwGetKey(window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS)
             cameraPos.y -= cameraSpeed * deltaTime;
 
-        // Chunk change (FIXED: old coords captured BEFORE updating)
+        // Chunk change (delta schedule)
         int newCX = worldToChunkCoord(cameraPos.x, CHUNK_WORLD_X);
         int newCZ = worldToChunkCoord(cameraPos.z, CHUNK_WORLD_Z);
         if (newCX != playerCX || newCZ != playerCZ) {
             int oldCX = playerCX;
             int oldCZ = playerCZ;
-
             playerCX = newCX;
             playerCZ = newCZ;
-
             gPlayerCX.store(playerCX);
             gPlayerCZ.store(playerCZ);
-
             scheduleDelta(oldCX, oldCZ, playerCX, playerCZ);
         } else {
             gPlayerCX.store(playerCX);
             gPlayerCZ.store(playerCZ);
         }
 
-        // Upload budget (time-sliced)
-        const double UPLOAD_BUDGET_MS = 2.0;
+        // Hover raycast for highlight + click
+        hoverHit = raycastBlocks(cameraPos, glm::normalize(gCameraFront), EDIT_REACH);
+
+        // Click handling
+        bool lmbDown = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+        bool rmbDown = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
+        bool lmbClick = lmbDown && !lmbWasDown;
+        bool rmbClick = rmbDown && !rmbWasDown;
+        lmbWasDown = lmbDown;
+        rmbWasDown = rmbDown;
+
+        if ((lmbClick || rmbClick) && hoverHit.has_value()) {
+            RayHit hit = *hoverHit;
+
+            if (lmbClick) {
+                setBlockWorld(hit.wx, hit.wy, hit.wz, AIR);
+            }
+
+            if (rmbClick) {
+                int px = hit.wx + hit.nx;
+                int py = hit.wy + hit.ny;
+                int pz = hit.wz + hit.nz;
+
+                if (py >= 0 && py < CHUNK_Y) {
+                    int camX = (int)std::floor(cameraPos.x);
+                    int camY = (int)std::floor(cameraPos.y);
+                    int camZ = (int)std::floor(cameraPos.z);
+
+                    if (!(px == camX && py == camY && pz == camZ)) {
+                        uint8_t s = solidAtWorld(px, py, pz);
+                        if (s == AIR) setBlockWorld(px, py, pz, SOLID);
+                    }
+                }
+            }
+        }
+
+        // ============================================================
+        // Upload budget (urgent uploads first)
+        // - if there are urgent uploads waiting, we use a much larger budget until they drain
+        // ============================================================
+        double budgetMs = UPLOAD_BUDGET_MS_NORMAL;
+        {
+            std::lock_guard<std::mutex> lock(meshDoneMutex);
+            if (!meshDoneUrgentQ.empty()) budgetMs = UPLOAD_BUDGET_MS_URGENT;
+        }
+
         double t0 = glfwGetTime();
         while (true) {
             double elapsedMs = (glfwGetTime() - t0) * 1000.0;
-            if (elapsedMs > UPLOAD_BUDGET_MS) break;
+            if (elapsedMs > budgetMs) break;
 
             MeshDone md;
+            bool isUrgent = false;
+
             {
                 std::lock_guard<std::mutex> lock(meshDoneMutex);
-                if (meshDoneQ.empty()) break;
-                md = meshDoneQ.front();
-                meshDoneQ.pop_front();
-                meshDoneSet.erase(key64(md.cx, md.cz));
+                if (!meshDoneUrgentQ.empty()) {
+                    md = meshDoneUrgentQ.front();
+                    meshDoneUrgentQ.pop_front();
+                    meshDoneUrgentSet.erase(key64(md.cx, md.cz));
+                    isUrgent = true;
+                } else if (!meshDoneQ.empty()) {
+                    md = meshDoneQ.front();
+                    meshDoneQ.pop_front();
+                    meshDoneSet.erase(key64(md.cx, md.cz));
+                    isUrgent = false;
+                } else {
+                    break;
+                }
             }
+
+            (void)isUrgent;
 
             GpuChunk* ch = pinChunk(md.cx, md.cz);
             if (!ch) continue;
@@ -2769,7 +3169,9 @@ int main() {
             unpinChunk(ch);
         }
 
-        // Unload far chunks (only if no one is using them)
+        // ============================================================
+        // Unload far chunks (only if idle)
+        // ============================================================
         std::vector<uint64_t> toErase;
         toErase.reserve(256);
         {
@@ -2790,7 +3192,9 @@ int main() {
             for (uint64_t k : toErase) chunks.erase(k);
         }
 
+        // ============================================================
         // Render
+        // ============================================================
         glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
@@ -2834,11 +3238,23 @@ int main() {
         }
         glBindVertexArray(0);
 
+        // Highlight outline last (on top)
+        if (hoverHit.has_value()) {
+            uploadOutlineBox(hoverHit->wx, hoverHit->wy, hoverHit->wz, BLOCK);
+            glDisable(GL_DEPTH_TEST);
+            glBindVertexArray(outlineVAO);
+            glDrawArrays(GL_LINES, 0, 24);
+            glBindVertexArray(0);
+            glEnable(GL_DEPTH_TEST);
+        }
+
         glfwSwapBuffers(window);
         glfwPollEvents();
     }
 
+    // ============================================================
     // Shutdown workers
+    // ============================================================
     genStop = true;
     genCV.notify_all();
     for (auto& t : genWorkers) t.join();
@@ -2853,6 +3269,9 @@ int main() {
         for (auto& kv : chunks) unloadChunkGL(*kv.second);
         chunks.clear();
     }
+
+    if (outlineVAO) glDeleteVertexArrays(1, &outlineVAO);
+    if (outlineVBO) glDeleteBuffers(1, &outlineVBO);
 
     glDeleteProgram(program);
     glfwDestroyWindow(window);
