@@ -1,3 +1,4 @@
+// Move all includes to the top
 #include "core/Logger.hpp"
 #include "game/AudioSystem.hpp"
 #include "game/Camera.hpp"
@@ -15,13 +16,12 @@
 #include "voxel/Block.hpp"
 #include "voxel/Raycaster.hpp"
 #include "world/World.hpp"
-
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
 #include <glm/ext/matrix_clip_space.hpp>
 #include <glm/ext/scalar_constants.hpp>
 #include <glm/geometric.hpp>
-
+#include <glm/gtc/matrix_transform.hpp>
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -1875,71 +1875,234 @@ int pauseMenuButtonAtCursor(double mx, double my, int width, int height) {
 
 } // namespace
 
+// Camera state variables for mouse callback
+static float gYaw = -90.0f;
+static float gPitch = 0.0f;
+static float gLastX = 400.0f;
+static float gLastY = 300.0f;
+static bool gFirstMouse = true;
+static glm::vec3 gCameraFront = glm::vec3(0.0f, 0.0f, -1.0f);
+
+void mouse_callback(GLFWwindow* window, double xpos, double ypos) {
+    if (gFirstMouse) {
+        gLastX = xpos;
+        gLastY = ypos;
+        gFirstMouse = false;
+    }
+    float xoffset = xpos - gLastX;
+    float yoffset = gLastY - ypos;
+    gLastX = xpos;
+    gLastY = ypos;
+    float sensitivity = 0.1f;
+    xoffset *= sensitivity;
+    yoffset *= sensitivity;
+    gYaw += xoffset;
+    gPitch += yoffset;
+    if (gPitch > 89.0f) gPitch = 89.0f;
+    if (gPitch < -89.0f) gPitch = -89.0f;
+    glm::vec3 direction;
+    direction.x = cos(glm::radians(gYaw)) * cos(glm::radians(gPitch));
+    direction.y = sin(glm::radians(gPitch));
+    direction.z = sin(glm::radians(gYaw)) * cos(glm::radians(gPitch));
+    gCameraFront = glm::normalize(direction);
+}
+
 int main() {
-    // Minimal OpenGL triangle rendering
     if (!glfwInit()) {
         return -1;
     }
+
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+
     GLFWwindow* window = glfwCreateWindow(800, 600, "Triangle", nullptr, nullptr);
     if (!window) {
         glfwTerminate();
         return -1;
     }
+
     glfwMakeContextCurrent(window);
+
     if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
         glfwDestroyWindow(window);
         glfwTerminate();
         return -1;
     }
+
     glViewport(0, 0, 800, 600);
     glfwSetFramebufferSizeCallback(window, onFramebufferResize);
+    glfwSetCursorPosCallback(window, mouse_callback);
+    glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
 
-    // Vertex data
-    float vertices[] = {
-        -0.5f, -0.5f, 0.0f,
-         0.5f, -0.5f, 0.0f,
-         0.0f,  0.5f, 0.0f
+    glEnable(GL_DEPTH_TEST);
+
+    glm::vec3 cameraPos   = glm::vec3(0.0f, 0.0f, 3.0f);
+    glm::vec3 cameraUp    = glm::vec3(0.0f, 1.0f, 0.0f);
+    float cameraSpeed     = 2.5f;
+    float deltaTime       = 0.0f;
+    float lastFrame       = 0.0f;
+
+    // --- FPS tracking ---
+    double fps_prev_time = glfwGetTime();
+    int fps_frames = 0;
+    double fps_value = 0.0;
+
+    // ----------------------------
+    // Cube data
+    // ----------------------------
+    float cubeVertices[] = {
+        -0.5f,-0.5f, 0.5f, 0,1,1,  0.5f,-0.5f, 0.5f, 0,1,1,
+         0.5f, 0.5f, 0.5f, 0,1,1, -0.5f, 0.5f, 0.5f, 0,1,1,
+
+        -0.5f,-0.5f,-0.5f, 1,0,0,  0.5f,-0.5f,-0.5f, 1,0,0,
+         0.5f, 0.5f,-0.5f, 1,0,0, -0.5f, 0.5f,-0.5f, 1,0,0,
+
+        -0.5f,-0.5f,-0.5f, 0,1,0, -0.5f, 0.5f,-0.5f, 0,1,0,
+        -0.5f, 0.5f, 0.5f, 0,1,0, -0.5f,-0.5f, 0.5f, 0,1,0,
+
+         0.5f,-0.5f,-0.5f, 0,0,1,  0.5f, 0.5f,-0.5f, 0,0,1,
+         0.5f, 0.5f, 0.5f, 0,0,1,  0.5f,-0.5f, 0.5f, 0,0,1,
+
+        -0.5f,-0.5f,-0.5f, 1,1,0,  0.5f,-0.5f,-0.5f, 1,1,0,
+         0.5f,-0.5f, 0.5f, 1,1,0, -0.5f,-0.5f, 0.5f, 1,1,0,
+
+        -0.5f, 0.5f,-0.5f, 1,0,1,  0.5f, 0.5f,-0.5f, 1,0,1,
+         0.5f, 0.5f, 0.5f, 1,0,1, -0.5f, 0.5f, 0.5f, 1,0,1
     };
-    unsigned int VBO, VAO;
+
+    unsigned int cubeIndices[] = {
+         0,1,2, 0,2,3,
+         4,5,6, 4,6,7,
+         8,9,10, 8,10,11,
+        12,13,14, 12,14,15,
+        16,17,18, 16,18,19,
+        20,21,22, 20,22,23
+    };
+
+    unsigned int VBO, VAO, EBO;
     glGenVertexArrays(1, &VAO);
     glGenBuffers(1, &VBO);
+    glGenBuffers(1, &EBO);
+
     glBindVertexArray(VAO);
+
     glBindBuffer(GL_ARRAY_BUFFER, VBO);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(cubeVertices), cubeVertices, GL_STATIC_DRAW);
+
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(cubeIndices), cubeIndices, GL_STATIC_DRAW);
+
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6*sizeof(float), (void*)0);
     glEnableVertexAttribArray(0);
 
-    // Simple vertex and fragment shaders
-    const char* vertexShaderSource = "#version 330 core\nlayout(location = 0) in vec3 aPos;\nvoid main() { gl_Position = vec4(aPos, 1.0); }";
-    const char* fragmentShaderSource = "#version 330 core\nout vec4 FragColor;\nvoid main() { FragColor = vec4(1.0, 0.5, 0.2, 1.0); }";
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6*sizeof(float), (void*)(3*sizeof(float)));
+    glEnableVertexAttribArray(1);
+
+    // ----------------------------
+    // Shaders
+    // ----------------------------
+    const char* vertexShaderSource =
+        "#version 330 core\n"
+        "layout(location = 0) in vec3 aPos;\n"
+        "layout(location = 1) in vec3 aColor;\n"
+        "uniform mat4 MVP;\n"
+        "out vec3 vColor;\n"
+        "void main() {\n"
+        "    gl_Position = MVP * vec4(aPos,1.0);\n"
+        "    vColor = aColor;\n"
+        "}";
+
+    const char* fragmentShaderSource =
+        "#version 330 core\n"
+        "in vec3 vColor;\n"
+        "out vec4 FragColor;\n"
+        "void main() {\n"
+        "    FragColor = vec4(vColor,1.0);\n"
+        "}";
+
     unsigned int vertexShader = glCreateShader(GL_VERTEX_SHADER);
     glShaderSource(vertexShader, 1, &vertexShaderSource, nullptr);
     glCompileShader(vertexShader);
+
     unsigned int fragmentShader = glCreateShader(GL_FRAGMENT_SHADER);
     glShaderSource(fragmentShader, 1, &fragmentShaderSource, nullptr);
     glCompileShader(fragmentShader);
+
     unsigned int shaderProgram = glCreateProgram();
     glAttachShader(shaderProgram, vertexShader);
     glAttachShader(shaderProgram, fragmentShader);
     glLinkProgram(shaderProgram);
+
     glDeleteShader(vertexShader);
     glDeleteShader(fragmentShader);
 
-    // Main loop
+    // ============================
+    // Main Loop
+    // ============================
     while (!glfwWindowShouldClose(window)) {
-        glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT);
+
+        float currentFrame = glfwGetTime();
+        deltaTime = currentFrame - lastFrame;
+        lastFrame = currentFrame;
+
+        // Movement
+        if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
+            cameraPos += cameraSpeed * deltaTime * gCameraFront;
+        if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS)
+            cameraPos -= cameraSpeed * deltaTime * gCameraFront;
+        if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS)
+            cameraPos -= glm::normalize(glm::cross(gCameraFront, cameraUp)) * cameraSpeed * deltaTime;
+        if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)
+            cameraPos += glm::normalize(glm::cross(gCameraFront, cameraUp)) * cameraSpeed * deltaTime;
+
+        // Up / down
+        if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS)
+            cameraPos.y += cameraSpeed * deltaTime;
+
+        if (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
+            glfwGetKey(window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS)
+            cameraPos.y -= cameraSpeed * deltaTime;
+
+        glClearColor(0.1f,0.1f,0.1f,1.0f);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
         glUseProgram(shaderProgram);
         glBindVertexArray(VAO);
-        glDrawArrays(GL_TRIANGLES, 0, 3);
+
+        glm::mat4 model = glm::mat4(1.0f);
+        glm::mat4 view  = glm::lookAt(cameraPos, cameraPos + gCameraFront, cameraUp);
+        glm::mat4 proj  = glm::perspective(glm::radians(45.0f), 800.0f/600.0f, 0.1f, 100.0f);
+        glm::mat4 mvp   = proj * view * model;
+
+        int mvpLoc = glGetUniformLocation(shaderProgram, "MVP");
+        glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, &mvp[0][0]);
+
+        glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_INT, 0);
+
+        // FPS in window title
+        double now = glfwGetTime();
+        fps_frames++;
+
+        double elapsed = now - fps_prev_time;
+        if (elapsed >= 0.25) {
+            fps_value = fps_frames / elapsed;
+            fps_prev_time = now;
+            fps_frames = 0;
+
+            char title[128];
+            snprintf(title, sizeof(title), "FPS: %.1f", fps_value);
+            glfwSetWindowTitle(window, title);
+        }
+
         glfwSwapBuffers(window);
         glfwPollEvents();
     }
+
     glDeleteVertexArrays(1, &VAO);
     glDeleteBuffers(1, &VBO);
+    glDeleteBuffers(1, &EBO);
+
     glfwDestroyWindow(window);
     glfwTerminate();
     return 0;
