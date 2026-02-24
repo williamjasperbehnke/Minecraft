@@ -1920,6 +1920,111 @@ static inline float hash_float01(uint32_t x) {
     return (hash_u32(x) & 0x00FFFFFF) / float(0x01000000); // [0,1)
 }
 
+struct ChunkMesh2 {
+    std::vector<float> verts;        // [x y z r g b]...
+    std::vector<uint32_t> indices;   // triangles
+};
+
+static inline int idx3(int x, int y, int z, int sx, int sy, int sz) {
+    return x + sx * (z + sz * y); // (x,z,y) layout; any consistent layout is fine
+}
+
+static inline bool inBounds(int x, int y, int z, int sx, int sy, int sz) {
+    return (x >= 0 && x < sx && y >= 0 && y < sy && z >= 0 && z < sz);
+}
+
+static inline bool isSolid(const std::vector<uint8_t>& blocks, int x, int y, int z, int sx, int sy, int sz) {
+    if (!inBounds(x,y,z,sx,sy,sz)) return false; // outside chunk = air
+    return blocks[idx3(x,y,z,sx,sy,sz)] != 0;
+}
+
+static void pushVertex(std::vector<float>& v, float x, float y, float z, float r, float g, float b) {
+    v.push_back(x); v.push_back(y); v.push_back(z);
+    v.push_back(r); v.push_back(g); v.push_back(b);
+}
+
+// Adds one quad (two triangles) with CCW winding
+static void addQuad(ChunkMesh2& m,
+                    const glm::vec3& a, const glm::vec3& b,
+                    const glm::vec3& c, const glm::vec3& d,
+                    const glm::vec3& color)
+{
+    uint32_t base = (uint32_t)(m.verts.size() / 6);
+    pushVertex(m.verts, a.x,a.y,a.z, color.r,color.g,color.b);
+    pushVertex(m.verts, b.x,b.y,b.z, color.r,color.g,color.b);
+    pushVertex(m.verts, c.x,c.y,c.z, color.r,color.g,color.b);
+    pushVertex(m.verts, d.x,d.y,d.z, color.r,color.g,color.b);
+
+    // (a,b,c) and (a,c,d)
+    m.indices.push_back(base + 0);
+    m.indices.push_back(base + 1);
+    m.indices.push_back(base + 2);
+    m.indices.push_back(base + 0);
+    m.indices.push_back(base + 2);
+    m.indices.push_back(base + 3);
+}
+
+static ChunkMesh2 buildChunkMesh(const std::vector<uint8_t>& blocks,
+                               int sx, int sy, int sz,
+                               const glm::vec3& origin,
+                               float blockSize)
+{
+    ChunkMesh2 mesh;
+    mesh.verts.reserve(6 * 4 * 1024);    // rough; grows as needed
+    mesh.indices.reserve(6 * 6 * 1024);
+
+    // Keep original cube face colors:
+// Front (+Z) = cyan, Back (-Z) = red, Left (-X) = green, Right (+X) = blue,
+// Bottom (-Y) = yellow, Top (+Y) = magenta
+const glm::vec3 colRight   = {0.0f, 0.0f, 1.0f}; // +X
+const glm::vec3 colLeft    = {0.0f, 1.0f, 0.0f}; // -X
+const glm::vec3 colTop     = {1.0f, 0.0f, 1.0f}; // +Y
+const glm::vec3 colBottom  = {1.0f, 1.0f, 0.0f}; // -Y
+const glm::vec3 colFront   = {0.0f, 1.0f, 1.0f}; // +Z
+const glm::vec3 colBack    = {1.0f, 0.0f, 0.0f}; // -Z
+
+    const float s = blockSize;
+    const float hs = 0.5f * s;
+
+    for (int y = 0; y < sy; ++y) {
+        for (int z = 0; z < sz; ++z) {
+            for (int x = 0; x < sx; ++x) {
+
+                if (!isSolid(blocks, x,y,z, sx,sy,sz)) continue;
+
+                glm::vec3 c = origin + glm::vec3(x*s, y*s, z*s);
+
+                // cube corners around center c
+                glm::vec3 p000 = c + glm::vec3(-hs,-hs,-hs);
+                glm::vec3 p001 = c + glm::vec3(-hs,-hs, hs);
+                glm::vec3 p010 = c + glm::vec3(-hs, hs,-hs);
+                glm::vec3 p011 = c + glm::vec3(-hs, hs, hs);
+                glm::vec3 p100 = c + glm::vec3( hs,-hs,-hs);
+                glm::vec3 p101 = c + glm::vec3( hs,-hs, hs);
+                glm::vec3 p110 = c + glm::vec3( hs, hs,-hs);
+                glm::vec3 p111 = c + glm::vec3( hs, hs, hs);
+
+                // Only emit a face if the neighbor in that direction is air.
+
+                // +X
+                if (!isSolid(blocks, x+1,y,z, sx,sy,sz)) addQuad(mesh, p101, p100, p110, p111, colRight);
+                // -X
+                if (!isSolid(blocks, x-1,y,z, sx,sy,sz)) addQuad(mesh, p001, p011, p010, p000, colLeft);
+                // +Y
+                if (!isSolid(blocks, x,y+1,z, sx,sy,sz)) addQuad(mesh, p011, p111, p110, p010, colTop);
+                // -Y
+                if (!isSolid(blocks, x,y-1,z, sx,sy,sz)) addQuad(mesh, p001, p000, p100, p101, colBottom);
+                // +Z
+                if (!isSolid(blocks, x,y,z+1, sx,sy,sz)) addQuad(mesh, p001, p101, p111, p011, colFront);
+                // -Z
+                if (!isSolid(blocks, x,y,z-1, sx,sy,sz)) addQuad(mesh, p000, p010, p110, p100, colBack);
+            }
+        }
+    }
+
+    return mesh;
+}
+
 int main() {
     if (!glfwInit()) {
         return -1;
@@ -2073,6 +2178,65 @@ int main() {
     glAttachShader(cubeProgram, cubeFrag);
     glLinkProgram(cubeProgram);
 
+    // ----------------------------
+    // Chunk data + mesh buffers
+    // ----------------------------
+    const int CHUNK_X = 16;
+    const int CHUNK_Z = 16;
+    const int CHUNK_Y = 128;
+
+    std::vector<uint8_t> blocks(CHUNK_X * CHUNK_Y * CHUNK_Z, 0);
+
+    // Simple terrain fill (edit however you want)
+    auto heightAt = [&](int x, int z) -> int {
+        float fx = float(x) * 0.35f;
+        float fz = float(z) * 0.35f;
+        float h = (sinf(fx) + cosf(fz)) * 6.0f + 20.0f;
+        int hi = (int)h;
+        if (hi < 0) hi = 0;
+        if (hi > CHUNK_Y) hi = CHUNK_Y;
+        return hi;
+    };
+
+    for (int z = 0; z < CHUNK_Z; ++z) {
+        for (int x = 0; x < CHUNK_X; ++x) {
+            int h = heightAt(x, z);
+            for (int y = 0; y < h; ++y) {
+                blocks[idx3(x,y,z, CHUNK_X,CHUNK_Y,CHUNK_Z)] = 1;
+            }
+        }
+    }
+
+    // Place chunk near origin, centered in XZ
+    const float BLOCK = 1.0f;
+    glm::vec3 chunkOrigin(0.0f, 0.0f, 0.0f);
+    chunkOrigin.x -= (CHUNK_X * BLOCK) * 0.5f;
+    chunkOrigin.z -= (CHUNK_Z * BLOCK) * 0.5f;
+
+    // Build mesh ONCE (rebuild when blocks change)
+    ChunkMesh2 chunkMesh2 = buildChunkMesh(blocks, CHUNK_X,CHUNK_Y,CHUNK_Z, chunkOrigin, BLOCK);
+
+    unsigned int chunkVAO=0, chunkVBO=0, chunkEBO=0;
+    glGenVertexArrays(1, &chunkVAO);
+    glGenBuffers(1, &chunkVBO);
+    glGenBuffers(1, &chunkEBO);
+
+    glBindVertexArray(chunkVAO);
+
+    glBindBuffer(GL_ARRAY_BUFFER, chunkVBO);
+    glBufferData(GL_ARRAY_BUFFER, chunkMesh2.verts.size() * sizeof(float), chunkMesh2.verts.data(), GL_STATIC_DRAW);
+
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, chunkEBO);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, chunkMesh2.indices.size() * sizeof(uint32_t), chunkMesh2.indices.data(), GL_STATIC_DRAW);
+
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(0);
+
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)(3 * sizeof(float)));
+    glEnableVertexAttribArray(1);
+
+    glBindVertexArray(0);
+
     glDeleteShader(cubeVert);
     glDeleteShader(cubeFrag);
 
@@ -2223,16 +2387,24 @@ int main() {
         if (fbH <= 0) fbH = mode->height;
 
         // ----------------------------
-        // Draw cubes (chunk)
+        // Draw chunk mesh
         // ----------------------------
         glUseProgram(cubeProgram);
-        glBindVertexArray(VAO);
+        glBindVertexArray(chunkVAO);
 
         glm::vec3 forwardNow = glm::normalize(gCameraFront);
         glm::mat4 view = glm::lookAt(cameraPos, cameraPos + forwardNow, cameraUp);
         glm::mat4 proj = glm::perspective(glm::radians(45.0f), float(fbW) / float(fbH), 0.1f, 2000.0f);
 
+        glm::mat4 modelM(1.0f);
+        glm::mat4 mvp = proj * view * modelM;
+
         int mvpLoc = glGetUniformLocation(cubeProgram, "MVP");
+        glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, &mvp[0][0]);
+
+        glDrawElements(GL_TRIANGLES, (GLsizei)chunkMesh2.indices.size(), GL_UNSIGNED_INT, 0);
+
+        glBindVertexArray(0);
 
         // ---- Chunk parameters ----
         const int CHUNK_X = 16;
@@ -2252,7 +2424,7 @@ int main() {
         // Optional: simple terrain so it’s not 32768 cubes every frame.
         // If you want a solid chunk, set this to CHUNK_Y.
         auto heightAt = [&](int x, int z) -> int {
-            // simple cheap height function (0..31-ish)
+            // simple cheap height function (0..31-fish)
             float fx = float(x) * 0.35f;
             float fz = float(z) * 0.35f;
             float h  = (sinf(fx) + cosf(fz)) * 6.0f + 20.0f;
@@ -2353,8 +2525,11 @@ int main() {
         glUniform4f(uColorLoc, 1.0f, 1.0f, 1.0f, 1.0f);
 
         glDisable(GL_DEPTH_TEST);
+        glEnable(GL_CULL_FACE);
+        glCullFace(GL_BACK);          // Cull back faces
+        glFrontFace(GL_CCW);          // Counter-clockwise vertices are front faces
         glLineWidth(2.0f);
-
+        
         glBindBuffer(GL_ARRAY_BUFFER, lineVBO);
         glBufferData(GL_ARRAY_BUFFER, lineVerts.size() * sizeof(float), lineVerts.data(), GL_DYNAMIC_DRAW);
 
