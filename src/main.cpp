@@ -2223,7 +2223,7 @@ int main() {
         if (fbH <= 0) fbH = mode->height;
 
         // ----------------------------
-        // Draw cubes (wall)
+        // Draw cubes (chunk)
         // ----------------------------
         glUseProgram(cubeProgram);
         glBindVertexArray(VAO);
@@ -2234,44 +2234,46 @@ int main() {
 
         int mvpLoc = glGetUniformLocation(cubeProgram, "MVP");
 
-        // --- Spawn wall ONCE (fixed in world) ---
-        const float SPACING = 2.0f;         // 1 full block gap between cubes
-        const float WALL_DISTANCE = 40.0f;  // how far in front of you it spawns
+        // ---- Chunk parameters ----
+        const int CHUNK_X = 16;
+        const int CHUNK_Z = 16;
+        const int CHUNK_Y = 128;
 
-        if (!wallSpawned) {
-            wallForward = glm::normalize(gCameraFront);
-            wallRight   = glm::normalize(glm::cross(wallForward, cameraUp));
-            wallUp      = glm::normalize(glm::cross(wallRight, wallForward));
+        // cube centers spacing: 1.0 means cubes touch (since your cube is size 1 from -0.5..0.5)
+        const float BLOCK = 1.0f;
 
-            glm::vec3 desiredCenter = cameraPos + wallForward * WALL_DISTANCE;
+        // Put chunk near origin (ground at y=0)
+        glm::vec3 chunkOrigin(0.0f, 0.0f, 0.0f);
 
-            float cx = snap(glm::dot(desiredCenter, wallRight),   SPACING);
-            float cy = snap(glm::dot(desiredCenter, wallUp),      SPACING);
-            float cz = snap(glm::dot(desiredCenter, wallForward), SPACING);
+        // Optional: center chunk around X/Z = 0
+        chunkOrigin.x -= (CHUNK_X * BLOCK) * 0.5f;
+        chunkOrigin.z -= (CHUNK_Z * BLOCK) * 0.5f;
 
-            wallCenter = wallRight * cx + wallUp * cy + wallForward * cz;
-            wallSpawned = true;
-        }
+        // Optional: simple terrain so it’s not 32768 cubes every frame.
+        // If you want a solid chunk, set this to CHUNK_Y.
+        auto heightAt = [&](int x, int z) -> int {
+            // simple cheap height function (0..31-ish)
+            float fx = float(x) * 0.35f;
+            float fz = float(z) * 0.35f;
+            float h  = (sinf(fx) + cosf(fz)) * 6.0f + 20.0f;
+            int hi = (int)h;
+            if (hi < 0) hi = 0;
+            if (hi > CHUNK_Y) hi = CHUNK_Y;
+            return hi;
+        };
 
-        // --- Draw big aligned wall (fixed in world) ---
-        const int WALL_HALF_W = 120;
-        const int WALL_HALF_H = 80;
-        const int THICKNESS   = 12;
+        // Draw blocks
+        for (int z = 0; z < CHUNK_Z; ++z) {
+            for (int x = 0; x < CHUNK_X; ++x) {
 
-        const int DRAW_LIMIT = 600000; // safety brake; increase to hurt
-        int draws = 0;
+                int colHeight = heightAt(x, z); // terrain column height
+                // For a FULL SOLID chunk, do: int colHeight = CHUNK_Y;
 
-        for (int t = 0; t < THICKNESS; ++t) {
-            float depth = float(t) * SPACING;
-
-            for (int y = -WALL_HALF_H; y <= WALL_HALF_H; ++y) {
-                for (int x = -WALL_HALF_W; x <= WALL_HALF_W; ++x) {
+                for (int y = 0; y < colHeight; ++y) {
 
                     glm::vec3 pos =
-                        wallCenter
-                        + wallRight * (float(x) * SPACING)
-                        + wallUp    * (float(y) * SPACING)
-                        - wallForward * depth;
+                        chunkOrigin +
+                        glm::vec3(float(x) * BLOCK, float(y) * BLOCK, float(z) * BLOCK);
 
                     glm::mat4 modelM(1.0f);
                     modelM = glm::translate(modelM, pos);
@@ -2280,8 +2282,6 @@ int main() {
                     glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, &mvp[0][0]);
 
                     glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_INT, 0);
-
-                    if (++draws >= DRAW_LIMIT) goto done_wall;
                 }
             }
         }
