@@ -1875,22 +1875,18 @@ int pauseMenuButtonAtCursor(double mx, double my, int width, int height) {
 
 } // namespace
 
-// Camera state variables for mouse callback
+// ----------------------------
+// Mouse look + camera front
+// ----------------------------
 glm::vec3 gCameraFront(0.0f, 0.0f, -1.0f);
-
-float gYaw   = -90.0f;  // looking toward -Z
-float gPitch =  0.0f;
-
-float gLastX = 0.0f;
-float gLastY = 0.0f;
-bool  gFirstMouse = true;
-
+float gYaw = -90.0f;
+float gPitch = 0.0f;
+float gLastX = 0.0f, gLastY = 0.0f;
+bool gFirstMouse = true;
 float gMouseSensitivity = 0.10f;
 
-static void mouse_callback(GLFWwindow* window, double xpos, double ypos)
+static void mouse_callback(GLFWwindow*, double xpos, double ypos)
 {
-    (void)window;
-
     if (gFirstMouse) {
         gLastX = (float)xpos;
         gLastY = (float)ypos;
@@ -1898,7 +1894,7 @@ static void mouse_callback(GLFWwindow* window, double xpos, double ypos)
     }
 
     float xoffset = (float)xpos - gLastX;
-    float yoffset = gLastY - (float)ypos; // reversed: y goes down on screen
+    float yoffset = gLastY - (float)ypos; // invert y
 
     gLastX = (float)xpos;
     gLastY = (float)ypos;
@@ -1909,7 +1905,6 @@ static void mouse_callback(GLFWwindow* window, double xpos, double ypos)
     gYaw   += xoffset;
     gPitch += yoffset;
 
-    // clamp pitch so you don't flip
     if (gPitch > 89.0f)  gPitch = 89.0f;
     if (gPitch < -89.0f) gPitch = -89.0f;
 
@@ -1920,19 +1915,9 @@ static void mouse_callback(GLFWwindow* window, double xpos, double ypos)
     gCameraFront = glm::normalize(front);
 }
 
-static inline uint32_t hash_u32(uint32_t x) {
-    x ^= x >> 16;
-    x *= 0x7feb352d;
-    x ^= x >> 15;
-    x *= 0x846ca68b;
-    x ^= x >> 16;
-    return x;
-}
-
-static inline float hash_float01(uint32_t x) {
-    return (hash_u32(x) & 0x00FFFFFF) / float(0x01000000); // [0,1)
-}
-
+// ----------------------------
+// Meshing utilities
+// ----------------------------
 struct ChunkMesh2 {
     std::vector<float> verts;        // [x y z r g b]...
     std::vector<uint32_t> indices;   // triangles
@@ -1947,7 +1932,6 @@ static inline void pushVertex(std::vector<float>& v, float x, float y, float z, 
     v.push_back(r); v.push_back(g); v.push_back(b);
 }
 
-// Adds one quad (two triangles) with CCW winding
 static void addQuad(ChunkMesh2& m,
                     const glm::vec3& a, const glm::vec3& b,
                     const glm::vec3& c, const glm::vec3& d,
@@ -1959,7 +1943,6 @@ static void addQuad(ChunkMesh2& m,
     pushVertex(m.verts, c.x,c.y,c.z, color.r,color.g,color.b);
     pushVertex(m.verts, d.x,d.y,d.z, color.r,color.g,color.b);
 
-    // (a,b,c) and (a,c,d)
     m.indices.push_back(base + 0);
     m.indices.push_back(base + 1);
     m.indices.push_back(base + 2);
@@ -1968,16 +1951,22 @@ static void addQuad(ChunkMesh2& m,
     m.indices.push_back(base + 3);
 }
 
-static ChunkMesh2 buildChunkMeshGreedy(const std::vector<uint8_t>& blocks,
-                                      int sx, int sy, int sz,
-                                      const glm::vec3& origin,
-                                      float blockSize)
-{
+// ============================================================
+// WORLD-AWARE greedy mesher
+// - x/z can be outside chunk bounds and will query neighboring chunk blocks
+// - y is world y (same across chunks since you only chunk in XZ here)
+// ============================================================
+static ChunkMesh2 buildChunkMeshGreedy_WorldAware(
+    const std::vector<uint8_t>& /*blocksLocalNotUsed*/,
+    int sx, int sy, int sz,
+    const glm::vec3& origin,
+    float blockSize,
+    int baseWX, int baseWZ, // chunk base world coords in blocks
+    const std::function<uint8_t(int wx, int wy, int wz)>& solidAtWorldFn
+) {
     ChunkMesh2 mesh;
 
-    // Keep your original cube face colors:
-    // Front (+Z) = cyan, Back (-Z) = red, Left (-X) = green, Right (+X) = blue,
-    // Bottom (-Y) = yellow, Top (+Y) = magenta
+    // Face colors preserved
     const glm::vec3 colRight  = {0.0f, 0.0f, 1.0f}; // +X
     const glm::vec3 colLeft   = {0.0f, 1.0f, 0.0f}; // -X
     const glm::vec3 colTop    = {1.0f, 0.0f, 1.0f}; // +Y
@@ -1986,25 +1975,23 @@ static ChunkMesh2 buildChunkMeshGreedy(const std::vector<uint8_t>& blocks,
     const glm::vec3 colBack   = {1.0f, 0.0f, 0.0f}; // -Z
 
     auto faceColor = [&](int axis, int dir) -> glm::vec3 {
-        // axis: 0=X,1=Y,2=Z; dir: +1 or -1
         if (axis == 0) return (dir > 0) ? colRight  : colLeft;
         if (axis == 1) return (dir > 0) ? colTop    : colBottom;
         return          (dir > 0) ? colFront  : colBack;
     };
 
+    // Local (x,y,z) -> World (wx,wy,wz)
     auto solidAt = [&](int x, int y, int z) -> uint8_t {
-        if (x < 0 || x >= sx || y < 0 || y >= sy || z < 0 || z >= sz) return 0;
-        return blocks[idx3(x,y,z,sx,sy,sz)];
+        int wx = baseWX + x;
+        int wz = baseWZ + z;
+        return solidAtWorldFn(wx, y, wz);
     };
 
-    // Greedy meshing sweep over each axis
-    struct MaskCell { uint8_t id = 0; int dir = 0; }; // dir: +1 or -1, id: block id (0=none)
-
+    struct MaskCell { uint8_t id = 0; int dir = 0; }; // dir: +1 or -1
     const int dims[3] = { sx, sy, sz };
 
-    std::vector<MaskCell> mask;
     int maxDim = std::max(sx, std::max(sy, sz));
-    mask.resize(maxDim * maxDim);
+    std::vector<MaskCell> mask(maxDim * maxDim);
 
     auto emitQuad = [&](int axis, int dir, int i,
                         int u0, int v0, int u1, int v1)
@@ -2028,21 +2015,18 @@ static ChunkMesh2 buildChunkMeshGreedy(const std::vector<uint8_t>& blocks,
         glm::vec3 p11 = corner(i,  u1, v1);
         glm::vec3 p01 = corner(i,  u0, v1);
 
-        // Shift so cubes match your old “centered at integer coords” convention
+        // Centered cubes convention (-0.5..0.5)
         glm::vec3 shift(-0.5f * s, -0.5f * s, -0.5f * s);
         glm::vec3 a = p00 + shift;
         glm::vec3 b = p10 + shift;
         glm::vec3 c = p11 + shift;
         glm::vec3 d = p01 + shift;
 
-        glm::vec3 axisVec(0.0f);
-        axisVec[axis] = 1.0f;
+        glm::vec3 axisVec(0.0f); axisVec[axis] = 1.0f;
         glm::vec3 expected = axisVec * float(dir);
 
         glm::vec3 n = glm::cross(b - a, c - a);
-        if (glm::dot(n, expected) < 0.0f) {
-            std::swap(b, d);
-        }
+        if (glm::dot(n, expected) < 0.0f) std::swap(b, d);
 
         addQuad(mesh, a, b, c, d, col);
     };
@@ -2055,8 +2039,10 @@ static ChunkMesh2 buildChunkMeshGreedy(const std::vector<uint8_t>& blocks,
         int U = dims[uAxis];
         int V = dims[vAxis];
 
+        // planes 0..A
         for (int i = 0; i <= A; ++i) {
 
+            // build mask U*V
             for (int v = 0; v < V; ++v) {
                 for (int u = 0; u < U; ++u) {
                     int c0[3] = {0,0,0};
@@ -2080,9 +2066,9 @@ static ChunkMesh2 buildChunkMeshGreedy(const std::vector<uint8_t>& blocks,
                 }
             }
 
+            // greedy merge rectangles
             for (int v = 0; v < V; ++v) {
                 for (int u = 0; u < U; ) {
-
                     MaskCell cur = mask[u + U * v];
                     if (cur.id == 0) { ++u; continue; }
 
@@ -2118,17 +2104,15 @@ static ChunkMesh2 buildChunkMeshGreedy(const std::vector<uint8_t>& blocks,
     return mesh;
 }
 
-// ============================================================
-// NEW: multi-chunk world container (fixed grid)
-// ============================================================
-
+// ----------------------------
+// Chunk GPU container
+// ----------------------------
 struct GpuChunk {
     glm::ivec2 cpos;              // (cx, cz)
     glm::vec3 origin;             // world-space origin
     std::vector<uint8_t> blocks;  // CHUNK_X * CHUNK_Y * CHUNK_Z
     ChunkMesh2 mesh;
-
-    unsigned int vao=0, vbo=0, ebo=0;
+    GLuint vao=0, vbo=0, ebo=0;
 };
 
 static void uploadChunkMesh(GpuChunk& c) {
@@ -2167,7 +2151,6 @@ int main() {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 
-    // Fullscreen
     GLFWmonitor* monitor = glfwGetPrimaryMonitor();
     const GLFWvidmode* mode = glfwGetVideoMode(monitor);
     if (!monitor || !mode) { glfwTerminate(); return -1; }
@@ -2186,10 +2169,6 @@ int main() {
     glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
 
     glViewport(0, 0, mode->width, mode->height);
-    // glfwSetFramebufferSizeCallback(window, onFramebufferResize);
-    // glfwSetCursorPosCallback(window, mouse_callback);
-    glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-
     glEnable(GL_DEPTH_TEST);
 
     glm::vec3 cameraPos = glm::vec3(0.0f, 40.0f, 80.0f);
@@ -2202,9 +2181,9 @@ int main() {
     bool f1WasDown = false;
 
     // ----------------------------
-    // Cube shader program (reused for chunks)
+    // Shader program (same as yours)
     // ----------------------------
-    const char* cubeVS =
+    const char* vs =
         "#version 330 core\n"
         "layout(location = 0) in vec3 aPos;\n"
         "layout(location = 1) in vec3 aColor;\n"
@@ -2212,30 +2191,30 @@ int main() {
         "out vec3 vColor;\n"
         "void main(){ gl_Position = MVP * vec4(aPos,1.0); vColor=aColor; }\n";
 
-    const char* cubeFS =
+    const char* fs =
         "#version 330 core\n"
         "in vec3 vColor;\n"
         "out vec4 FragColor;\n"
         "void main(){ FragColor = vec4(vColor,1.0); }\n";
 
-    unsigned int cubeVert = glCreateShader(GL_VERTEX_SHADER);
-    glShaderSource(cubeVert, 1, &cubeVS, nullptr);
-    glCompileShader(cubeVert);
+    GLuint vert = glCreateShader(GL_VERTEX_SHADER);
+    glShaderSource(vert, 1, &vs, nullptr);
+    glCompileShader(vert);
 
-    unsigned int cubeFrag = glCreateShader(GL_FRAGMENT_SHADER);
-    glShaderSource(cubeFrag, 1, &cubeFS, nullptr);
-    glCompileShader(cubeFrag);
+    GLuint frag = glCreateShader(GL_FRAGMENT_SHADER);
+    glShaderSource(frag, 1, &fs, nullptr);
+    glCompileShader(frag);
 
-    unsigned int cubeProgram = glCreateProgram();
-    glAttachShader(cubeProgram, cubeVert);
-    glAttachShader(cubeProgram, cubeFrag);
-    glLinkProgram(cubeProgram);
+    GLuint program = glCreateProgram();
+    glAttachShader(program, vert);
+    glAttachShader(program, frag);
+    glLinkProgram(program);
 
-    glDeleteShader(cubeVert);
-    glDeleteShader(cubeFrag);
+    glDeleteShader(vert);
+    glDeleteShader(frag);
 
     // ============================================================
-    // NEW: Build a fixed grid of chunks ONCE (no streaming)
+    // World config
     // ============================================================
     const int CHUNK_X = 16;
     const int CHUNK_Z = 16;
@@ -2246,10 +2225,21 @@ int main() {
     const int WORLD_CZ = 16;
 
     std::vector<GpuChunk> worldChunks;
-    worldChunks.reserve(WORLD_CX * WORLD_CZ);
+    worldChunks.resize(WORLD_CX * WORLD_CZ);
 
+    auto chunkIndex = [&](int cx, int cz) -> int { return cx + WORLD_CX * cz; };
+    auto chunkAt = [&](int cx, int cz) -> GpuChunk* {
+        if (cx < 0 || cx >= WORLD_CX || cz < 0 || cz >= WORLD_CZ) return nullptr;
+        return &worldChunks[chunkIndex(cx, cz)];
+    };
+
+    // Center world around origin in XZ
+    const float worldWidth = float(WORLD_CX * CHUNK_X) * BLOCK;
+    const float worldDepth = float(WORLD_CZ * CHUNK_Z) * BLOCK;
+    glm::vec3 worldOrigin(-worldWidth * 0.5f, 0.0f, -worldDepth * 0.5f);
+
+    // Continuous height across chunk borders (uses WORLD block coords)
     auto heightAtWorld = [&](int wx, int wz) -> int {
-        // world-space height function (continuous across chunk borders)
         float fx = float(wx) * 0.08f;
         float fz = float(wz) * 0.08f;
         float h  = (sinf(fx) + cosf(fz)) * 10.0f + 32.0f;
@@ -2259,20 +2249,39 @@ int main() {
         return hi;
     };
 
-    const float worldWidth = float(WORLD_CX * CHUNK_X) * BLOCK;
-    const float worldDepth = float(WORLD_CZ * CHUNK_Z) * BLOCK;
-    glm::vec3 worldOrigin(-worldWidth * 0.5f, 0.0f, -worldDepth * 0.5f);
+    // World accessor for border-culling mesher
+    auto solidAtWorld = [&](int wx, int wy, int wz) -> uint8_t {
+        if (wy < 0 || wy >= CHUNK_Y) return 0;
 
+        if (wx < 0 || wz < 0) return 0;
+        int maxWX = WORLD_CX * CHUNK_X;
+        int maxWZ = WORLD_CZ * CHUNK_Z;
+        if (wx >= maxWX || wz >= maxWZ) return 0;
+
+        int cx = wx / CHUNK_X;
+        int cz = wz / CHUNK_Z;
+
+        int lx = wx - cx * CHUNK_X;
+        int lz = wz - cz * CHUNK_Z;
+
+        GpuChunk* ch = chunkAt(cx, cz);
+        if (!ch) return 0;
+
+        return ch->blocks[idx3(lx, wy, lz, CHUNK_X, CHUNK_Y, CHUNK_Z)];
+    };
+
+    // ============================================================
+    // PASS 1: Generate ALL blocks for ALL chunks
+    // ============================================================
     for (int cz = 0; cz < WORLD_CZ; ++cz) {
         for (int cx = 0; cx < WORLD_CX; ++cx) {
-            GpuChunk ch;
-            ch.cpos = glm::ivec2(cx, cz);
+            GpuChunk& ch = worldChunks[chunkIndex(cx, cz)];
+            ch.cpos = {cx, cz};
             ch.origin = worldOrigin + glm::vec3(
                 float(cx * CHUNK_X) * BLOCK,
                 0.0f,
                 float(cz * CHUNK_Z) * BLOCK
             );
-
             ch.blocks.assign(CHUNK_X * CHUNK_Y * CHUNK_Z, 0);
 
             int baseWX = cx * CHUNK_X;
@@ -2282,18 +2291,34 @@ int main() {
                 for (int x = 0; x < CHUNK_X; ++x) {
                     int wx = baseWX + x;
                     int wz = baseWZ + z;
-
                     int h = heightAtWorld(wx, wz);
                     for (int y = 0; y < h; ++y) {
                         ch.blocks[idx3(x,y,z, CHUNK_X,CHUNK_Y,CHUNK_Z)] = 1;
                     }
                 }
             }
+        }
+    }
 
-            ch.mesh = buildChunkMeshGreedy(ch.blocks, CHUNK_X,CHUNK_Y,CHUNK_Z, ch.origin, BLOCK);
+    // ============================================================
+    // PASS 2: Mesh ALL chunks with WORLD-AWARE solid queries
+    // (this culls faces on chunk borders)
+    // ============================================================
+    for (int cz = 0; cz < WORLD_CZ; ++cz) {
+        for (int cx = 0; cx < WORLD_CX; ++cx) {
+            GpuChunk& ch = worldChunks[chunkIndex(cx, cz)];
+            int baseWX = cx * CHUNK_X;
+            int baseWZ = cz * CHUNK_Z;
+
+            ch.mesh = buildChunkMeshGreedy_WorldAware(
+                ch.blocks,
+                CHUNK_X, CHUNK_Y, CHUNK_Z,
+                ch.origin, BLOCK,
+                baseWX, baseWZ,
+                solidAtWorld
+            );
+
             uploadChunkMesh(ch);
-
-            worldChunks.push_back(std::move(ch));
         }
     }
 
@@ -2301,10 +2326,9 @@ int main() {
     // Main loop
     // ============================================================
     while (!glfwWindowShouldClose(window)) {
-
-        float currentFrame = (float)glfwGetTime();
-        deltaTime = currentFrame - lastFrame;
-        lastFrame = currentFrame;
+        float now = (float)glfwGetTime();
+        deltaTime = now - lastFrame;
+        lastFrame = now;
 
         bool f1Down = glfwGetKey(window, GLFW_KEY_F1) == GLFW_PRESS;
         if (f1Down && !f1WasDown) wireframe = !wireframe;
@@ -2312,7 +2336,7 @@ int main() {
 
         glPolygonMode(GL_FRONT_AND_BACK, wireframe ? GL_LINE : GL_FILL);
 
-        // Movement (assumes gCameraFront exists)
+        // Movement
         if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
             cameraPos += cameraSpeed * deltaTime * gCameraFront;
         if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS)
@@ -2324,7 +2348,6 @@ int main() {
 
         if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS)
             cameraPos.y += cameraSpeed * deltaTime;
-
         if (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
             glfwGetKey(window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS)
             cameraPos.y -= cameraSpeed * deltaTime;
@@ -2337,19 +2360,14 @@ int main() {
         if (fbW <= 0) fbW = mode->width;
         if (fbH <= 0) fbH = mode->height;
 
-        // ----------------------------
-        // Draw ALL chunk meshes
-        // ----------------------------
-        glUseProgram(cubeProgram);
+        // Draw all chunk meshes
+        glUseProgram(program);
 
-        glm::vec3 forwardNow = glm::normalize(gCameraFront);
-        glm::mat4 view = glm::lookAt(cameraPos, cameraPos + forwardNow, cameraUp);
+        glm::mat4 view = glm::lookAt(cameraPos, cameraPos + glm::normalize(gCameraFront), cameraUp);
         glm::mat4 proj = glm::perspective(glm::radians(45.0f), float(fbW) / float(fbH), 0.1f, 5000.0f);
+        glm::mat4 mvp  = proj * view;
 
-        glm::mat4 modelM(1.0f);
-        glm::mat4 mvp = proj * view * modelM;
-
-        int mvpLoc = glGetUniformLocation(cubeProgram, "MVP");
+        GLint mvpLoc = glGetUniformLocation(program, "MVP");
         glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, &mvp[0][0]);
 
         for (auto& ch : worldChunks) {
@@ -2360,21 +2378,20 @@ int main() {
         glBindVertexArray(0);
 
         // IMPORTANT:
-        // Remove/comment out your old per-cube triple loop draw path.
-        // That path draws each cube individually and will not scale.
+        // Do NOT also draw per-cube loops. Only draw chunk meshes.
 
         glfwSwapBuffers(window);
         glfwPollEvents();
     }
 
-    // Cleanup world chunk GPU buffers
+    // Cleanup
     for (auto& ch : worldChunks) {
         if (ch.vao) glDeleteVertexArrays(1, &ch.vao);
         if (ch.vbo) glDeleteBuffers(1, &ch.vbo);
         if (ch.ebo) glDeleteBuffers(1, &ch.ebo);
     }
 
-    glDeleteProgram(cubeProgram);
+    glDeleteProgram(program);
 
     glfwDestroyWindow(window);
     glfwTerminate();
