@@ -2480,6 +2480,8 @@ int main() {
     const float CHUNK_WORLD_X = float(CHUNK_X) * BLOCK;
     const float CHUNK_WORLD_Z = float(CHUNK_Z) * BLOCK;
 
+    const int WORLD_SURFACE_OFFSET = 40; // move terrain UP by this many blocks (more underground)
+
     const int LOAD_RADIUS   = 64;
     const int GEN_RADIUS    = LOAD_RADIUS + 1;
     const int UNLOAD_RADIUS = LOAD_RADIUS + 3;
@@ -2613,55 +2615,75 @@ int main() {
     // - optional: 3-layer (more varied)
     // ============================================================
     auto heightAtWorld = [&](int wx, int wz) -> int {
-    // Global knobs
-    const int   baseSea = 28;     // baseline
-    const int   maxH    = CHUNK_Y - 1;
+    const int maxH = CHUNK_Y - 1;
 
-    // World-space to noise-space
     float X = (float)wx;
     float Z = (float)wz;
 
-    // ----- Domain warp (big features) -----
-    // Warp the sampling coordinates by low-frequency noise so hills don’t look like noise blobs.
-    float warpFreq = 0.010f;
-    float warpAmp  = 35.0f;
+    // ---- Continents (very low freq): huge elevation swings ----
+    float cont = fbm2D(X * 0.0012f, Z * 0.0012f, NOISE_SEED + 1000u, 3, 2.0f, 0.5f);
+    cont = cont * 2.0f - 1.0f;                 // [-1,1]
+    float continentLift = cont * 36.0f;        // BIGGER than before
 
-    float wxo = (fbm2D(X * warpFreq, Z * warpFreq, NOISE_SEED + 500u, 3, 2.0f, 0.5f) * 2.0f - 1.0f) * warpAmp;
-    float wzo = (fbm2D(X * warpFreq, Z * warpFreq, NOISE_SEED + 700u, 3, 2.0f, 0.5f) * 2.0f - 1.0f) * warpAmp;
-
+    // ---- Domain warp (gives “flow” and breaks repetition) ----
+    float w1 = fbm2D(X * 0.0020f, Z * 0.0020f, NOISE_SEED + 1100u, 3, 2.0f, 0.5f);
+    float w2 = fbm2D(X * 0.0020f, Z * 0.0020f, NOISE_SEED + 1200u, 3, 2.0f, 0.5f);
+    float wxo = (w1 * 2.0f - 1.0f) * 120.0f;   // stronger warp
+    float wzo = (w2 * 2.0f - 1.0f) * 120.0f;
     float Xw = X + wxo;
     float Zw = Z + wzo;
 
-    // ----- Biome selector (plains <-> mountains) -----
-    // Low frequency decides how “mountainy” the area is.
-    float biome = fbm2D(X * 0.0035f, Z * 0.0035f, NOISE_SEED + 900u, 2, 2.0f, 0.5f); // [0,1)
-    float mountaininess = smoothstep01(clamp01((biome - 0.35f) / (0.85f - 0.35f)));    // 0 plains .. 1 mountains
+    // ---- Macro hills (low-ish freq but high amplitude) ----
+    float hills = fbm2D(Xw * 0.0048f, Zw * 0.0048f, NOISE_SEED + 2000u, 5, 2.0f, 0.5f);
+    hills = hills * 2.0f - 1.0f;               // [-1,1]
+    float hillLift = hills * 42.0f;            // more relief
 
-    // ----- Base rolling hills (fbm) -----
-    float hills = fbm2D(Xw * 0.020f, Zw * 0.020f, NOISE_SEED + 100u, 5, 2.0f, 0.5f); // [0,1)
-    hills = (hills * 2.0f - 1.0f); // [-1,1)
+    // ---- Mountain mask (where mountains live) ----
+    float mMask = fbm2D(X * 0.00095f, Z * 0.00095f, NOISE_SEED + 2100u, 2, 2.0f, 0.5f);
+    float mountaininess = smoothstep01(clamp01((mMask - 0.30f) / (0.92f - 0.30f))); // 0..1
 
-    // ----- Mountain ridges -----
-    float ridges = ridge2D(Xw * 0.010f, Zw * 0.010f, NOISE_SEED + 200u, 5, 2.0f, 0.5f); // [0,1]
-    ridges = ridges * ridges; // sharpen further
+    // ---- Ridged mountains (sharp ranges) ----
+    float ridges = ridge2D(Xw * 0.0030f, Zw * 0.0030f, NOISE_SEED + 2200u, 6, 2.0f, 0.5f); // [0,1]
+    // Make sharper peaks and steeper sides
+    ridges = std::pow(clamp01(ridges), 5.0f);  // sharper than ridges^3
 
-    // ----- Detail noise -----
-    float detail = (fbm2D(Xw * 0.080f, Zw * 0.080f, NOISE_SEED + 300u, 3, 2.0f, 0.5f) * 2.0f - 1.0f);
+    float mountainLift = ridges * (110.0f * mountaininess); // TALLER mountains
 
-    // ----- Combine into height -----
-    float plainsAmp   = 10.0f;
-    float mountainsAmp= 40.0f;
+    // ---- Cliff boost: turn near-peak ridge areas into sharper walls ----
+    // This creates abrupt changes (cliffs) without 3D noise.
+    float cliffMask = smoothstep01(clamp01((ridges - 0.72f) / (0.92f - 0.72f))); // only high ridge zones
+    float cliffLift = cliffMask * (35.0f * mountaininess);
 
-    float plains = hills * plainsAmp + detail * 2.0f;
-    float mtn    = (hills * 8.0f) + (ridges * mountainsAmp) + detail * 4.0f;
+    // ---- Basins/valleys (deeper cuts) ----
+    float basin = fbm2D(Xw * 0.0038f, Zw * 0.0038f, NOISE_SEED + 2300u, 4, 2.0f, 0.5f);
+    basin = basin * 2.0f - 1.0f;               // [-1,1]
+    float valleyCut = std::max(0.0f, -basin) * 26.0f; // deeper valleys
 
-    float h = (float)baseSea + lerp(plains, mtn, mountaininess);
+    // ---- Mid/detail ----
+    float mid = fbm2D(Xw * 0.020f, Zw * 0.020f, NOISE_SEED + 2400u, 4, 2.0f, 0.5f);
+    mid = mid * 2.0f - 1.0f;
+    float midLift = mid * 8.0f;
 
-    // Optional subtle terraces (looks like erosion/strata). Keep it subtle.
-    h = terrace(h, /*step=*/3.0f, /*strength=*/0.25f * mountaininess);
+    float detail = fbm2D(Xw * 0.090f, Zw * 0.090f, NOISE_SEED + 2500u, 3, 2.0f, 0.5f);
+    detail = detail * 2.0f - 1.0f;
+    float detailLift = detail * 3.0f;
 
-    // Clamp + integer
-    int hi = (int)std::round(h);
+    // ---- Base sea level-ish ----
+    float base = 30.0f;
+
+    float h = base
+            + continentLift
+            + hillLift
+            + mountainLift
+            + cliffLift
+            + midLift
+            + detailLift
+            - valleyCut;
+
+    // Terracing: ONLY mountains, for rocky strata/cliffs feel
+    h = terrace(h, /*step=*/5.0f, /*strength=*/0.45f * mountaininess);
+
+    int hi = (int)std::round(h) + WORLD_SURFACE_OFFSET;
     return clampi(hi, 1, maxH);
 };
 
@@ -2960,30 +2982,47 @@ int main() {
                     int h = heightAtWorld(wx, wz);
                     if (h <= 0) continue;
 
-                    // Use a “slope proxy” so dirt is thicker on flatter ground.
-                    // We sample nearby heights (cheap; still deterministic).
+                    // Slope proxy (still needed for cliffs)
                     int hE = heightAtWorld(wx + 1, wz);
                     int hW = heightAtWorld(wx - 1, wz);
                     int hN = heightAtWorld(wx, wz + 1);
                     int hS = heightAtWorld(wx, wz - 1);
-                    int slope = std::abs(hE - hW) + std::abs(hN - hS); // 0..??
+                    int slope = std::abs(hE - hW) + std::abs(hN - hS);
 
-                    // Dirt thickness: more dirt in plains, less on steep slopes
-                    int dirtThickness = 3 + (slope < 4 ? 2 : 0) + (slope < 2 ? 2 : 0); // 3..7
+                    // Height-based rock exposure (no random patches)
+                    float heightT = clamp01((float)(h - 65) / 50.0f); // higher elevations rockier
 
-                    // Stone depth variation via noise
-                    float stoneVarN = valueNoise2D((float)wx * 0.06f, (float)wz * 0.06f, NOISE_SEED + 1234u);
-                    int stoneTopOffset = (int)std::round((stoneVarN * 2.0f - 1.0f) * 3.0f); // [-3..3]
-                    int stoneTop = std::max(0, h - (dirtThickness + stoneTopOffset));
+                    // Exposed stone only if:
+                    //  - slope is steep (cliffs)
+                    //  - OR very high elevation
+                    bool exposedStone =
+                        (slope >= 8) ||      // steep cliff faces
+                        (heightT > 0.75f);   // very high peaks
+
+                    // Dirt thickness logic
+                    int dirtThickness;
+                    if (slope < 3) dirtThickness = 7;       // flat plains
+                    else if (slope < 6) dirtThickness = 5;
+                    else dirtThickness = 3;                 // steeper = thinner dirt
+
+                    if (exposedStone) dirtThickness = std::max(1, dirtThickness - 2);
+
+                    int stoneTop = std::max(0, h - dirtThickness);
 
                     for (int yy = 0; yy < h; ++yy) {
                         uint8_t id = STONE;
 
-                        if (yy >= h - 1) {
-                            id = GRASS;
-                        } else if (yy >= stoneTop) {
+                        if (yy == h - 1) {
+                            // Surface block
+                            if (exposedStone)
+                                id = STONE;
+                            else
+                                id = GRASS;
+                        }
+                        else if (yy >= stoneTop) {
                             id = DIRT;
-                        } else {
+                        }
+                        else {
                             id = STONE;
                         }
 
