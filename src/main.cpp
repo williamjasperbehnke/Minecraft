@@ -2025,6 +2025,177 @@ const glm::vec3 colBack    = {1.0f, 0.0f, 0.0f}; // -Z
     return mesh;
 }
 
+static ChunkMesh2 buildChunkMeshGreedy(const std::vector<uint8_t>& blocks,
+                                     int sx, int sy, int sz,
+                                     const glm::vec3& origin,
+                                     float blockSize)
+{
+    ChunkMesh2 mesh;
+
+    // Keep your original cube face colors:
+    // Front (+Z) = cyan, Back (-Z) = red, Left (-X) = green, Right (+X) = blue,
+    // Bottom (-Y) = yellow, Top (+Y) = magenta
+    const glm::vec3 colRight  = {0.0f, 0.0f, 1.0f}; // +X
+    const glm::vec3 colLeft   = {0.0f, 1.0f, 0.0f}; // -X
+    const glm::vec3 colTop    = {1.0f, 0.0f, 1.0f}; // +Y
+    const glm::vec3 colBottom = {1.0f, 1.0f, 0.0f}; // -Y
+    const glm::vec3 colFront  = {0.0f, 1.0f, 1.0f}; // +Z
+    const glm::vec3 colBack   = {1.0f, 0.0f, 0.0f}; // -Z
+
+    auto faceColor = [&](int axis, int dir) -> glm::vec3 {
+        // axis: 0=X,1=Y,2=Z; dir: +1 or -1
+        if (axis == 0) return (dir > 0) ? colRight  : colLeft;
+        if (axis == 1) return (dir > 0) ? colTop    : colBottom;
+        return          (dir > 0) ? colFront  : colBack;
+    };
+
+    auto solidAt = [&](int x, int y, int z) -> uint8_t {
+        if (x < 0 || x >= sx || y < 0 || y >= sy || z < 0 || z >= sz) return 0;
+        return blocks[idx3(x,y,z,sx,sy,sz)];
+    };
+
+    // Greedy meshing sweep over each axis
+    // We build faces where A is solid and B (neighbor along axis) is air.
+    struct MaskCell { uint8_t id = 0; int dir = 0; }; // dir: +1 or -1, id: block id (0=none)
+
+    const int dims[3] = { sx, sy, sz };
+
+    // Temporary mask sized to the largest possible 2D slice
+    std::vector<MaskCell> mask;
+    mask.resize(std::max(sx, std::max(sy, sz)) * std::max(sx, std::max(sy, sz)));
+
+    // Helper to emit a quad for a merged rectangle in the mask.
+    // axis: sweep axis, dir: +/-1 normal direction
+    // i: plane coordinate along axis, u0..u1, v0..v1 define rectangle in the other two axes.
+    auto emitQuad = [&](int axis, int dir, int i,
+                        int u0, int v0, int u1, int v1)
+    {
+        const float s = blockSize;
+        const glm::vec3 col = faceColor(axis, dir);
+
+        int uAxis = (axis + 1) % 3;
+        int vAxis = (axis + 2) % 3;
+
+        auto corner = [&](int a, int u, int v) -> glm::vec3 {
+            int c[3] = {0,0,0};
+            c[axis]  = a;
+            c[uAxis] = u;
+            c[vAxis] = v;
+            return origin + glm::vec3(float(c[0]) * s, float(c[1]) * s, float(c[2]) * s);
+        };
+
+        // Corners in a consistent grid order (p00 -> p10 -> p11 -> p01)
+        glm::vec3 p00 = corner(i,  u0, v0);
+        glm::vec3 p10 = corner(i,  u1, v0);
+        glm::vec3 p11 = corner(i,  u1, v1);
+        glm::vec3 p01 = corner(i,  u0, v1);
+
+        // Shift so cubes match your old “centered at integer coords” convention
+        glm::vec3 shift(-0.5f * s, -0.5f * s, -0.5f * s);
+        glm::vec3 a = p00 + shift;
+        glm::vec3 b = p10 + shift;
+        glm::vec3 c = p11 + shift;
+        glm::vec3 d = p01 + shift;
+
+        // Expected outward normal direction
+        glm::vec3 axisVec(0.0f);
+        axisVec[axis] = 1.0f;
+        glm::vec3 expected = axisVec * float(dir);
+
+        // If winding is wrong, flip it (swap b and d)
+        glm::vec3 n = glm::cross(b - a, c - a);
+        if (glm::dot(n, expected) < 0.0f) {
+            std::swap(b, d);
+            // (a,b,c,d) now has opposite winding
+        }
+
+        addQuad(mesh, a, b, c, d, col);
+    };
+
+    // Sweep each axis
+    for (int axis = 0; axis < 3; ++axis) {
+        int uAxis = (axis + 1) % 3;
+        int vAxis = (axis + 2) % 3;
+
+        int A = dims[axis];
+        int U = dims[uAxis];
+        int V = dims[vAxis];
+
+        // We sweep planes from 0..A (note: planes are between voxels)
+        for (int i = 0; i <= A; ++i) {
+
+            // Build mask for this plane: size U*V
+            // Each cell indicates a face exists on this plane and its direction.
+            for (int v = 0; v < V; ++v) {
+                for (int u = 0; u < U; ++u) {
+                    int c0[3] = {0,0,0};
+                    int c1[3] = {0,0,0};
+
+                    // c0 is voxel on "negative" side of plane, c1 is voxel on "positive" side
+                    c0[axis] = i - 1;
+                    c1[axis] = i;
+
+                    c0[uAxis] = u; c0[vAxis] = v;
+                    c1[uAxis] = u; c1[vAxis] = v;
+
+                    uint8_t a = solidAt(c0[0], c0[1], c0[2]);
+                    uint8_t b = solidAt(c1[0], c1[1], c1[2]);
+
+                    MaskCell cell;
+                    if (a && !b) { cell.id = a; cell.dir = +1; }  // face points +axis
+                    else if (!a && b) { cell.id = b; cell.dir = -1; } // face points -axis
+                    else { cell.id = 0; cell.dir = 0; }
+
+                    mask[u + U * v] = cell;
+                }
+            }
+
+            // Greedy merge rectangles in mask
+            for (int v = 0; v < V; ++v) {
+                for (int u = 0; u < U; ) {
+
+                    MaskCell cur = mask[u + U * v];
+                    if (cur.id == 0) { ++u; continue; }
+
+                    // width
+                    int w = 1;
+                    while (u + w < U) {
+                        MaskCell nxt = mask[(u + w) + U * v];
+                        if (nxt.id != cur.id || nxt.dir != cur.dir) break;
+                        ++w;
+                    }
+
+                    // height
+                    int h = 1;
+                    bool done = false;
+                    while (v + h < V && !done) {
+                        for (int k = 0; k < w; ++k) {
+                            MaskCell nxt = mask[(u + k) + U * (v + h)];
+                            if (nxt.id != cur.id || nxt.dir != cur.dir) { done = true; break; }
+                        }
+                        if (!done) ++h;
+                    }
+
+                    // Emit merged quad: [u,u+w] x [v,v+h] on plane i
+                    // Need to map (axis,u,v) to real axes:
+                    // axis plane coordinate is i; u maps to uAxis; v maps to vAxis.
+                    // emitQuad expects (u0,v0,u1,v1) in the (uAxis,vAxis) coordinate system.
+                    emitQuad(axis, cur.dir, i, u, v, u + w, v + h);
+
+                    // Clear mask area
+                    for (int dv = 0; dv < h; ++dv)
+                        for (int du = 0; du < w; ++du)
+                            mask[(u + du) + U * (v + dv)] = {};
+
+                    u += w;
+                }
+            }
+        }
+    }
+
+    return mesh;
+}
+
 int main() {
     if (!glfwInit()) {
         return -1;
@@ -2214,8 +2385,7 @@ int main() {
     chunkOrigin.z -= (CHUNK_Z * BLOCK) * 0.5f;
 
     // Build mesh ONCE (rebuild when blocks change)
-    ChunkMesh2 chunkMesh2 = buildChunkMesh(blocks, CHUNK_X,CHUNK_Y,CHUNK_Z, chunkOrigin, BLOCK);
-
+    ChunkMesh2 chunkMesh2 = buildChunkMeshGreedy(blocks, CHUNK_X,CHUNK_Y,CHUNK_Z, chunkOrigin, BLOCK);
     unsigned int chunkVAO=0, chunkVBO=0, chunkEBO=0;
     glGenVertexArrays(1, &chunkVAO);
     glGenBuffers(1, &chunkVBO);
