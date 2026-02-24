@@ -1882,7 +1882,7 @@ glm::vec3 gCameraFront(0.0f, 0.0f, -1.0f);
 float gYaw = -90.0f;
 float gPitch = 0.0f;
 float gLastX = 0.0f, gLastY = 0.0f;
-bool gFirstMouse = true;
+bool  gFirstMouse = true;
 float gMouseSensitivity = 0.10f;
 
 static void mouse_callback(GLFWwindow*, double xpos, double ypos)
@@ -1923,7 +1923,7 @@ struct ChunkMesh2 {
     std::vector<uint32_t> indices;   // triangles
 };
 
-static inline int idx3(int x, int y, int z, int sx, int sy, int sz) {
+static inline int idx3(int x, int y, int z, int sx, int /*sy*/, int sz) {
     return x + sx * (z + sz * y); // (x,z,y)
 }
 
@@ -1952,9 +1952,11 @@ static void addQuad(ChunkMesh2& m,
 }
 
 // ============================================================
-// WORLD-AWARE greedy mesher
+// WORLD-AWARE greedy mesher (UPDATED)
 // - x/z can be outside chunk bounds and will query neighboring chunk blocks
 // - y is world y (same across chunks since you only chunk in XZ here)
+// - IMPORTANT: if either side of a potential face is UNKNOWN (neighbor chunk not ready),
+//   we DO NOT emit that face. This prevents temporary "walls" on chunk borders.
 // ============================================================
 static ChunkMesh2 buildChunkMeshGreedy_WorldAware(
     const std::vector<uint8_t>& /*blocksLocalNotUsed*/,
@@ -1986,6 +1988,9 @@ static ChunkMesh2 buildChunkMeshGreedy_WorldAware(
         int wz = baseWZ + z;
         return solidAtWorldFn(wx, y, wz);
     };
+
+    // IMPORTANT: we treat 255 as UNKNOWN (neighbor chunk not present/ready)
+    static constexpr uint8_t UNKNOWN = 255;
 
     struct MaskCell { uint8_t id = 0; int dir = 0; }; // dir: +1 or -1
     const int dims[3] = { sx, sy, sz };
@@ -2039,10 +2044,8 @@ static ChunkMesh2 buildChunkMeshGreedy_WorldAware(
         int U = dims[uAxis];
         int V = dims[vAxis];
 
-        // planes 0..A
         for (int i = 0; i <= A; ++i) {
-
-            // build mask U*V
+            // Build mask
             for (int v = 0; v < V; ++v) {
                 for (int u = 0; u < U; ++u) {
                     int c0[3] = {0,0,0};
@@ -2054,19 +2057,25 @@ static ChunkMesh2 buildChunkMeshGreedy_WorldAware(
                     c0[uAxis] = u; c0[vAxis] = v;
                     c1[uAxis] = u; c1[vAxis] = v;
 
-                    uint8_t a = solidAt(c0[0], c0[1], c0[2]);
-                    uint8_t b = solidAt(c1[0], c1[1], c1[2]);
+                    uint8_t aS = solidAt(c0[0], c0[1], c0[2]);
+                    uint8_t bS = solidAt(c1[0], c1[1], c1[2]);
 
                     MaskCell cell;
-                    if (a && !b) { cell.id = a; cell.dir = +1; }
-                    else if (!a && b) { cell.id = b; cell.dir = -1; }
+
+                    // UPDATED: suppress faces if either side is UNKNOWN
+                    if (aS == UNKNOWN || bS == UNKNOWN) {
+                        cell.id = 0;
+                        cell.dir = 0;
+                    }
+                    else if (aS && !bS) { cell.id = aS; cell.dir = +1; }
+                    else if (!aS && bS) { cell.id = bS; cell.dir = -1; }
                     else { cell.id = 0; cell.dir = 0; }
 
                     mask[u + U * v] = cell;
                 }
             }
 
-            // greedy merge rectangles
+            // Greedy merge + emit
             for (int v = 0; v < V; ++v) {
                 for (int u = 0; u < U; ) {
                     MaskCell cur = mask[u + U * v];
@@ -2089,7 +2098,18 @@ static ChunkMesh2 buildChunkMeshGreedy_WorldAware(
                         if (!done) ++h;
                     }
 
-                    emitQuad(axis, cur.dir, i, u, v, u + w, v + h);
+                    bool skip = false;
+
+                    if (axis == 1 && cur.dir == -1) {  // -Y face
+                        int worldY = i - 1;            // block below slice
+                        if (worldY <= 0) {
+                            skip = true;
+                        }
+                    }
+
+                    if (!skip) {
+                        emitQuad(axis, cur.dir, i, u, v, u + w, v + h);
+                    }
 
                     for (int dv = 0; dv < h; ++dv)
                         for (int du = 0; du < w; ++du)
@@ -2113,8 +2133,13 @@ struct GpuChunk {
     std::vector<uint8_t> blocks;  // CHUNK_X * CHUNK_Y * CHUNK_Z
     ChunkMesh2 mesh;
     GLuint vao=0, vbo=0, ebo=0;
+
+    bool hasBlocks = false;
+    bool hasMesh   = false;
+    bool dirtyMesh = true;
 };
 
+// Orphan + subdata to reduce stalls when updating
 static void uploadChunkMesh(GpuChunk& c) {
     if (c.vao == 0) {
         glGenVertexArrays(1, &c.vao);
@@ -2125,16 +2150,14 @@ static void uploadChunkMesh(GpuChunk& c) {
     glBindVertexArray(c.vao);
 
     glBindBuffer(GL_ARRAY_BUFFER, c.vbo);
-    glBufferData(GL_ARRAY_BUFFER,
-                 c.mesh.verts.size() * sizeof(float),
-                 c.mesh.verts.data(),
-                 GL_STATIC_DRAW);
+    GLsizeiptr vbytes = (GLsizeiptr)(c.mesh.verts.size() * sizeof(float));
+    glBufferData(GL_ARRAY_BUFFER, vbytes, nullptr, GL_DYNAMIC_DRAW);
+    if (vbytes > 0) glBufferSubData(GL_ARRAY_BUFFER, 0, vbytes, c.mesh.verts.data());
 
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, c.ebo);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER,
-                 c.mesh.indices.size() * sizeof(uint32_t),
-                 c.mesh.indices.data(),
-                 GL_STATIC_DRAW);
+    GLsizeiptr ibytes = (GLsizeiptr)(c.mesh.indices.size() * sizeof(uint32_t));
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, ibytes, nullptr, GL_DYNAMIC_DRAW);
+    if (ibytes > 0) glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, ibytes, c.mesh.indices.data());
 
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)0);
     glEnableVertexAttribArray(0);
@@ -2142,6 +2165,60 @@ static void uploadChunkMesh(GpuChunk& c) {
     glEnableVertexAttribArray(1);
 
     glBindVertexArray(0);
+}
+
+// ----------------------------
+// Chunk map + queue helpers
+// ----------------------------
+struct ChunkKey {
+    int cx=0, cz=0;
+    bool operator==(const ChunkKey& o) const { return cx==o.cx && cz==o.cz; }
+};
+
+struct ChunkKeyHash {
+    size_t operator()(const ChunkKey& k) const noexcept {
+        uint64_t x = (uint32_t)k.cx;
+        uint64_t z = (uint32_t)k.cz;
+        uint64_t h = (x << 32) ^ z;
+        h ^= (h >> 33);
+        h *= 0xff51afd7ed558ccdULL;
+        h ^= (h >> 33);
+        h *= 0xc4ceb9fe1a85ec53ULL;
+        h ^= (h >> 33);
+        return (size_t)h;
+    }
+};
+
+static inline uint64_t key64(int cx, int cz) {
+    return (uint64_t)(uint32_t)cx << 32 | (uint32_t)cz;
+}
+
+static inline int floorDivInt(int a, int b) {
+    int q = a / b;
+    int r = a % b;
+    if ((r != 0) && ((r > 0) != (b > 0))) q -= 1;
+    return q;
+}
+
+static inline int worldToChunkCoord(float world, float chunkWorldSize) {
+    return (int)std::floor(world / chunkWorldSize);
+}
+
+static inline int clampi(int v, int lo, int hi) { return std::max(lo, std::min(hi, v)); }
+
+static void unloadChunkGL(GpuChunk& ch) {
+    if (ch.vao) glDeleteVertexArrays(1, &ch.vao);
+    if (ch.vbo) glDeleteBuffers(1, &ch.vbo);
+    if (ch.ebo) glDeleteBuffers(1, &ch.ebo);
+    ch.vao = ch.vbo = ch.ebo = 0;
+
+    ch.blocks.clear();
+    ch.mesh.verts.clear();
+    ch.mesh.indices.clear();
+
+    ch.hasBlocks = false;
+    ch.hasMesh   = false;
+    ch.dirtyMesh = true;
 }
 
 int main() {
@@ -2213,30 +2290,66 @@ int main() {
     glDeleteShader(vert);
     glDeleteShader(frag);
 
+    // Cache uniform location (don’t call glGetUniformLocation every frame)
+    GLint mvpLoc = glGetUniformLocation(program, "MVP");
+
     // ============================================================
     // World config
     // ============================================================
-    const int CHUNK_X = 16;
-    const int CHUNK_Z = 16;
-    const int CHUNK_Y = 128;
-    const float BLOCK = 1.0f;
+    const int   CHUNK_X = 16;
+    const int   CHUNK_Z = 16;
+    const int   CHUNK_Y = 128;
+    const float BLOCK   = 1.0f;
 
-    const int WORLD_CX = 16; // increase for more chunks
-    const int WORLD_CZ = 16;
+    const float CHUNK_WORLD_X = float(CHUNK_X) * BLOCK;
+    const float CHUNK_WORLD_Z = float(CHUNK_Z) * BLOCK;
 
-    std::vector<GpuChunk> worldChunks;
-    worldChunks.resize(WORLD_CX * WORLD_CZ);
+    // Streaming distances (in chunk units)
+    const int LOAD_RADIUS   = 16;              // draw + ensure mesh inside this
+    const int GEN_RADIUS    = LOAD_RADIUS+1;  // ensure neighbor blocks exist for border culling
+    const int UNLOAD_RADIUS = LOAD_RADIUS+3;  // hysteresis (prevents thrash)
 
-    auto chunkIndex = [&](int cx, int cz) -> int { return cx + WORLD_CX * cz; };
-    auto chunkAt = [&](int cx, int cz) -> GpuChunk* {
-        if (cx < 0 || cx >= WORLD_CX || cz < 0 || cz >= WORLD_CZ) return nullptr;
-        return &worldChunks[chunkIndex(cx, cz)];
+    // Per-frame streaming work budget (TUNE THESE)
+    const int GEN_PER_FRAME  = 1; // generate blocks for N chunks per frame
+    const int MESH_PER_FRAME = 1; // mesh+upload N chunks per frame
+    // If you still hitch, set these to 1/1, or do time-budgeted loop via glfwGetTime.
+
+    // Chunk storage
+    std::unordered_map<ChunkKey, GpuChunk, ChunkKeyHash> chunks;
+
+    auto getChunkPtr = [&](int cx, int cz) -> GpuChunk* {
+        auto it = chunks.find(ChunkKey{cx, cz});
+        if (it == chunks.end()) return nullptr;
+        return &it->second;
     };
 
-    // Center world around origin in XZ
-    const float worldWidth = float(WORLD_CX * CHUNK_X) * BLOCK;
-    const float worldDepth = float(WORLD_CZ * CHUNK_Z) * BLOCK;
-    glm::vec3 worldOrigin(-worldWidth * 0.5f, 0.0f, -worldDepth * 0.5f);
+    auto createChunkIfMissing = [&](int cx, int cz) -> GpuChunk& {
+        ChunkKey k{cx, cz};
+        auto it = chunks.find(k);
+        if (it == chunks.end()) {
+            GpuChunk c;
+            c.cpos = {cx, cz};
+            c.origin = glm::vec3(float(cx * CHUNK_X) * BLOCK, 0.0f, float(cz * CHUNK_Z) * BLOCK);
+            auto [it2, _] = chunks.emplace(k, std::move(c));
+            return it2->second;
+        }
+        return it->second;
+    };
+
+    // Queues (to time-slice work)
+    std::deque<ChunkKey> genQueue;
+    std::deque<ChunkKey> meshQueue;
+    std::unordered_set<uint64_t> genQueued;
+    std::unordered_set<uint64_t> meshQueued;
+
+    auto queueGen = [&](int cx, int cz){
+        uint64_t k = key64(cx, cz);
+        if (genQueued.insert(k).second) genQueue.push_back({cx,cz});
+    };
+    auto queueMesh = [&](int cx, int cz){
+        uint64_t k = key64(cx, cz);
+        if (meshQueued.insert(k).second) meshQueue.push_back({cx,cz});
+    };
 
     // Continuous height across chunk borders (uses WORLD block coords)
     auto heightAtWorld = [&](int wx, int wz) -> int {
@@ -2244,83 +2357,150 @@ int main() {
         float fz = float(wz) * 0.08f;
         float h  = (sinf(fx) + cosf(fz)) * 10.0f + 32.0f;
         int hi = (int)h;
-        if (hi < 0) hi = 0;
-        if (hi > CHUNK_Y) hi = CHUNK_Y;
-        return hi;
+        return clampi(hi, 0, CHUNK_Y);
     };
 
-    // World accessor for border-culling mesher
-    auto solidAtWorld = [&](int wx, int wy, int wz) -> uint8_t {
-        if (wy < 0 || wy >= CHUNK_Y) return 0;
+static constexpr uint8_t AIR     = 0;
+static constexpr uint8_t SOLID   = 1;
+static constexpr uint8_t UNKNOWN = 255;
 
-        if (wx < 0 || wz < 0) return 0;
-        int maxWX = WORLD_CX * CHUNK_X;
-        int maxWZ = WORLD_CZ * CHUNK_Z;
-        if (wx >= maxWX || wz >= maxWZ) return 0;
+auto solidAtWorld = [&](int wx, int wy, int wz) -> uint8_t {
+    if (wy < 0 || wy >= CHUNK_Y) return AIR;
 
-        int cx = wx / CHUNK_X;
-        int cz = wz / CHUNK_Z;
+    int cx = floorDivInt(wx, CHUNK_X);
+    int cz = floorDivInt(wz, CHUNK_Z);
 
-        int lx = wx - cx * CHUNK_X;
-        int lz = wz - cz * CHUNK_Z;
+    int lx = wx - cx * CHUNK_X;
+    int lz = wz - cz * CHUNK_Z;
+    if (lx < 0) lx += CHUNK_X;
+    if (lz < 0) lz += CHUNK_Z;
 
-        GpuChunk* ch = chunkAt(cx, cz);
-        if (!ch) return 0;
+    GpuChunk* ch = getChunkPtr(cx, cz);
+    if (!ch || !ch->hasBlocks) return UNKNOWN; // <-- key change
 
-        return ch->blocks[idx3(lx, wy, lz, CHUNK_X, CHUNK_Y, CHUNK_Z)];
-    };
+    return ch->blocks[idx3(lx, wy, lz, CHUNK_X, CHUNK_Y, CHUNK_Z)] ? SOLID : AIR;
+};
 
-    // ============================================================
-    // PASS 1: Generate ALL blocks for ALL chunks
-    // ============================================================
-    for (int cz = 0; cz < WORLD_CZ; ++cz) {
-        for (int cx = 0; cx < WORLD_CX; ++cx) {
-            GpuChunk& ch = worldChunks[chunkIndex(cx, cz)];
-            ch.cpos = {cx, cz};
-            ch.origin = worldOrigin + glm::vec3(
-                float(cx * CHUNK_X) * BLOCK,
-                0.0f,
-                float(cz * CHUNK_Z) * BLOCK
-            );
-            ch.blocks.assign(CHUNK_X * CHUNK_Y * CHUNK_Z, 0);
+    auto ensureBlocks = [&](GpuChunk& ch) {
+        if (ch.hasBlocks) return;
 
-            int baseWX = cx * CHUNK_X;
-            int baseWZ = cz * CHUNK_Z;
+        ch.blocks.assign(CHUNK_X * CHUNK_Y * CHUNK_Z, 0);
 
-            for (int z = 0; z < CHUNK_Z; ++z) {
-                for (int x = 0; x < CHUNK_X; ++x) {
-                    int wx = baseWX + x;
-                    int wz = baseWZ + z;
-                    int h = heightAtWorld(wx, wz);
-                    for (int y = 0; y < h; ++y) {
-                        ch.blocks[idx3(x,y,z, CHUNK_X,CHUNK_Y,CHUNK_Z)] = 1;
-                    }
+        int baseWX = ch.cpos.x * CHUNK_X;
+        int baseWZ = ch.cpos.y * CHUNK_Z;
+
+        for (int z = 0; z < CHUNK_Z; ++z) {
+            for (int x = 0; x < CHUNK_X; ++x) {
+                int wx = baseWX + x;
+                int wz = baseWZ + z;
+                int h  = heightAtWorld(wx, wz);
+                for (int y = 0; y < h; ++y) {
+                    ch.blocks[idx3(x, y, z, CHUNK_X, CHUNK_Y, CHUNK_Z)] = 1;
                 }
             }
         }
-    }
 
-    // ============================================================
-    // PASS 2: Mesh ALL chunks with WORLD-AWARE solid queries
-    // (this culls faces on chunk borders)
-    // ============================================================
-    for (int cz = 0; cz < WORLD_CZ; ++cz) {
-        for (int cx = 0; cx < WORLD_CX; ++cx) {
-            GpuChunk& ch = worldChunks[chunkIndex(cx, cz)];
-            int baseWX = cx * CHUNK_X;
-            int baseWZ = cz * CHUNK_Z;
+        ch.hasBlocks = true;
+        ch.dirtyMesh = true;
+    };
 
-            ch.mesh = buildChunkMeshGreedy_WorldAware(
-                ch.blocks,
-                CHUNK_X, CHUNK_Y, CHUNK_Z,
-                ch.origin, BLOCK,
-                baseWX, baseWZ,
-                solidAtWorld
-            );
+    auto rebuildMeshIfDirty = [&](GpuChunk& ch) {
+        if (!ch.hasBlocks) return;
+        if (!ch.dirtyMesh) return;
 
-            uploadChunkMesh(ch);
+        int baseWX = ch.cpos.x * CHUNK_X;
+        int baseWZ = ch.cpos.y * CHUNK_Z;
+
+        ch.mesh = buildChunkMeshGreedy_WorldAware(
+            ch.blocks,
+            CHUNK_X, CHUNK_Y, CHUNK_Z,
+            ch.origin, BLOCK,
+            baseWX, baseWZ,
+            solidAtWorld
+        );
+
+        uploadChunkMesh(ch);
+        ch.hasMesh = true;
+        ch.dirtyMesh = false;
+    };
+
+    auto scheduleStreaming = [&](int pcx, int pcz){
+        // Schedule GEN in "rings" (near-first)
+        for (int r=0; r<=GEN_RADIUS; ++r) {
+            for (int dz=-r; dz<=r; ++dz) {
+                for (int dx=-r; dx<=r; ++dx) {
+                    if (std::max(std::abs(dx), std::abs(dz)) != r) continue;
+                    queueGen(pcx + dx, pcz + dz);
+                }
+            }
         }
-    }
+
+        // Schedule mesh in rings (near-first)
+        for (int r=0; r<=LOAD_RADIUS; ++r) {
+            for (int dz=-r; dz<=r; ++dz) {
+                for (int dx=-r; dx<=r; ++dx) {
+                    if (std::max(std::abs(dx), std::abs(dz)) != r) continue;
+                    queueMesh(pcx + dx, pcz + dz);
+                }
+            }
+        }
+    };
+
+    auto processStreamingBudget = [&](int pcx, int pcz){
+        // Generate a few chunks per frame
+        for (int i=0; i<GEN_PER_FRAME && !genQueue.empty(); ++i) {
+            ChunkKey ck = genQueue.front(); genQueue.pop_front();
+            genQueued.erase(key64(ck.cx, ck.cz));
+
+            // If it is now far away, skip it (player moved)
+            if (std::abs(ck.cx - pcx) > GEN_RADIUS || std::abs(ck.cz - pcz) > GEN_RADIUS) continue;
+
+            GpuChunk& ch = createChunkIfMissing(ck.cx, ck.cz);
+            ensureBlocks(ch);
+
+            // Since this chunk now exists, re-mesh itself + neighbors eventually (border faces)
+            for (int nz=-1; nz<=1; ++nz)
+                for (int nx=-1; nx<=1; ++nx)
+                    queueMesh(ck.cx + nx, ck.cz + nz);
+        }
+
+        // Mesh+upload a few chunks per frame
+        for (int i=0; i<MESH_PER_FRAME && !meshQueue.empty(); ++i) {
+            ChunkKey ck = meshQueue.front(); meshQueue.pop_front();
+            meshQueued.erase(key64(ck.cx, ck.cz));
+
+            if (std::abs(ck.cx - pcx) > LOAD_RADIUS || std::abs(ck.cz - pcz) > LOAD_RADIUS) continue;
+
+            if (GpuChunk* ch = getChunkPtr(ck.cx, ck.cz)) {
+                if (ch->hasBlocks) {
+                    ch->dirtyMesh = true;
+                    rebuildMeshIfDirty(*ch);
+                }
+            }
+        }
+
+        // Unload far chunks (do it after doing a tiny amount of work so we don't churn)
+        std::vector<ChunkKey> toErase;
+        toErase.reserve(128);
+
+        for (auto& kv : chunks) {
+            const ChunkKey& k = kv.first;
+            if (std::abs(k.cx - pcx) > UNLOAD_RADIUS || std::abs(k.cz - pcz) > UNLOAD_RADIUS) {
+                unloadChunkGL(kv.second);
+                toErase.push_back(k);
+
+                // remove from queued sets if present (optional, keeps sets smaller)
+                genQueued.erase(key64(k.cx,k.cz));
+                meshQueued.erase(key64(k.cx,k.cz));
+            }
+        }
+        for (auto& k : toErase) chunks.erase(k);
+    };
+
+    // Prime initial streaming
+    int playerCX = worldToChunkCoord(cameraPos.x, CHUNK_WORLD_X);
+    int playerCZ = worldToChunkCoord(cameraPos.z, CHUNK_WORLD_Z);
+    scheduleStreaming(playerCX, playerCZ);
 
     // ============================================================
     // Main loop
@@ -2352,6 +2532,18 @@ int main() {
             glfwGetKey(window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS)
             cameraPos.y -= cameraSpeed * deltaTime;
 
+        // Detect chunk change and schedule (cheap)
+        int newCX = worldToChunkCoord(cameraPos.x, CHUNK_WORLD_X);
+        int newCZ = worldToChunkCoord(cameraPos.z, CHUNK_WORLD_Z);
+        if (newCX != playerCX || newCZ != playerCZ) {
+            playerCX = newCX;
+            playerCZ = newCZ;
+            scheduleStreaming(playerCX, playerCZ);
+        }
+
+        // Process a tiny bit of chunk work every frame (this is the hitch fix)
+        processStreamingBudget(playerCX, playerCZ);
+
         glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
@@ -2360,39 +2552,37 @@ int main() {
         if (fbW <= 0) fbW = mode->width;
         if (fbH <= 0) fbH = mode->height;
 
-        // Draw all chunk meshes
+        // Draw loaded chunk meshes
         glUseProgram(program);
 
         glm::mat4 view = glm::lookAt(cameraPos, cameraPos + glm::normalize(gCameraFront), cameraUp);
         glm::mat4 proj = glm::perspective(glm::radians(45.0f), float(fbW) / float(fbH), 0.1f, 5000.0f);
         glm::mat4 mvp  = proj * view;
-
-        GLint mvpLoc = glGetUniformLocation(program, "MVP");
         glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, &mvp[0][0]);
 
-        for (auto& ch : worldChunks) {
-            if (ch.mesh.indices.empty()) continue;
+        for (auto& kv : chunks) {
+            GpuChunk& ch = kv.second;
+
+            // Only draw within load radius to keep draw calls stable
+            if (std::abs(ch.cpos.x - playerCX) > LOAD_RADIUS || std::abs(ch.cpos.y - playerCZ) > LOAD_RADIUS)
+                continue;
+
+            if (!ch.hasMesh || ch.vao == 0 || ch.mesh.indices.empty()) continue;
+
             glBindVertexArray(ch.vao);
             glDrawElements(GL_TRIANGLES, (GLsizei)ch.mesh.indices.size(), GL_UNSIGNED_INT, 0);
         }
         glBindVertexArray(0);
-
-        // IMPORTANT:
-        // Do NOT also draw per-cube loops. Only draw chunk meshes.
 
         glfwSwapBuffers(window);
         glfwPollEvents();
     }
 
     // Cleanup
-    for (auto& ch : worldChunks) {
-        if (ch.vao) glDeleteVertexArrays(1, &ch.vao);
-        if (ch.vbo) glDeleteBuffers(1, &ch.vbo);
-        if (ch.ebo) glDeleteBuffers(1, &ch.ebo);
-    }
+    for (auto& kv : chunks) unloadChunkGL(kv.second);
+    chunks.clear();
 
     glDeleteProgram(program);
-
     glfwDestroyWindow(window);
     glfwTerminate();
     return 0;
