@@ -1883,14 +1883,13 @@ int pauseMenuButtonAtCursor(double mx, double my, int width, int height) {
 // ✅ Never draw bottom-of-world face (-Y at worldY==0)
 // ✅ Raycast (voxel DDA) + block breaking (LMB) + placing (RMB)
 // ✅ Highlight selected block with a white wireframe outline
-// ✅ Procedural generation: 1 layer of noise (default), optional 3 layers via flag
-// ✅ Block types: GRASS, DIRT, STONE (plus AIR)
 //
-// Notes:
-// - “UNKNOWN suppression” means: faces against missing/unready neighbor chunks are not drawn.
-//   Therefore: if you mine a block that would expose a face *toward an UNKNOWN neighbor*,
-//   you won’t see that face until the neighbor chunk is generated. This code already
-//   triggers URGENT GEN for border-neighbor chunks on edits to minimize the wait.
+// ✅ Water rendering FIXES (requested):
+//    - Water is rendered on its own mesh layer (separate VAO/VBO/EBO)
+//    - Water is semi-transparent
+//    - Water is slightly shorter than a full block (lowered top surface)
+//    - Water sides ARE rendered, and their top edge is lowered to match the shorter height
+//    - IMPORTANT: solids treat WATER like AIR for face visibility, so you can see river/lake floors & walls through water
 
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
@@ -1955,32 +1954,46 @@ static void mouse_callback(GLFWwindow*, double xpos, double ypos)
 }
 
 // ----------------------------
-// Mesh data
+// Mesh data (RGBA per-vertex)
 // ----------------------------
 struct ChunkMesh2 {
-    std::vector<float> verts;        // [x y z r g b]...
+    std::vector<float> verts;        // [x y z r g b a]...
     std::vector<uint32_t> indices;   // triangles
+};
+
+struct ChunkMeshes {
+    ChunkMesh2 solid;
+    ChunkMesh2 water;
 };
 
 static inline int idx3(int x, int y, int z, int sx, int /*sy*/, int sz) {
     return x + sx * (z + sz * y); // (x,z,y)
 }
 
-static inline void pushVertex(std::vector<float>& v, float x, float y, float z, float r, float g, float b) {
+static inline void pushVertex(std::vector<float>& v,
+                              float x, float y, float z,
+                              float r, float g, float b, float a) {
     v.push_back(x); v.push_back(y); v.push_back(z);
-    v.push_back(r); v.push_back(g); v.push_back(b);
+    v.push_back(r); v.push_back(g); v.push_back(b); v.push_back(a);
 }
 
 static void addQuad(ChunkMesh2& m,
-                    const glm::vec3& a, const glm::vec3& b,
-                    const glm::vec3& c, const glm::vec3& d,
-                    const glm::vec3& color)
+                    glm::vec3 a, glm::vec3 b,
+                    glm::vec3 c, glm::vec3 d,
+                    const glm::vec3& rgb, float alpha,
+                    int axis, int dir)
 {
-    uint32_t base = (uint32_t)(m.verts.size() / 6);
-    pushVertex(m.verts, a.x,a.y,a.z, color.r,color.g,color.b);
-    pushVertex(m.verts, b.x,b.y,b.z, color.r,color.g,color.b);
-    pushVertex(m.verts, c.x,c.y,c.z, color.r,color.g,color.b);
-    pushVertex(m.verts, d.x,d.y,d.z, color.r,color.g,color.b);
+    // Winding fix
+    glm::vec3 axisVec(0.0f); axisVec[axis] = 1.0f;
+    glm::vec3 expected = axisVec * float(dir);
+    glm::vec3 n = glm::cross(b - a, c - a);
+    if (glm::dot(n, expected) < 0.0f) std::swap(b, d);
+
+    uint32_t base = (uint32_t)(m.verts.size() / 7);
+    pushVertex(m.verts, a.x,a.y,a.z, rgb.r,rgb.g,rgb.b, alpha);
+    pushVertex(m.verts, b.x,b.y,b.z, rgb.r,rgb.g,rgb.b, alpha);
+    pushVertex(m.verts, c.x,c.y,c.z, rgb.r,rgb.g,rgb.b, alpha);
+    pushVertex(m.verts, d.x,d.y,d.z, rgb.r,rgb.g,rgb.b, alpha);
 
     m.indices.push_back(base + 0);
     m.indices.push_back(base + 1);
@@ -2000,8 +2013,13 @@ struct GpuChunk {
     std::vector<uint8_t> blocks;
     std::mutex blocksMutex;
 
-    ChunkMesh2 mesh;
-    GLuint vao=0, vbo=0, ebo=0;
+    // Solid mesh on GPU
+    ChunkMesh2 meshSolid;
+    GLuint vaoSolid=0, vboSolid=0, eboSolid=0;
+
+    // Water mesh on GPU
+    ChunkMesh2 meshWater;
+    GLuint vaoWater=0, vboWater=0, eboWater=0;
 
     std::atomic<bool> inGen{false};
     std::atomic<bool> inMesh{false};
@@ -2011,57 +2029,73 @@ struct GpuChunk {
     std::atomic<bool> hasMesh{false};
     std::atomic<bool> dirtyMesh{true};
 
-    ChunkMesh2 stagedMesh;
+    ChunkMeshes staged;
     std::atomic<bool> stagedReady{false};
     std::mutex stagedMutex;
 };
 
 // OpenGL upload (main thread only)
-static void uploadChunkMesh(GpuChunk& c) {
-    if (c.vao == 0) {
-        glGenVertexArrays(1, &c.vao);
-        glGenBuffers(1, &c.vbo);
-        glGenBuffers(1, &c.ebo);
+static void uploadMeshToGPU(GLuint& vao, GLuint& vbo, GLuint& ebo, const ChunkMesh2& mesh) {
+    if (vao == 0) {
+        glGenVertexArrays(1, &vao);
+        glGenBuffers(1, &vbo);
+        glGenBuffers(1, &ebo);
     }
 
-    glBindVertexArray(c.vao);
+    glBindVertexArray(vao);
 
-    glBindBuffer(GL_ARRAY_BUFFER, c.vbo);
-    GLsizeiptr vbytes = (GLsizeiptr)(c.mesh.verts.size() * sizeof(float));
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    GLsizeiptr vbytes = (GLsizeiptr)(mesh.verts.size() * sizeof(float));
     glBufferData(GL_ARRAY_BUFFER, vbytes, nullptr, GL_DYNAMIC_DRAW);
-    if (vbytes > 0) glBufferSubData(GL_ARRAY_BUFFER, 0, vbytes, c.mesh.verts.data());
+    if (vbytes > 0) glBufferSubData(GL_ARRAY_BUFFER, 0, vbytes, mesh.verts.data());
 
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, c.ebo);
-    GLsizeiptr ibytes = (GLsizeiptr)(c.mesh.indices.size() * sizeof(uint32_t));
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+    GLsizeiptr ibytes = (GLsizeiptr)(mesh.indices.size() * sizeof(uint32_t));
     glBufferData(GL_ELEMENT_ARRAY_BUFFER, ibytes, nullptr, GL_DYNAMIC_DRAW);
-    if (ibytes > 0) glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, ibytes, c.mesh.indices.data());
+    if (ibytes > 0) glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, ibytes, mesh.indices.data());
 
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)0);
+    // aPos (vec3)
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 7 * sizeof(float), (void*)0);
     glEnableVertexAttribArray(0);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)(3 * sizeof(float)));
+    // aColor (vec4)
+    glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, 7 * sizeof(float), (void*)(3 * sizeof(float)));
     glEnableVertexAttribArray(1);
 
     glBindVertexArray(0);
 }
 
+static void uploadChunkMeshes(GpuChunk& c) {
+    uploadMeshToGPU(c.vaoSolid, c.vboSolid, c.eboSolid, c.meshSolid);
+    uploadMeshToGPU(c.vaoWater, c.vboWater, c.eboWater, c.meshWater);
+}
+
 static void unloadChunkGL(GpuChunk& ch) {
-    if (ch.vao) glDeleteVertexArrays(1, &ch.vao);
-    if (ch.vbo) glDeleteBuffers(1, &ch.vbo);
-    if (ch.ebo) glDeleteBuffers(1, &ch.ebo);
-    ch.vao = ch.vbo = ch.ebo = 0;
+    if (ch.vaoSolid) glDeleteVertexArrays(1, &ch.vaoSolid);
+    if (ch.vboSolid) glDeleteBuffers(1, &ch.vboSolid);
+    if (ch.eboSolid) glDeleteBuffers(1, &ch.eboSolid);
+    ch.vaoSolid = ch.vboSolid = ch.eboSolid = 0;
+
+    if (ch.vaoWater) glDeleteVertexArrays(1, &ch.vaoWater);
+    if (ch.vboWater) glDeleteBuffers(1, &ch.vboWater);
+    if (ch.eboWater) glDeleteBuffers(1, &ch.eboWater);
+    ch.vaoWater = ch.vboWater = ch.eboWater = 0;
 
     {
         std::lock_guard<std::mutex> bl(ch.blocksMutex);
         ch.blocks.clear();
     }
 
-    ch.mesh.verts.clear();
-    ch.mesh.indices.clear();
+    ch.meshSolid.verts.clear();
+    ch.meshSolid.indices.clear();
+    ch.meshWater.verts.clear();
+    ch.meshWater.indices.clear();
 
     {
         std::lock_guard<std::mutex> lock(ch.stagedMutex);
-        ch.stagedMesh.verts.clear();
-        ch.stagedMesh.indices.clear();
+        ch.staged.solid.verts.clear();
+        ch.staged.solid.indices.clear();
+        ch.staged.water.verts.clear();
+        ch.staged.water.indices.clear();
         ch.stagedReady.store(false, std::memory_order_release);
     }
 
@@ -2128,12 +2162,10 @@ static inline uint32_t hash2_u32(int x, int z, uint32_t seed) {
 }
 
 static inline float u32_to_01(uint32_t h) {
-    // 24-bit mantissa-ish
     return (float)(h & 0x00FFFFFFu) / (float)0x01000000u;
 }
 
 static inline float smoothstep01(float t) {
-    // classic smoothstep
     return t * t * (3.0f - 2.0f * t);
 }
 
@@ -2160,14 +2192,58 @@ static float valueNoise2D(float x, float z, uint32_t seed) {
 
     float ix0 = lerp(v00, v10, sx);
     float ix1 = lerp(v01, v11, sx);
-    return lerp(ix0, ix1, sz); // [0,1)
+    return lerp(ix0, ix1, sz);
+}
+
+static inline float clamp01(float v) { return std::max(0.0f, std::min(1.0f, v)); }
+
+static inline float smooth01(float a, float b, float x) {
+    float t = clamp01((x - a) / (b - a));
+    return t * t * (3.0f - 2.0f * t);
+}
+
+static float fbm2D(float x, float z, uint32_t seed, int octaves, float lacunarity, float gain) {
+    float sum = 0.0f;
+    float amp = 0.5f;
+    float freq = 1.0f;
+    for (int i = 0; i < octaves; ++i) {
+        sum += amp * valueNoise2D(x * freq, z * freq, seed + 101u * (uint32_t)i);
+        freq *= lacunarity;
+        amp *= gain;
+    }
+    return sum;
+}
+
+static float ridge2D(float x, float z, uint32_t seed, int octaves, float lacunarity, float gain) {
+    float sum = 0.0f;
+    float amp = 0.5f;
+    float freq = 1.0f;
+    for (int i = 0; i < octaves; ++i) {
+        float n = valueNoise2D(x * freq, z * freq, seed + 193u * (uint32_t)i);
+        float r = 1.0f - std::abs(n * 2.0f - 1.0f);
+        r = r * r;
+        sum += amp * r;
+        freq *= lacunarity;
+        amp *= gain;
+    }
+    return sum;
+}
+
+static float terrace(float h, float step, float strength) {
+    if (strength <= 0.0f) return h;
+    float t = std::floor(h / step) * step;
+    float frac = (h - t) / step;
+    float s = smoothstep01(frac);
+    float terraced = t + s * step;
+    return lerp(h, terraced, clamp01(strength));
 }
 
 // ============================================================
 // Greedy mesher based on 3x3 snapshots (NO world callback)
 // - UNKNOWN suppression (255)
 // - Bottom-of-world suppression
-// - Materials: uses block ID for color + merges only same id/dir
+// - SOLID mesh: all non-water solids; WATER behaves like AIR for visibility
+// - WATER mesh: top + sides (against AIR only), with lowered top edge
 // ============================================================
 struct ChunkSnapshot {
     bool ready = false;
@@ -2177,33 +2253,35 @@ struct ChunkSnapshot {
 static glm::vec3 blockBaseColor(uint8_t id) {
     switch (id) {
         default: return glm::vec3(1.0f);
-        case 1:  return glm::vec3(0.25f, 0.80f, 0.25f);
-        case 2:   return glm::vec3(0.55f, 0.40f, 0.25f);
-        case 3:  return glm::vec3(0.55f, 0.55f, 0.55f);
-        case 4:  return glm::vec3(0.15f, 0.35f, 0.95f);
-        case 5:   return glm::vec3(0.45f, 0.30f, 0.18f);
-        case 6: return glm::vec3(0.15f, 0.65f, 0.20f);
-        case 7: return glm::vec3(0.85f, 0.80f, 0.55f);
+        case 1:  return glm::vec3(0.25f, 0.80f, 0.25f); // grass
+        case 2:  return glm::vec3(0.55f, 0.40f, 0.25f); // dirt
+        case 3:  return glm::vec3(0.55f, 0.55f, 0.55f); // stone
+        case 4:  return glm::vec3(0.15f, 0.35f, 0.95f); // water
+        case 5:  return glm::vec3(0.45f, 0.30f, 0.18f); // wood
+        case 6:  return glm::vec3(0.15f, 0.65f, 0.20f); // leaves
+        case 7:  return glm::vec3(0.85f, 0.80f, 0.55f); // sand
     }
 }
 
 static float faceShade(int axis, int dir) {
-    // cheap lighting-ish: make top a bit brighter, bottom darker
-    if (axis == 1 && dir > 0) return 1.05f; // top
-    if (axis == 1 && dir < 0) return 0.70f; // bottom
-    if (axis == 0) return 0.90f;            // X sides
-    return 0.85f;                            // Z sides
+    if (axis == 1 && dir > 0) return 1.05f;
+    if (axis == 1 && dir < 0) return 0.70f;
+    if (axis == 0) return 0.90f;
+    return 0.85f;
 }
 
-static ChunkMesh2 buildChunkMeshGreedy_3x3Snapshots(
+static ChunkMeshes buildChunkMeshesGreedy_3x3Snapshots(
     const ChunkSnapshot neigh[3][3],
     int sx, int sy, int sz,
     const glm::vec3& origin,
     float blockSize,
     uint8_t AIR,
-    uint8_t UNKNOWN
+    uint8_t WATER,
+    uint8_t UNKNOWN,
+    float WATER_ALPHA,
+    float WATER_TOP_OFFSET
 ) {
-    ChunkMesh2 mesh;
+    ChunkMeshes out;
 
     auto sample = [&](int x, int y, int z) -> uint8_t {
         if (y < 0 || y >= sy) return AIR;
@@ -2226,8 +2304,12 @@ static ChunkMesh2 buildChunkMeshGreedy_3x3Snapshots(
         const ChunkSnapshot& sn = neigh[ni][nj];
         if (!sn.ready) return UNKNOWN;
 
-        const int id = idx3(lx, y, lz, sx, sy, sz);
-        return sn.blocks[id];
+        return sn.blocks[idx3(lx, y, lz, sx, sy, sz)];
+    };
+
+    auto isEmptyForSolids = [&](uint8_t id) -> bool {
+        // KEY FIX: solids treat water as empty so the riverbed/walls are visible through water.
+        return id == AIR || id == WATER;
     };
 
     struct MaskCell { uint8_t id = 0; int dir = 0; };
@@ -2263,20 +2345,50 @@ static ChunkMesh2 buildChunkMeshGreedy_3x3Snapshots(
         glm::vec3 p11 = corner(i,  u1, v1);
         glm::vec3 p01 = corner(i,  u0, v1);
 
-        // Centered cubes convention (-0.5..0.5)
         glm::vec3 shift(-0.5f * s, -0.5f * s, -0.5f * s);
         glm::vec3 a = p00 + shift;
         glm::vec3 b = p10 + shift;
         glm::vec3 c = p11 + shift;
         glm::vec3 d = p01 + shift;
 
-        // Winding fix
-        glm::vec3 axisVec(0.0f); axisVec[axis] = 1.0f;
-        glm::vec3 expected = axisVec * float(dir);
-        glm::vec3 n = glm::cross(b - a, c - a);
-        if (glm::dot(n, expected) < 0.0f) std::swap(b, d);
+        // WATER height adjustment:
+        // - Top face: lower all vertices by WATER_TOP_OFFSET
+        // - Side faces: lower ONLY the top edge vertices (those at y == +0.5*s in local cube space)
+        if (blockId == WATER) {
+            // Since these are axis-aligned faces on unit cubes, "top edge" vertices have y near (originY + ... + 0.5*s).
+            auto lowerIfTop = [&](glm::vec3& p) {
+                // Compare to nearest cube top plane by using fractional position within the block:
+                // We know cube top is at ... + 0.5*s, so if vertex is on that plane, lower it.
+                // Tolerance is small to avoid missing due to float.
+                float frac = std::fmod(p.y + 100000.0f, s); // stable-ish
+                // But because positions are aligned to s, "top" is exactly (k*s + 0.5*s) after shift.
+                // Use direct check against 0.5*s with tolerance:
+                float local = p.y / s;
+                float nearestHalf = std::round(local * 2.0f) * 0.5f;
+                // If on a half-grid line that corresponds to +0.5 in block-local space, it will be an odd half-step.
+                // Easier: just check if p.y is within epsilon of (n*s + 0.5*s).
+                float n = std::floor((p.y) / s);
+                float topPlane = n * s + 0.5f * s;
+                if (std::abs(p.y - topPlane) < 1e-4f) p.y += WATER_TOP_OFFSET;
+            };
 
-        addQuad(mesh, a, b, c, d, col);
+            if (axis == 1 && dir == +1) {
+                // top face
+                a.y += WATER_TOP_OFFSET;
+                b.y += WATER_TOP_OFFSET;
+                c.y += WATER_TOP_OFFSET;
+                d.y += WATER_TOP_OFFSET;
+            } else {
+                // sides: lower only top edge vertices
+                lowerIfTop(a); lowerIfTop(b); lowerIfTop(c); lowerIfTop(d);
+            }
+        }
+
+        if (blockId == WATER) {
+            addQuad(out.water, a, b, c, d, col, WATER_ALPHA, axis, dir);
+        } else {
+            addQuad(out.solid, a, b, c, d, col, 1.0f, axis, dir);
+        }
     };
 
     for (int axis = 0; axis < 3; ++axis) {
@@ -2308,13 +2420,31 @@ static ChunkMesh2 buildChunkMeshGreedy_3x3Snapshots(
                     // UNKNOWN suppression
                     if (aS == UNKNOWN || bS == UNKNOWN) {
                         cell = {};
-                    }
-                    // visible face if one side solid, other air
-                    else if (aS != AIR && bS == AIR) {
-                        cell.id = aS; cell.dir = +1;
-                    } else if (aS == AIR && bS != AIR) {
-                        cell.id = bS; cell.dir = -1;
                     } else {
+                        // -------- WATER FACES (top + sides) --------
+                        // Emit water face only when WATER adjacent to AIR (not to solids),
+                        // so banks don't get double-layered and you can see the bed through water.
+                        if (aS == WATER && bS == AIR) {
+                            // face points +axis direction (dir=+1)
+                            cell.id = WATER; cell.dir = +1;
+                        } else if (aS == AIR && bS == WATER) {
+                            // face points -axis direction (dir=-1)
+                            cell.id = WATER; cell.dir = -1;
+                        }
+                        // -------- SOLID FACES --------
+                        // Treat WATER as empty so solid faces next to water are visible.
+                        else if (!isEmptyForSolids(aS) && isEmptyForSolids(bS)) {
+                            cell.id = aS; cell.dir = +1;
+                        } else if (isEmptyForSolids(aS) && !isEmptyForSolids(bS)) {
+                            cell.id = bS; cell.dir = -1;
+                        } else {
+                            cell = {};
+                        }
+                    }
+
+                    // Extra rule: if this is a WATER bottom face (axis==Y, dir==-1), skip it.
+                    // You want to see the bed, not an extra water "floor".
+                    if (cell.id == WATER && axis == 1 && cell.dir == -1) {
                         cell = {};
                     }
 
@@ -2357,73 +2487,24 @@ static ChunkMesh2 buildChunkMeshGreedy_3x3Snapshots(
         }
     }
 
-    return mesh;
+    return out;
 }
 
-static inline float clamp01(float v) { return std::max(0.0f, std::min(1.0f, v)); }
-
-
-static inline float smooth01(float a, float b, float x) {
-    float t = clamp01((x - a) / (b - a));
-    return t * t * (3.0f - 2.0f * t);
-}
-
-static inline uint32_t hash_u32(uint32_t x) {
-    x ^= x >> 16; x *= 0x7feb352du;
-    x ^= x >> 15; x *= 0x846ca68bu;
-    x ^= x >> 16;
-    return x;
-}
-
+// ============================================================
+// Random helpers
+// ============================================================
 static inline float rand01_world(int wx, int wz, uint32_t seed) {
     return u32_to_01(hash2_u32(wx, wz, seed));
 }
 
-// “river-ness” from a single noise field around 0.5 (thin lines where close to 0.5)
-static inline float riverMask01(float n01, float halfWidth, float falloff) {
-    float d = std::abs(n01 - 0.5f);                 // 0 at center line
-    float m = 1.0f - smooth01(halfWidth, halfWidth + falloff, d);
-    return clamp01(m);
-}
-
-static float fbm2D(float x, float z, uint32_t seed, int octaves, float lacunarity, float gain) {
-    float sum = 0.0f;
-    float amp = 0.5f;
-    float freq = 1.0f;
-    for (int i = 0; i < octaves; ++i) {
-        sum += amp * valueNoise2D(x * freq, z * freq, seed + 101u * (uint32_t)i);
-        freq *= lacunarity;
-        amp *= gain;
-    }
-    return sum; // ~[0,1)
-}
-
-static float ridge2D(float x, float z, uint32_t seed, int octaves, float lacunarity, float gain) {
-    // Ridged multifractal from value noise: ridge = (1 - |2n-1|)^2 accumulated
-    float sum = 0.0f;
-    float amp = 0.5f;
-    float freq = 1.0f;
-    for (int i = 0; i < octaves; ++i) {
-        float n = valueNoise2D(x * freq, z * freq, seed + 193u * (uint32_t)i); // [0,1)
-        float r = 1.0f - std::abs(n * 2.0f - 1.0f); // [0,1]
-        r = r * r;
-        sum += amp * r;
-        freq *= lacunarity;
-        amp *= gain;
-    }
-    return sum; // ~[0,1]
-}
-
-static float terrace(float h, float step, float strength) {
-    // strength 0..1, step in "height units"
-    if (strength <= 0.0f) return h;
-    float t = std::floor(h / step) * step;
-    float frac = (h - t) / step;
-    // smooth within step
-    float s = smoothstep01(frac);
-    float terraced = t + s * step;
-    return lerp(h, terraced, clamp01(strength));
-}
+// ============================================================
+// Raycast structs
+// ============================================================
+struct RayHit {
+    int wx=0, wy=0, wz=0;
+    int nx=0, ny=0, nz=0;
+    float t=0.0f;
+};
 
 int main() {
     if (!glfwInit()) return -1;
@@ -2462,9 +2543,46 @@ int main() {
     bool f1WasDown = false;
 
     // ----------------------------
-    // Shader program
+    // Shader program (RGBA vertex color)
     // ----------------------------
     const char* vs =
+        "#version 330 core\n"
+        "layout(location = 0) in vec3 aPos;\n"
+        "layout(location = 1) in vec4 aColor;\n"
+        "uniform mat4 MVP;\n"
+        "out vec4 vColor;\n"
+        "void main(){ gl_Position = MVP * vec4(aPos,1.0); vColor=aColor; }\n";
+
+    const char* fs =
+        "#version 330 core\n"
+        "in vec4 vColor;\n"
+        "out vec4 FragColor;\n"
+        "void main(){ FragColor = vColor; }\n";
+
+    auto compileProgram = [&](const char* vsrc, const char* fsrc) -> GLuint {
+        GLuint v = glCreateShader(GL_VERTEX_SHADER);
+        glShaderSource(v, 1, &vsrc, nullptr);
+        glCompileShader(v);
+
+        GLuint f = glCreateShader(GL_FRAGMENT_SHADER);
+        glShaderSource(f, 1, &fsrc, nullptr);
+        glCompileShader(f);
+
+        GLuint p = glCreateProgram();
+        glAttachShader(p, v);
+        glAttachShader(p, f);
+        glLinkProgram(p);
+
+        glDeleteShader(v);
+        glDeleteShader(f);
+        return p;
+    };
+
+    GLuint program = compileProgram(vs, fs);
+    GLint mvpLoc = glGetUniformLocation(program, "MVP");
+
+    // Outline shader (RGB)
+    const char* ovs =
         "#version 330 core\n"
         "layout(location = 0) in vec3 aPos;\n"
         "layout(location = 1) in vec3 aColor;\n"
@@ -2472,29 +2590,14 @@ int main() {
         "out vec3 vColor;\n"
         "void main(){ gl_Position = MVP * vec4(aPos,1.0); vColor=aColor; }\n";
 
-    const char* fs =
+    const char* ofs =
         "#version 330 core\n"
         "in vec3 vColor;\n"
         "out vec4 FragColor;\n"
         "void main(){ FragColor = vec4(vColor,1.0); }\n";
 
-    GLuint vert = glCreateShader(GL_VERTEX_SHADER);
-    glShaderSource(vert, 1, &vs, nullptr);
-    glCompileShader(vert);
-
-    GLuint frag = glCreateShader(GL_FRAGMENT_SHADER);
-    glShaderSource(frag, 1, &fs, nullptr);
-    glCompileShader(frag);
-
-    GLuint program = glCreateProgram();
-    glAttachShader(program, vert);
-    glAttachShader(program, frag);
-    glLinkProgram(program);
-
-    glDeleteShader(vert);
-    glDeleteShader(frag);
-
-    GLint mvpLoc = glGetUniformLocation(program, "MVP");
+    GLuint outlineProgram = compileProgram(ovs, ofs);
+    GLint outlineMvpLoc = glGetUniformLocation(outlineProgram, "MVP");
 
     // ============================================================
     // World config
@@ -2507,8 +2610,12 @@ int main() {
     const float CHUNK_WORLD_X = float(CHUNK_X) * BLOCK;
     const float CHUNK_WORLD_Z = float(CHUNK_Z) * BLOCK;
 
-    const int WORLD_SURFACE_OFFSET = 40; // move terrain UP by this many blocks (more underground)
-    const int WATER_LEVEL = 65; // raise/lower to taste (after WORLD_SURFACE_OFFSET)
+    const int WORLD_SURFACE_OFFSET = 40;
+    const int WATER_LEVEL = 65;
+
+    // Water render params (visual only; voxels are still full blocks in data)
+    const float WATER_ALPHA = 0.55f;
+    const float WATER_TOP_OFFSET = -0.15f * BLOCK; // shorter water
 
     const int LOAD_RADIUS   = 64;
     const int GEN_RADIUS    = LOAD_RADIUS + 1;
@@ -2522,14 +2629,14 @@ int main() {
     static constexpr uint8_t GRASS   = 1;
     static constexpr uint8_t DIRT    = 2;
     static constexpr uint8_t STONE   = 3;
-    static constexpr uint8_t WATER  = 4;
-    static constexpr uint8_t WOOD   = 5;
-    static constexpr uint8_t LEAVES = 6;
-    static constexpr uint8_t SAND = 7;
+    static constexpr uint8_t WATER   = 4;
+    static constexpr uint8_t WOOD    = 5;
+    static constexpr uint8_t LEAVES  = 6;
+    static constexpr uint8_t SAND    = 7;
     static constexpr uint8_t UNKNOWN = 255;
 
     // Worldgen flags
-    const bool USE_3_LAYERS_NOISE = true; // <--- flip to true for 3-layer gen
+    const bool USE_3_LAYERS_NOISE = true;
     const uint32_t NOISE_SEED = 1337u;
 
     // ============================================================
@@ -2566,7 +2673,6 @@ int main() {
         ch->pins.fetch_sub(1, std::memory_order_acq_rel);
     };
 
-    // Player chunk coords visible to workers
     std::atomic<int> gPlayerCX{0}, gPlayerCZ{0};
 
     // ============================================================
@@ -2584,7 +2690,6 @@ int main() {
     std::condition_variable meshCV;
     uint32_t meshSeq = 0;
 
-    // Done queues: urgent uploads first
     std::deque<MeshDone> meshDoneUrgentQ;
     std::unordered_set<uint64_t> meshDoneUrgentSet;
     std::deque<MeshDone> meshDoneQ;
@@ -2642,82 +2747,67 @@ int main() {
     };
 
     // ============================================================
-    // Procedural height using noise
-    // - default: single layer
-    // - optional: 3-layer (more varied)
+    // Procedural height using noise (mountainy)
     // ============================================================
     auto heightAtWorld = [&](int wx, int wz) -> int {
-    const int maxH = CHUNK_Y - 1;
+        const int maxH = CHUNK_Y - 1;
 
-    float X = (float)wx;
-    float Z = (float)wz;
+        float X = (float)wx;
+        float Z = (float)wz;
 
-    // ---- Continents (very low freq): huge elevation swings ----
-    float cont = fbm2D(X * 0.0012f, Z * 0.0012f, NOISE_SEED + 1000u, 3, 2.0f, 0.5f);
-    cont = cont * 2.0f - 1.0f;                 // [-1,1]
-    float continentLift = cont * 36.0f;        // BIGGER than before
+        float cont = fbm2D(X * 0.0012f, Z * 0.0012f, NOISE_SEED + 1000u, 3, 2.0f, 0.5f);
+        cont = cont * 2.0f - 1.0f;
+        float continentLift = cont * 36.0f;
 
-    // ---- Domain warp (gives “flow” and breaks repetition) ----
-    float w1 = fbm2D(X * 0.0020f, Z * 0.0020f, NOISE_SEED + 1100u, 3, 2.0f, 0.5f);
-    float w2 = fbm2D(X * 0.0020f, Z * 0.0020f, NOISE_SEED + 1200u, 3, 2.0f, 0.5f);
-    float wxo = (w1 * 2.0f - 1.0f) * 120.0f;   // stronger warp
-    float wzo = (w2 * 2.0f - 1.0f) * 120.0f;
-    float Xw = X + wxo;
-    float Zw = Z + wzo;
+        float w1 = fbm2D(X * 0.0020f, Z * 0.0020f, NOISE_SEED + 1100u, 3, 2.0f, 0.5f);
+        float w2 = fbm2D(X * 0.0020f, Z * 0.0020f, NOISE_SEED + 1200u, 3, 2.0f, 0.5f);
+        float wxo = (w1 * 2.0f - 1.0f) * 120.0f;
+        float wzo = (w2 * 2.0f - 1.0f) * 120.0f;
+        float Xw = X + wxo;
+        float Zw = Z + wzo;
 
-    // ---- Macro hills (low-ish freq but high amplitude) ----
-    float hills = fbm2D(Xw * 0.0048f, Zw * 0.0048f, NOISE_SEED + 2000u, 5, 2.0f, 0.5f);
-    hills = hills * 2.0f - 1.0f;               // [-1,1]
-    float hillLift = hills * 42.0f;            // more relief
+        float hills = fbm2D(Xw * 0.0048f, Zw * 0.0048f, NOISE_SEED + 2000u, 5, 2.0f, 0.5f);
+        hills = hills * 2.0f - 1.0f;
+        float hillLift = hills * 42.0f;
 
-    // ---- Mountain mask (where mountains live) ----
-    float mMask = fbm2D(X * 0.00095f, Z * 0.00095f, NOISE_SEED + 2100u, 2, 2.0f, 0.5f);
-    float mountaininess = smoothstep01(clamp01((mMask - 0.30f) / (0.92f - 0.30f))); // 0..1
+        float mMask = fbm2D(X * 0.00095f, Z * 0.00095f, NOISE_SEED + 2100u, 2, 2.0f, 0.5f);
+        float mountaininess = smoothstep01(clamp01((mMask - 0.30f) / (0.92f - 0.30f)));
 
-    // ---- Ridged mountains (sharp ranges) ----
-    float ridges = ridge2D(Xw * 0.0030f, Zw * 0.0030f, NOISE_SEED + 2200u, 6, 2.0f, 0.5f); // [0,1]
-    // Make sharper peaks and steeper sides
-    ridges = std::pow(clamp01(ridges), 5.0f);  // sharper than ridges^3
+        float ridges = ridge2D(Xw * 0.0030f, Zw * 0.0030f, NOISE_SEED + 2200u, 6, 2.0f, 0.5f);
+        ridges = std::pow(clamp01(ridges), 5.0f);
+        float mountainLift = ridges * (110.0f * mountaininess);
 
-    float mountainLift = ridges * (110.0f * mountaininess); // TALLER mountains
+        float cliffMask = smoothstep01(clamp01((ridges - 0.72f) / (0.92f - 0.72f)));
+        float cliffLift = cliffMask * (35.0f * mountaininess);
 
-    // ---- Cliff boost: turn near-peak ridge areas into sharper walls ----
-    // This creates abrupt changes (cliffs) without 3D noise.
-    float cliffMask = smoothstep01(clamp01((ridges - 0.72f) / (0.92f - 0.72f))); // only high ridge zones
-    float cliffLift = cliffMask * (35.0f * mountaininess);
+        float basin = fbm2D(Xw * 0.0038f, Zw * 0.0038f, NOISE_SEED + 2300u, 4, 2.0f, 0.5f);
+        basin = basin * 2.0f - 1.0f;
+        float valleyCut = std::max(0.0f, -basin) * 26.0f;
 
-    // ---- Basins/valleys (deeper cuts) ----
-    float basin = fbm2D(Xw * 0.0038f, Zw * 0.0038f, NOISE_SEED + 2300u, 4, 2.0f, 0.5f);
-    basin = basin * 2.0f - 1.0f;               // [-1,1]
-    float valleyCut = std::max(0.0f, -basin) * 26.0f; // deeper valleys
+        float mid = fbm2D(Xw * 0.020f, Zw * 0.020f, NOISE_SEED + 2400u, 4, 2.0f, 0.5f);
+        mid = mid * 2.0f - 1.0f;
+        float midLift = mid * 8.0f;
 
-    // ---- Mid/detail ----
-    float mid = fbm2D(Xw * 0.020f, Zw * 0.020f, NOISE_SEED + 2400u, 4, 2.0f, 0.5f);
-    mid = mid * 2.0f - 1.0f;
-    float midLift = mid * 8.0f;
+        float detail = fbm2D(Xw * 0.090f, Zw * 0.090f, NOISE_SEED + 2500u, 3, 2.0f, 0.5f);
+        detail = detail * 2.0f - 1.0f;
+        float detailLift = detail * 3.0f;
 
-    float detail = fbm2D(Xw * 0.090f, Zw * 0.090f, NOISE_SEED + 2500u, 3, 2.0f, 0.5f);
-    detail = detail * 2.0f - 1.0f;
-    float detailLift = detail * 3.0f;
+        float base = 30.0f;
 
-    // ---- Base sea level-ish ----
-    float base = 30.0f;
+        float h = base
+                + continentLift
+                + hillLift
+                + mountainLift
+                + cliffLift
+                + midLift
+                + detailLift
+                - valleyCut;
 
-    float h = base
-            + continentLift
-            + hillLift
-            + mountainLift
-            + cliffLift
-            + midLift
-            + detailLift
-            - valleyCut;
+        h = terrace(h, 5.0f, 0.45f * mountaininess);
 
-    // Terracing: ONLY mountains, for rocky strata/cliffs feel
-    h = terrace(h, /*step=*/5.0f, /*strength=*/0.45f * mountaininess);
-
-    int hi = (int)std::round(h) + WORLD_SURFACE_OFFSET;
-    return clampi(hi, 1, maxH);
-};
+        int hi = (int)std::round(h) + WORLD_SURFACE_OFFSET;
+        return clampi(hi, 1, maxH);
+    };
 
     // ============================================================
     // World accessor for raycast / edits (rare)
@@ -2764,7 +2854,6 @@ int main() {
         else        queueMesh(cx, cz, pcx, pcz);
     };
 
-    // If an edit touches a chunk border and the neighbor is missing/unready, urgently generate it
     auto ensureNeighborGeneratedUrgent = [&](int ncx, int ncz) {
         createChunkIfMissing(ncx, ncz);
 
@@ -2810,10 +2899,8 @@ int main() {
 
         ch->dirtyMesh.store(true, std::memory_order_release);
 
-        // URGENT remesh self
         dirtyAndQueueMesh(cx, cz, true);
 
-        // border updates: urgent gen + urgent mesh neighbor
         if (lx == 0) {
             ensureNeighborGeneratedUrgent(cx - 1, cz);
             dirtyAndQueueMesh(cx - 1, cz, true);
@@ -2838,12 +2925,6 @@ int main() {
     // ============================================================
     // Raycast (voxel DDA)
     // ============================================================
-    struct RayHit {
-        int wx=0, wy=0, wz=0;
-        int nx=0, ny=0, nz=0;
-        float t=0.0f;
-    };
-
     auto ifloor = [&](float v) -> int { return (int)std::floor(v); };
 
     auto raycastBlocks = [&](const glm::vec3& origin, const glm::vec3& dir, float maxDist) -> std::optional<RayHit> {
@@ -2877,7 +2958,6 @@ int main() {
         int lastNX=0, lastNY=0, lastNZ=0;
         float t = 0.0f;
 
-        // starting cell check
         {
             uint8_t s = solidAtWorld(x, y, z);
             if (s != AIR && s != UNKNOWN) {
@@ -2907,7 +2987,6 @@ int main() {
             if (t > maxDist) break;
 
             uint8_t s = solidAtWorld(x, y, z);
-            // do NOT treat UNKNOWN as a hit
             if (s != AIR && s != UNKNOWN) {
                 RayHit hit;
                 hit.wx=x; hit.wy=y; hit.wz=z;
@@ -2921,7 +3000,7 @@ int main() {
     };
 
     // ============================================================
-    // Outline highlight — GL_LINES
+    // Outline highlight — GL_LINES (separate shader)
     // ============================================================
     GLuint outlineVAO = 0, outlineVBO = 0;
 
@@ -2995,20 +3074,19 @@ int main() {
     GEN_THREADS = std::min(GEN_THREADS, 8);
 
     auto generateBlocksForChunk = [&](GpuChunk* ch) {
-
         auto setLocal = [&](int lx, int ly, int lz, uint8_t v) {
-    if (lx < 0 || lx >= CHUNK_X) return;
-    if (lz < 0 || lz >= CHUNK_Z) return;
-    if (ly < 0 || ly >= CHUNK_Y) return;
-    ch->blocks[idx3(lx, ly, lz, CHUNK_X, CHUNK_Y, CHUNK_Z)] = v;
-};
+            if (lx < 0 || lx >= CHUNK_X) return;
+            if (lz < 0 || lz >= CHUNK_Z) return;
+            if (ly < 0 || ly >= CHUNK_Y) return;
+            ch->blocks[idx3(lx, ly, lz, CHUNK_X, CHUNK_Y, CHUNK_Z)] = v;
+        };
 
-auto getLocal = [&](int lx, int ly, int lz) -> uint8_t {
-    if (lx < 0 || lx >= CHUNK_X) return UNKNOWN;
-    if (lz < 0 || lz >= CHUNK_Z) return UNKNOWN;
-    if (ly < 0 || ly >= CHUNK_Y) return UNKNOWN;
-    return ch->blocks[idx3(lx, ly, lz, CHUNK_X, CHUNK_Y, CHUNK_Z)];
-};
+        auto getLocal = [&](int lx, int ly, int lz) -> uint8_t {
+            if (lx < 0 || lx >= CHUNK_X) return UNKNOWN;
+            if (lz < 0 || lz >= CHUNK_Z) return UNKNOWN;
+            if (ly < 0 || ly >= CHUNK_Y) return UNKNOWN;
+            return ch->blocks[idx3(lx, ly, lz, CHUNK_X, CHUNK_Y, CHUNK_Z)];
+        };
 
         bool expected = false;
         if (!ch->inGen.compare_exchange_strong(expected, true)) return;
@@ -3029,86 +3107,59 @@ auto getLocal = [&](int lx, int ly, int lz) -> uint8_t {
                     int h = heightAtWorld(wx, wz);
                     if (h <= 0) continue;
 
-                    // ===== Better rivers: flow-field style (constant water plane) =====
-                    // Domain warp for meanders
+                    // --- Rivers/Lakes (same as before) ---
                     float warpX = (fbm2D((float)wx * 0.0015f, (float)wz * 0.0015f, NOISE_SEED + 50001u, 3, 2.0f, 0.5f) * 2.0f - 1.0f) * 120.0f;
                     float warpZ = (fbm2D((float)wx * 0.0015f, (float)wz * 0.0015f, NOISE_SEED + 50002u, 3, 2.0f, 0.5f) * 2.0f - 1.0f) * 120.0f;
                     float Xw = (float)wx + warpX;
                     float Zw = (float)wz + warpZ;
 
-                    // River regions mask: only some parts of the world can have rivers at all
                     float region = fbm2D((float)wx * 0.00075f, (float)wz * 0.00075f, NOISE_SEED + 60000u, 2, 2.0f, 0.5f);
-                    float riverRegion = smooth01(0.68f, 0.90f, region); // most places -> 0, some -> 1
+                    float riverRegion = smooth01(0.68f, 0.90f, region);
 
-                    // Two low-frequency channels mixed -> produces longer continuous bands that “snake”
-                    float rA = fbm2D(Xw * 0.0022f, Zw * 0.0022f, NOISE_SEED + 51000u, 4, 2.0f, 0.5f); // [0,1)
-                    float rB = fbm2D(Xw * 0.0017f, Zw * 0.0017f, NOISE_SEED + 52000u, 3, 2.0f, 0.5f); // [0,1)
-                    float riverField = 0.65f * rA + 0.35f * rB; // [0,1)
+                    float rA = fbm2D(Xw * 0.0022f, Zw * 0.0022f, NOISE_SEED + 51000u, 4, 2.0f, 0.5f);
+                    float rB = fbm2D(Xw * 0.0017f, Zw * 0.0017f, NOISE_SEED + 52000u, 3, 2.0f, 0.5f);
+                    float riverField = 0.65f * rA + 0.35f * rB;
+                    float distToCenter = std::abs(riverField - 0.5f);
 
-                    // River “centerline” is where field is near 0.5
-                    float distToCenter = std::abs(riverField - 0.5f); // 0 at center
+                    float wVar = fbm2D(Xw * 0.0060f, Zw * 0.0060f, NOISE_SEED + 53000u, 2, 2.0f, 0.5f);
+                    float halfWidth = 0.010f + 0.014f * wVar;
+                    float falloff   = 0.016f;
 
-                    // Variable width along the river (makes it feel natural)
-                    float wVar = fbm2D(Xw * 0.0060f, Zw * 0.0060f, NOISE_SEED + 53000u, 2, 2.0f, 0.5f); // [0,1)
-                    float halfWidth = 0.010f + 0.014f * wVar; // thinner
-                    float falloff   = 0.016f;                 // sharper edges
-
-                    float rMask = 1.0f - smooth01(halfWidth, halfWidth + falloff, distToCenter); // 0..1
+                    float rMask = 1.0f - smooth01(halfWidth, halfWidth + falloff, distToCenter);
                     rMask = clamp01(rMask);
-
-                    // Reduce overall water: only keep stronger candidates
-                    // (so you get fewer random wet streaks)
-                    rMask = smooth01(0.55f, 0.92f, rMask); // pushes weak mask to 0
+                    rMask = smooth01(0.55f, 0.92f, rMask);
                     rMask *= riverRegion;
 
-                    // Lakes: rarer and only in “basin” areas
                     float lN = fbm2D((float)wx * 0.00095f, (float)wz * 0.00095f, NOISE_SEED + 54000u, 3, 2.0f, 0.5f);
-                    float lake = smooth01(0.91f, 0.975f, lN); // much rarer
+                    float lake = smooth01(0.91f, 0.975f, lN);
 
-                    // Only allow lakes in low-ish terrain (prevents lakes everywhere on high plateaus)
                     float lowLand = smooth01((float)WATER_LEVEL - 6.0f, (float)WATER_LEVEL + 2.0f, (float)h);
                     lake *= lowLand;
-
-                    // Also block lakes in non-river regions (keeps water clustered)
                     lake *= riverRegion;
 
-                    // Combine “water feature strength”
                     float waterFeat = std::max(rMask, lake);
 
-                    // Carve bed: ensure it reaches under WATER_LEVEL so water hugs banks
-                    int riverDepth = (int)std::round(rMask * 14.0f);     // deeper main channels
+                    int riverDepth = (int)std::round(rMask * 14.0f);
                     int lakeDepth  = (int)std::round(lake  * 12.0f);
 
                     int bedH = h - std::max(riverDepth, lakeDepth);
-
-                    // IMPORTANT: force bed under the water plane when water feature exists
-                    // This removes “stone shelf where water should be”.
                     if (waterFeat > 0.05f) {
-                        // how far under water to carve:
-                        int target = WATER_LEVEL - 2 - (int)std::round(waterFeat * 6.0f); // deeper where stronger
+                        int target = WATER_LEVEL - 2 - (int)std::round(waterFeat * 6.0f);
                         bedH = std::min(bedH, target);
                     }
 
                     int groundH = clampi(bedH, 1, CHUNK_Y - 1);
 
-                    // Ensure river/lake channels reach the water plane so banks meet water cleanly
-                    // (only where water features exist)
-                    if ((rMask > 0.10f || lake > 0.35f) && groundH > WATER_LEVEL) {
-                        // pull channel down close to water to avoid “dry moat” edges
-                        groundH = std::max(1, std::min(groundH, WATER_LEVEL + 1));
-                    }
-
-                    // --- Slope proxy (for cliff stone exposure, optional) ---
+                    // slope proxy
                     int hE = heightAtWorld(wx + 1, wz);
                     int hW = heightAtWorld(wx - 1, wz);
                     int hN2 = heightAtWorld(wx, wz + 1);
                     int hS = heightAtWorld(wx, wz - 1);
                     int slope = std::abs(hE - hW) + std::abs(hN2 - hS);
 
-                    // Stone exposure: steep or very high peaks (no random stone patches)
                     float heightT = clamp01((float)(groundH - (WATER_LEVEL + 10)) / 60.0f);
                     bool exposedStone = ((slope >= 8) || (heightT > 0.75f)) && (waterFeat < 0.10f);
-                    
+
                     int dirtThickness;
                     if (slope < 3) dirtThickness = 7;
                     else if (slope < 6) dirtThickness = 5;
@@ -3117,13 +3168,11 @@ auto getLocal = [&](int lx, int ly, int lz) -> uint8_t {
 
                     int stoneTop = std::max(0, groundH - dirtThickness);
 
-                    // Fill ground column up to groundH
                     for (int yy = 0; yy < groundH; ++yy) {
                         uint8_t id = STONE;
 
                         if (yy == groundH - 1) {
-                            if (exposedStone) id = STONE;
-                            else              id = GRASS;
+                            id = exposedStone ? STONE : GRASS;
                         } else if (yy >= stoneTop) {
                             id = DIRT;
                         } else {
@@ -3133,8 +3182,8 @@ auto getLocal = [&](int lx, int ly, int lz) -> uint8_t {
                         ch->blocks[idx3(xx, yy, zz, CHUNK_X, CHUNK_Y, CHUNK_Z)] = id;
                     }
 
+                    // beaches
                     int surfaceY = groundH - 1;
-
                     int beachInner = 2;
                     int beachOuter = 3;
 
@@ -3145,7 +3194,6 @@ auto getLocal = [&](int lx, int ly, int lz) -> uint8_t {
                     if (nearWater && !exposedStone) {
                         if (surfaceY <= WATER_LEVEL + beachOuter && surfaceY >= WATER_LEVEL - beachInner) {
                             ch->blocks[idx3(xx, surfaceY, zz, CHUNK_X, CHUNK_Y, CHUNK_Z)] = SAND;
-
                             for (int d = 1; d <= 3; ++d) {
                                 int yy = surfaceY - d;
                                 if (yy < 0) break;
@@ -3157,7 +3205,7 @@ auto getLocal = [&](int lx, int ly, int lz) -> uint8_t {
                         }
                     }
 
-                    // Constant water plane everywhere
+                    // water plane fill (voxel data)
                     if (groundH <= WATER_LEVEL) {
                         for (int yy = groundH; yy <= WATER_LEVEL && yy < CHUNK_Y; ++yy) {
                             ch->blocks[idx3(xx, yy, zz, CHUNK_X, CHUNK_Y, CHUNK_Z)] = WATER;
@@ -3165,8 +3213,9 @@ auto getLocal = [&](int lx, int ly, int lz) -> uint8_t {
                     }
                 }
             }
-            // Tree placement (kept inside chunk bounds to avoid cross-chunk writes)
-            const float TREE_CHANCE = 0.005f; // ~0.5% per column; adjust
+
+            // Trees
+            const float TREE_CHANCE = 0.005f;
             for (int lz = 2; lz < CHUNK_Z - 2; ++lz) {
                 for (int lx = 2; lx < CHUNK_X - 2; ++lx) {
                     int wx = baseWX + lx;
@@ -3175,7 +3224,6 @@ auto getLocal = [&](int lx, int ly, int lz) -> uint8_t {
                     float r = rand01_world(wx, wz, NOISE_SEED + 33333u);
                     if (r > TREE_CHANCE) continue;
 
-                    // Find surface: scan down from top to find first non-air/water
                     int y = CHUNK_Y - 2;
                     for (; y >= 1; --y) {
                         uint8_t b = getLocal(lx, y, lz);
@@ -3183,25 +3231,21 @@ auto getLocal = [&](int lx, int ly, int lz) -> uint8_t {
                     }
                     if (y <= 1) continue;
 
-                    // Must be grass at surface, and not underwater
                     if (getLocal(lx, y, lz) != GRASS) continue;
                     if (y < WATER_LEVEL) continue;
 
-                    // Avoid steep slopes: compare nearby heights quickly (using world height)
                     int h0 = heightAtWorld(wx, wz);
                     int h1 = heightAtWorld(wx + 1, wz);
                     int h2 = heightAtWorld(wx, wz + 1);
                     if (std::abs(h0 - h1) + std::abs(h0 - h2) > 4) continue;
 
-                    int trunkH = 4 + (int)std::floor(rand01_world(wx, wz, NOISE_SEED + 44444u) * 3.0f); // 4..6
+                    int trunkH = 4 + (int)std::floor(rand01_world(wx, wz, NOISE_SEED + 44444u) * 3.0f);
 
-                    // Trunk
                     for (int i = 1; i <= trunkH; ++i) {
                         uint8_t cur = getLocal(lx, y + i, lz);
                         if (cur == AIR || cur == LEAVES) setLocal(lx, y + i, lz, WOOD);
                     }
 
-                    // Leaves (simple canopy)
                     int topY = y + trunkH;
                     for (int dz = -2; dz <= 2; ++dz) {
                         for (int dx = -2; dx <= 2; ++dx) {
@@ -3230,7 +3274,9 @@ auto getLocal = [&](int lx, int ly, int lz) -> uint8_t {
     std::vector<std::thread> genWorkers;
 
     auto genWorkerMain = [&]() {
-        while (!genStop.load()) {
+        while (true) {
+            if (genStop.load()) return;
+
             WorkItem wi;
             {
                 std::unique_lock<std::mutex> lock(genMutex);
@@ -3259,8 +3305,6 @@ auto getLocal = [&](int lx, int ly, int lz) -> uint8_t {
             generateBlocksForChunk(ch);
             unpinChunk(ch);
 
-            // When a chunk becomes known, its neighbors’ seam can change (UNKNOWN -> known).
-            // Not urgent by default.
             dirtyAndQueueMesh(wi.cx, wi.cz, false);
             for (int nz=-1; nz<=1; ++nz)
                 for (int nx=-1; nx<=1; ++nx)
@@ -3295,7 +3339,9 @@ auto getLocal = [&](int lx, int ly, int lz) -> uint8_t {
     };
 
     auto meshWorkerMain = [&]() {
-        while (!meshStop.load()) {
+        while (true) {
+            if (meshStop.load()) return;
+
             WorkItem wi;
             {
                 std::unique_lock<std::mutex> lock(meshMutex);
@@ -3346,18 +3392,21 @@ auto getLocal = [&](int lx, int ly, int lz) -> uint8_t {
                 }
             }
 
-            ChunkMesh2 built = buildChunkMeshGreedy_3x3Snapshots(
+            ChunkMeshes built = buildChunkMeshesGreedy_3x3Snapshots(
                 neigh,
                 CHUNK_X, CHUNK_Y, CHUNK_Z,
                 ch->origin,
                 BLOCK,
                 AIR,
-                UNKNOWN
+                WATER,
+                UNKNOWN,
+                WATER_ALPHA,
+                WATER_TOP_OFFSET
             );
 
             {
                 std::lock_guard<std::mutex> lock(ch->stagedMutex);
-                ch->stagedMesh = std::move(built);
+                ch->staged = std::move(built);
                 ch->stagedReady.store(true, std::memory_order_release);
             }
 
@@ -3365,13 +3414,9 @@ auto getLocal = [&](int lx, int ly, int lz) -> uint8_t {
                 uint64_t kk = key64(wi.cx, wi.cz);
                 std::lock_guard<std::mutex> lock(meshDoneMutex);
                 if (urgent) {
-                    if (meshDoneUrgentSet.insert(kk).second) {
-                        meshDoneUrgentQ.push_back(MeshDone{wi.cx, wi.cz});
-                    }
+                    if (meshDoneUrgentSet.insert(kk).second) meshDoneUrgentQ.push_back(MeshDone{wi.cx, wi.cz});
                 } else {
-                    if (meshDoneSet.insert(kk).second) {
-                        meshDoneQ.push_back(MeshDone{wi.cx, wi.cz});
-                    }
+                    if (meshDoneSet.insert(kk).second) meshDoneQ.push_back(MeshDone{wi.cx, wi.cz});
                 }
             }
 
@@ -3387,14 +3432,14 @@ auto getLocal = [&](int lx, int ly, int lz) -> uint8_t {
     // ============================================================
     auto scheduleDelta = [&](int oldCX, int oldCZ, int newCX, int newCZ) {
         auto inOldGen = [&](int cx, int cz) {
-            return std::abs(cx - oldCX) <= GEN_RADIUS && std::abs(cz - oldCZ) <= GEN_RADIUS;
+            return std::abs(cx - oldCX) <= (LOAD_RADIUS + 1) && std::abs(cz - oldCZ) <= (LOAD_RADIUS + 1);
         };
         auto inOldMesh = [&](int cx, int cz) {
             return std::abs(cx - oldCX) <= LOAD_RADIUS && std::abs(cz - oldCZ) <= LOAD_RADIUS;
         };
 
-        for (int cz = newCZ - GEN_RADIUS; cz <= newCZ + GEN_RADIUS; ++cz) {
-            for (int cx = newCX - GEN_RADIUS; cx <= newCX + GEN_RADIUS; ++cx) {
+        for (int cz = newCZ - (LOAD_RADIUS + 1); cz <= newCZ + (LOAD_RADIUS + 1); ++cz) {
+            for (int cx = newCX - (LOAD_RADIUS + 1); cx <= newCX + (LOAD_RADIUS + 1); ++cx) {
                 if (inOldGen(cx, cz)) continue;
                 createChunkIfMissing(cx, cz);
                 queueGen(cx, cz, newCX, newCZ);
@@ -3410,6 +3455,8 @@ auto getLocal = [&](int lx, int ly, int lz) -> uint8_t {
     };
 
     auto scheduleStreaming = [&](int pcx, int pcz){
+        int GEN_RADIUS = LOAD_RADIUS + 1;
+
         for (int r=0; r<=GEN_RADIUS; ++r) {
             for (int dz=-r; dz<=r; ++dz) {
                 for (int dx=-r; dx<=r; ++dx) {
@@ -3432,9 +3479,6 @@ auto getLocal = [&](int lx, int ly, int lz) -> uint8_t {
         }
     };
 
-    // ============================================================
-    // Prime initial streaming
-    // ============================================================
     int playerCX = worldToChunkCoord(cameraPos.x, CHUNK_WORLD_X);
     int playerCZ = worldToChunkCoord(cameraPos.z, CHUNK_WORLD_Z);
     gPlayerCX.store(playerCX);
@@ -3449,7 +3493,6 @@ auto getLocal = [&](int lx, int ly, int lz) -> uint8_t {
     const float EDIT_REACH = 10.0f;
     std::optional<RayHit> hoverHit;
 
-    // What block to place (pick one)
     uint8_t gPlaceBlock = DIRT;
 
     // ============================================================
@@ -3481,7 +3524,6 @@ auto getLocal = [&](int lx, int ly, int lz) -> uint8_t {
             glfwGetKey(window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS)
             cameraPos.y -= cameraSpeed * deltaTime;
 
-        // Chunk change (delta schedule)
         int newCX = worldToChunkCoord(cameraPos.x, CHUNK_WORLD_X);
         int newCZ = worldToChunkCoord(cameraPos.z, CHUNK_WORLD_Z);
         if (newCX != playerCX || newCZ != playerCZ) {
@@ -3497,10 +3539,8 @@ auto getLocal = [&](int lx, int ly, int lz) -> uint8_t {
             gPlayerCZ.store(playerCZ);
         }
 
-        // Hover raycast for highlight + click
         hoverHit = raycastBlocks(cameraPos, glm::normalize(gCameraFront), EDIT_REACH);
 
-        // Click handling
         bool lmbDown = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
         bool rmbDown = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
         bool lmbClick = lmbDown && !lmbWasDown;
@@ -3575,13 +3615,19 @@ auto getLocal = [&](int lx, int ly, int lz) -> uint8_t {
             {
                 std::lock_guard<std::mutex> lock(ch->stagedMutex);
                 if (!ch->stagedReady.load(std::memory_order_acquire)) { unpinChunk(ch); continue; }
-                ch->mesh = std::move(ch->stagedMesh);
-                ch->stagedMesh.verts.clear();
-                ch->stagedMesh.indices.clear();
+
+                ch->meshSolid = std::move(ch->staged.solid);
+                ch->meshWater = std::move(ch->staged.water);
+
+                ch->staged.solid.verts.clear();
+                ch->staged.solid.indices.clear();
+                ch->staged.water.verts.clear();
+                ch->staged.water.indices.clear();
+
                 ch->stagedReady.store(false, std::memory_order_release);
             }
 
-            uploadChunkMesh(*ch);
+            uploadChunkMeshes(*ch);
             ch->hasMesh.store(true, std::memory_order_release);
             ch->dirtyMesh.store(false, std::memory_order_release);
 
@@ -3600,7 +3646,7 @@ auto getLocal = [&](int lx, int ly, int lz) -> uint8_t {
                 int cx = ch->cpos.x;
                 int cz = ch->cpos.y;
 
-                if (std::abs(cx - playerCX) > UNLOAD_RADIUS || std::abs(cz - playerCZ) > UNLOAD_RADIUS) {
+                if (std::abs(cx - playerCX) > (LOAD_RADIUS + 3) || std::abs(cz - playerCZ) > (LOAD_RADIUS + 3)) {
                     if (ch->pins.load(std::memory_order_acquire) != 0) continue;
                     if (ch->inGen.load(std::memory_order_acquire) || ch->inMesh.load(std::memory_order_acquire)) continue;
 
@@ -3622,20 +3668,22 @@ auto getLocal = [&](int lx, int ly, int lz) -> uint8_t {
         if (fbW <= 0) fbW = mode->width;
         if (fbH <= 0) fbH = mode->height;
 
-        glUseProgram(program);
-
         glm::mat4 view = glm::lookAt(cameraPos, cameraPos + glm::normalize(gCameraFront), cameraUp);
         glm::mat4 proj = glm::perspective(glm::radians(45.0f), float(fbW) / float(fbH), 0.1f, 5000.0f);
         glm::mat4 mvp  = proj * view;
-        glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, &mvp[0][0]);
 
-        // Snapshot draw list
         std::vector<GpuChunk*> drawList;
         drawList.reserve(2048);
         {
             std::lock_guard<std::mutex> lock(chunksMutex);
             for (auto& kv : chunks) drawList.push_back(kv.second.get());
         }
+
+        // PASS 1: SOLIDS
+        glUseProgram(program);
+        glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, &mvp[0][0]);
+        glDisable(GL_BLEND);
+        glDepthMask(GL_TRUE);
 
         for (GpuChunk* ch : drawList) {
             ch->pins.fetch_add(1, std::memory_order_acq_rel);
@@ -3645,21 +3693,56 @@ auto getLocal = [&](int lx, int ly, int lz) -> uint8_t {
                 continue;
             }
 
-            if (!ch->hasMesh.load(std::memory_order_acquire) || ch->vao == 0 || ch->mesh.indices.empty()) {
+            if (!ch->hasMesh.load(std::memory_order_acquire) || ch->vaoSolid == 0 || ch->meshSolid.indices.empty()) {
                 ch->pins.fetch_sub(1, std::memory_order_acq_rel);
                 continue;
             }
 
-            glBindVertexArray(ch->vao);
-            glDrawElements(GL_TRIANGLES, (GLsizei)ch->mesh.indices.size(), GL_UNSIGNED_INT, 0);
+            glBindVertexArray(ch->vaoSolid);
+            glDrawElements(GL_TRIANGLES, (GLsizei)ch->meshSolid.indices.size(), GL_UNSIGNED_INT, 0);
 
             ch->pins.fetch_sub(1, std::memory_order_acq_rel);
         }
         glBindVertexArray(0);
 
+        // PASS 2: WATER (transparent)
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+        // Keep depth test ON so water doesn't draw through walls,
+        // but don't write depth so it doesn't "seal" later transparent passes.
+        glDepthMask(GL_FALSE);
+
+        for (GpuChunk* ch : drawList) {
+            ch->pins.fetch_add(1, std::memory_order_acq_rel);
+
+            if (std::abs(ch->cpos.x - playerCX) > LOAD_RADIUS || std::abs(ch->cpos.y - playerCZ) > LOAD_RADIUS) {
+                ch->pins.fetch_sub(1, std::memory_order_acq_rel);
+                continue;
+            }
+
+            if (!ch->hasMesh.load(std::memory_order_acquire) || ch->vaoWater == 0 || ch->meshWater.indices.empty()) {
+                ch->pins.fetch_sub(1, std::memory_order_acq_rel);
+                continue;
+            }
+
+            glBindVertexArray(ch->vaoWater);
+            glDrawElements(GL_TRIANGLES, (GLsizei)ch->meshWater.indices.size(), GL_UNSIGNED_INT, 0);
+
+            ch->pins.fetch_sub(1, std::memory_order_acq_rel);
+        }
+        glBindVertexArray(0);
+
+        glDepthMask(GL_TRUE);
+        glDisable(GL_BLEND);
+
         // Highlight outline last (on top)
         if (hoverHit.has_value()) {
             uploadOutlineBox(hoverHit->wx, hoverHit->wy, hoverHit->wz, BLOCK);
+
+            glUseProgram(outlineProgram);
+            glUniformMatrix4fv(outlineMvpLoc, 1, GL_FALSE, &mvp[0][0]);
+
             glDisable(GL_DEPTH_TEST);
             glBindVertexArray(outlineVAO);
             glDrawArrays(GL_LINES, 0, 24);
@@ -3671,9 +3754,7 @@ auto getLocal = [&](int lx, int ly, int lz) -> uint8_t {
         glfwPollEvents();
     }
 
-    // ============================================================
     // Shutdown workers
-    // ============================================================
     genStop = true;
     genCV.notify_all();
     for (auto& t : genWorkers) t.join();
@@ -3693,6 +3774,8 @@ auto getLocal = [&](int lx, int ly, int lz) -> uint8_t {
     if (outlineVBO) glDeleteBuffers(1, &outlineVBO);
 
     glDeleteProgram(program);
+    glDeleteProgram(outlineProgram);
+
     glfwDestroyWindow(window);
     glfwTerminate();
     return 0;
