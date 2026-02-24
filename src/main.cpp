@@ -2175,12 +2175,15 @@ struct ChunkSnapshot {
 };
 
 static glm::vec3 blockBaseColor(uint8_t id) {
-    // simple flat colors; tweak as you like
     switch (id) {
-        default: return glm::vec3(1.0f, 1.0f, 1.0f);
-        case 1:  return glm::vec3(0.25f, 0.80f, 0.25f); // GRASS
-        case 2:  return glm::vec3(0.55f, 0.40f, 0.25f); // DIRT
-        case 3:  return glm::vec3(0.55f, 0.55f, 0.55f); // STONE
+        default: return glm::vec3(1.0f);
+        case 1:  return glm::vec3(0.25f, 0.80f, 0.25f);
+        case 2:   return glm::vec3(0.55f, 0.40f, 0.25f);
+        case 3:  return glm::vec3(0.55f, 0.55f, 0.55f);
+        case 4:  return glm::vec3(0.15f, 0.35f, 0.95f);
+        case 5:   return glm::vec3(0.45f, 0.30f, 0.18f);
+        case 6: return glm::vec3(0.15f, 0.65f, 0.20f);
+        case 7: return glm::vec3(0.85f, 0.80f, 0.55f);
     }
 }
 
@@ -2359,6 +2362,30 @@ static ChunkMesh2 buildChunkMeshGreedy_3x3Snapshots(
 
 static inline float clamp01(float v) { return std::max(0.0f, std::min(1.0f, v)); }
 
+
+static inline float smooth01(float a, float b, float x) {
+    float t = clamp01((x - a) / (b - a));
+    return t * t * (3.0f - 2.0f * t);
+}
+
+static inline uint32_t hash_u32(uint32_t x) {
+    x ^= x >> 16; x *= 0x7feb352du;
+    x ^= x >> 15; x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
+}
+
+static inline float rand01_world(int wx, int wz, uint32_t seed) {
+    return u32_to_01(hash2_u32(wx, wz, seed));
+}
+
+// “river-ness” from a single noise field around 0.5 (thin lines where close to 0.5)
+static inline float riverMask01(float n01, float halfWidth, float falloff) {
+    float d = std::abs(n01 - 0.5f);                 // 0 at center line
+    float m = 1.0f - smooth01(halfWidth, halfWidth + falloff, d);
+    return clamp01(m);
+}
+
 static float fbm2D(float x, float z, uint32_t seed, int octaves, float lacunarity, float gain) {
     float sum = 0.0f;
     float amp = 0.5f;
@@ -2481,6 +2508,7 @@ int main() {
     const float CHUNK_WORLD_Z = float(CHUNK_Z) * BLOCK;
 
     const int WORLD_SURFACE_OFFSET = 40; // move terrain UP by this many blocks (more underground)
+    const int WATER_LEVEL = 65; // raise/lower to taste (after WORLD_SURFACE_OFFSET)
 
     const int LOAD_RADIUS   = 64;
     const int GEN_RADIUS    = LOAD_RADIUS + 1;
@@ -2494,6 +2522,10 @@ int main() {
     static constexpr uint8_t GRASS   = 1;
     static constexpr uint8_t DIRT    = 2;
     static constexpr uint8_t STONE   = 3;
+    static constexpr uint8_t WATER  = 4;
+    static constexpr uint8_t WOOD   = 5;
+    static constexpr uint8_t LEAVES = 6;
+    static constexpr uint8_t SAND = 7;
     static constexpr uint8_t UNKNOWN = 255;
 
     // Worldgen flags
@@ -2963,6 +2995,21 @@ int main() {
     GEN_THREADS = std::min(GEN_THREADS, 8);
 
     auto generateBlocksForChunk = [&](GpuChunk* ch) {
+
+        auto setLocal = [&](int lx, int ly, int lz, uint8_t v) {
+    if (lx < 0 || lx >= CHUNK_X) return;
+    if (lz < 0 || lz >= CHUNK_Z) return;
+    if (ly < 0 || ly >= CHUNK_Y) return;
+    ch->blocks[idx3(lx, ly, lz, CHUNK_X, CHUNK_Y, CHUNK_Z)] = v;
+};
+
+auto getLocal = [&](int lx, int ly, int lz) -> uint8_t {
+    if (lx < 0 || lx >= CHUNK_X) return UNKNOWN;
+    if (lz < 0 || lz >= CHUNK_Z) return UNKNOWN;
+    if (ly < 0 || ly >= CHUNK_Y) return UNKNOWN;
+    return ch->blocks[idx3(lx, ly, lz, CHUNK_X, CHUNK_Y, CHUNK_Z)];
+};
+
         bool expected = false;
         if (!ch->inGen.compare_exchange_strong(expected, true)) return;
         if (ch->hasBlocks.load(std::memory_order_acquire)) { ch->inGen.store(false); return; }
@@ -2982,51 +3029,194 @@ int main() {
                     int h = heightAtWorld(wx, wz);
                     if (h <= 0) continue;
 
-                    // Slope proxy (still needed for cliffs)
+                    // ===== Better rivers: flow-field style (constant water plane) =====
+                    // Domain warp for meanders
+                    float warpX = (fbm2D((float)wx * 0.0015f, (float)wz * 0.0015f, NOISE_SEED + 50001u, 3, 2.0f, 0.5f) * 2.0f - 1.0f) * 120.0f;
+                    float warpZ = (fbm2D((float)wx * 0.0015f, (float)wz * 0.0015f, NOISE_SEED + 50002u, 3, 2.0f, 0.5f) * 2.0f - 1.0f) * 120.0f;
+                    float Xw = (float)wx + warpX;
+                    float Zw = (float)wz + warpZ;
+
+                    // River regions mask: only some parts of the world can have rivers at all
+                    float region = fbm2D((float)wx * 0.00075f, (float)wz * 0.00075f, NOISE_SEED + 60000u, 2, 2.0f, 0.5f);
+                    float riverRegion = smooth01(0.68f, 0.90f, region); // most places -> 0, some -> 1
+
+                    // Two low-frequency channels mixed -> produces longer continuous bands that “snake”
+                    float rA = fbm2D(Xw * 0.0022f, Zw * 0.0022f, NOISE_SEED + 51000u, 4, 2.0f, 0.5f); // [0,1)
+                    float rB = fbm2D(Xw * 0.0017f, Zw * 0.0017f, NOISE_SEED + 52000u, 3, 2.0f, 0.5f); // [0,1)
+                    float riverField = 0.65f * rA + 0.35f * rB; // [0,1)
+
+                    // River “centerline” is where field is near 0.5
+                    float distToCenter = std::abs(riverField - 0.5f); // 0 at center
+
+                    // Variable width along the river (makes it feel natural)
+                    float wVar = fbm2D(Xw * 0.0060f, Zw * 0.0060f, NOISE_SEED + 53000u, 2, 2.0f, 0.5f); // [0,1)
+                    float halfWidth = 0.010f + 0.014f * wVar; // thinner
+                    float falloff   = 0.016f;                 // sharper edges
+
+                    float rMask = 1.0f - smooth01(halfWidth, halfWidth + falloff, distToCenter); // 0..1
+                    rMask = clamp01(rMask);
+
+                    // Reduce overall water: only keep stronger candidates
+                    // (so you get fewer random wet streaks)
+                    rMask = smooth01(0.55f, 0.92f, rMask); // pushes weak mask to 0
+                    rMask *= riverRegion;
+
+                    // Lakes: rarer and only in “basin” areas
+                    float lN = fbm2D((float)wx * 0.00095f, (float)wz * 0.00095f, NOISE_SEED + 54000u, 3, 2.0f, 0.5f);
+                    float lake = smooth01(0.91f, 0.975f, lN); // much rarer
+
+                    // Only allow lakes in low-ish terrain (prevents lakes everywhere on high plateaus)
+                    float lowLand = smooth01((float)WATER_LEVEL - 6.0f, (float)WATER_LEVEL + 2.0f, (float)h);
+                    lake *= lowLand;
+
+                    // Also block lakes in non-river regions (keeps water clustered)
+                    lake *= riverRegion;
+
+                    // Combine “water feature strength”
+                    float waterFeat = std::max(rMask, lake);
+
+                    // Carve bed: ensure it reaches under WATER_LEVEL so water hugs banks
+                    int riverDepth = (int)std::round(rMask * 14.0f);     // deeper main channels
+                    int lakeDepth  = (int)std::round(lake  * 12.0f);
+
+                    int bedH = h - std::max(riverDepth, lakeDepth);
+
+                    // IMPORTANT: force bed under the water plane when water feature exists
+                    // This removes “stone shelf where water should be”.
+                    if (waterFeat > 0.05f) {
+                        // how far under water to carve:
+                        int target = WATER_LEVEL - 2 - (int)std::round(waterFeat * 6.0f); // deeper where stronger
+                        bedH = std::min(bedH, target);
+                    }
+
+                    int groundH = clampi(bedH, 1, CHUNK_Y - 1);
+
+                    // Ensure river/lake channels reach the water plane so banks meet water cleanly
+                    // (only where water features exist)
+                    if ((rMask > 0.10f || lake > 0.35f) && groundH > WATER_LEVEL) {
+                        // pull channel down close to water to avoid “dry moat” edges
+                        groundH = std::max(1, std::min(groundH, WATER_LEVEL + 1));
+                    }
+
+                    // --- Slope proxy (for cliff stone exposure, optional) ---
                     int hE = heightAtWorld(wx + 1, wz);
                     int hW = heightAtWorld(wx - 1, wz);
-                    int hN = heightAtWorld(wx, wz + 1);
+                    int hN2 = heightAtWorld(wx, wz + 1);
                     int hS = heightAtWorld(wx, wz - 1);
-                    int slope = std::abs(hE - hW) + std::abs(hN - hS);
+                    int slope = std::abs(hE - hW) + std::abs(hN2 - hS);
 
-                    // Height-based rock exposure (no random patches)
-                    float heightT = clamp01((float)(h - 65) / 50.0f); // higher elevations rockier
-
-                    // Exposed stone only if:
-                    //  - slope is steep (cliffs)
-                    //  - OR very high elevation
-                    bool exposedStone =
-                        (slope >= 8) ||      // steep cliff faces
-                        (heightT > 0.75f);   // very high peaks
-
-                    // Dirt thickness logic
+                    // Stone exposure: steep or very high peaks (no random stone patches)
+                    float heightT = clamp01((float)(groundH - (WATER_LEVEL + 10)) / 60.0f);
+                    bool exposedStone = ((slope >= 8) || (heightT > 0.75f)) && (waterFeat < 0.10f);
+                    
                     int dirtThickness;
-                    if (slope < 3) dirtThickness = 7;       // flat plains
+                    if (slope < 3) dirtThickness = 7;
                     else if (slope < 6) dirtThickness = 5;
-                    else dirtThickness = 3;                 // steeper = thinner dirt
-
+                    else dirtThickness = 3;
                     if (exposedStone) dirtThickness = std::max(1, dirtThickness - 2);
 
-                    int stoneTop = std::max(0, h - dirtThickness);
+                    int stoneTop = std::max(0, groundH - dirtThickness);
 
-                    for (int yy = 0; yy < h; ++yy) {
+                    // Fill ground column up to groundH
+                    for (int yy = 0; yy < groundH; ++yy) {
                         uint8_t id = STONE;
 
-                        if (yy == h - 1) {
-                            // Surface block
-                            if (exposedStone)
-                                id = STONE;
-                            else
-                                id = GRASS;
-                        }
-                        else if (yy >= stoneTop) {
+                        if (yy == groundH - 1) {
+                            if (exposedStone) id = STONE;
+                            else              id = GRASS;
+                        } else if (yy >= stoneTop) {
                             id = DIRT;
-                        }
-                        else {
+                        } else {
                             id = STONE;
                         }
 
                         ch->blocks[idx3(xx, yy, zz, CHUNK_X, CHUNK_Y, CHUNK_Z)] = id;
+                    }
+
+                    int surfaceY = groundH - 1;
+
+                    int beachInner = 2;
+                    int beachOuter = 3;
+
+                    bool nearWater =
+                        (std::abs(surfaceY - WATER_LEVEL) <= beachOuter) ||
+                        (waterFeat > 0.10f);
+
+                    if (nearWater && !exposedStone) {
+                        if (surfaceY <= WATER_LEVEL + beachOuter && surfaceY >= WATER_LEVEL - beachInner) {
+                            ch->blocks[idx3(xx, surfaceY, zz, CHUNK_X, CHUNK_Y, CHUNK_Z)] = SAND;
+
+                            for (int d = 1; d <= 3; ++d) {
+                                int yy = surfaceY - d;
+                                if (yy < 0) break;
+                                uint8_t cur = ch->blocks[idx3(xx, yy, zz, CHUNK_X, CHUNK_Y, CHUNK_Z)];
+                                if (cur == DIRT || cur == GRASS) {
+                                    ch->blocks[idx3(xx, yy, zz, CHUNK_X, CHUNK_Y, CHUNK_Z)] = SAND;
+                                }
+                            }
+                        }
+                    }
+
+                    // Constant water plane everywhere
+                    if (groundH <= WATER_LEVEL) {
+                        for (int yy = groundH; yy <= WATER_LEVEL && yy < CHUNK_Y; ++yy) {
+                            ch->blocks[idx3(xx, yy, zz, CHUNK_X, CHUNK_Y, CHUNK_Z)] = WATER;
+                        }
+                    }
+                }
+            }
+            // Tree placement (kept inside chunk bounds to avoid cross-chunk writes)
+            const float TREE_CHANCE = 0.005f; // ~0.5% per column; adjust
+            for (int lz = 2; lz < CHUNK_Z - 2; ++lz) {
+                for (int lx = 2; lx < CHUNK_X - 2; ++lx) {
+                    int wx = baseWX + lx;
+                    int wz = baseWZ + lz;
+
+                    float r = rand01_world(wx, wz, NOISE_SEED + 33333u);
+                    if (r > TREE_CHANCE) continue;
+
+                    // Find surface: scan down from top to find first non-air/water
+                    int y = CHUNK_Y - 2;
+                    for (; y >= 1; --y) {
+                        uint8_t b = getLocal(lx, y, lz);
+                        if (b != AIR && b != WATER) break;
+                    }
+                    if (y <= 1) continue;
+
+                    // Must be grass at surface, and not underwater
+                    if (getLocal(lx, y, lz) != GRASS) continue;
+                    if (y < WATER_LEVEL) continue;
+
+                    // Avoid steep slopes: compare nearby heights quickly (using world height)
+                    int h0 = heightAtWorld(wx, wz);
+                    int h1 = heightAtWorld(wx + 1, wz);
+                    int h2 = heightAtWorld(wx, wz + 1);
+                    if (std::abs(h0 - h1) + std::abs(h0 - h2) > 4) continue;
+
+                    int trunkH = 4 + (int)std::floor(rand01_world(wx, wz, NOISE_SEED + 44444u) * 3.0f); // 4..6
+
+                    // Trunk
+                    for (int i = 1; i <= trunkH; ++i) {
+                        uint8_t cur = getLocal(lx, y + i, lz);
+                        if (cur == AIR || cur == LEAVES) setLocal(lx, y + i, lz, WOOD);
+                    }
+
+                    // Leaves (simple canopy)
+                    int topY = y + trunkH;
+                    for (int dz = -2; dz <= 2; ++dz) {
+                        for (int dx = -2; dx <= 2; ++dx) {
+                            for (int dy = -2; dy <= 1; ++dy) {
+                                int ax = lx + dx;
+                                int ay = topY + dy;
+                                int az = lz + dz;
+
+                                float d2 = float(dx*dx + dz*dz) + float(dy*dy) * 0.7f;
+                                if (d2 > 6.0f) continue;
+
+                                uint8_t cur = getLocal(ax, ay, az);
+                                if (cur == AIR) setLocal(ax, ay, az, LEAVES);
+                            }
+                        }
                     }
                 }
             }
