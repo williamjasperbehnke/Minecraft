@@ -2241,9 +2241,9 @@ int main() {
         }
 
         // --- Draw big aligned wall (fixed in world) ---
-        const int WALL_HALF_W = 0.5;
-        const int WALL_HALF_H = 0.5;
-        const int THICKNESS   = 1;
+        const int WALL_HALF_W = 120;
+        const int WALL_HALF_H = 80;
+        const int THICKNESS   = 12;
 
         const int DRAW_LIMIT = 600000; // safety brake; increase to hurt
         int draws = 0;
