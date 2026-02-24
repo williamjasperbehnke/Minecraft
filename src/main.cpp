@@ -2096,84 +2096,87 @@ static void addQuad(ChunkMesh2& m,
                     glm::vec3 a, glm::vec3 b,
                     glm::vec3 c, glm::vec3 d,
                     float shade, float alpha,
-                    glm::ivec2 tileTopLeft,
-                    int axis, int dir,
-                    float blockSize)
+                    glm::ivec2 tile,
+                    int axis, int dir)
 {
     // ----------------------------
     // Winding fix (keep)
     // ----------------------------
-    glm::vec3 axisVec(0.0f); axisVec[axis] = 1.0f;
+    glm::vec3 axisVec(0.0f);
+    axisVec[axis] = 1.0f;
+
     glm::vec3 expected = axisVec * float(dir);
     glm::vec3 n = glm::cross(b - a, c - a);
-    if (glm::dot(n, expected) < 0.0f) std::swap(b, d);
+
+    if (glm::dot(n, expected) < 0.0f)
+        std::swap(b, d);
 
     // ----------------------------
-    // Choose face-plane UV basis
-    //  - ±Y faces: U=X, V=Z
-    //  - ±X faces: U=Z, V=Y
-    //  - ±Z faces: U=X, V=Y
+    // Pick which world axes define the face plane UV basis:
+    //  - ±Y faces (top/bottom): U = X, V = Z
+    //  - ±X faces (east/west):  U = Z, V = Y
+    //  - ±Z faces (north/south):U = X, V = Y
     // ----------------------------
-    int uAxis = 0, vAxis = 1;
-    if (axis == 1) { uAxis = 0; vAxis = 2; }      // Y face: XZ
-    else if (axis == 0) { uAxis = 2; vAxis = 1; } // X face: ZY
-    else { uAxis = 0; vAxis = 1; }                // Z face: XY
+    int uAxis = 0;
+    int vAxis = 1;
+
+    if (axis == 1) {          // Y face → XZ
+        uAxis = 0;
+        vAxis = 2;
+    }
+    else if (axis == 0) {     // X face → ZY
+        uAxis = 2;
+        vAxis = 1;
+    }
+    else {                    // Z face → XY
+        uAxis = 0;
+        vAxis = 1;
+    }
 
     auto proj = [&](const glm::vec3& p) -> glm::vec2 {
         return glm::vec2(p[uAxis], p[vAxis]);
     };
 
-    glm::vec2 pa = proj(a), pb = proj(b), pc = proj(c), pd = proj(d);
+    glm::vec2 pa = proj(a);
+    glm::vec2 pb = proj(b);
+    glm::vec2 pc = proj(c);
+    glm::vec2 pd = proj(d);
 
-    // ----------------------------
-    // TILE-SPACE UVs (for greedy tiling in the FRAGMENT shader)
-    //
-    // vUV = (tileIndex + distanceInBlocks)
-    // Fragment shader does:
-    //   tile  = floor(vUV)
-    //   local = fract(vUV)  -> repeats every 1 block
-    //   atlasUV = tileToAtlas(tile, local)
-    //
-    // IMPORTANT: tileTopLeft is in "top-left origin" coordinates,
-    // so we flip Y here to match GL bottom-left UV convention.
-    // ----------------------------
-    int tx = tileTopLeft.x;
-    int tyTop = tileTopLeft.y;
-    int ty = (ATLAS_TILES_Y - 1) - tyTop;
-
-    // Anchor the per-block distances to the minimum corner of the quad.
-    // This makes the UVs stable and ensures the greedy quad repeats per block.
     float minU = std::min(std::min(pa.x, pb.x), std::min(pc.x, pd.x));
+    float maxU = std::max(std::max(pa.x, pb.x), std::max(pc.x, pd.x));
     float minV = std::min(std::min(pa.y, pb.y), std::min(pc.y, pd.y));
+    float maxV = std::max(std::max(pa.y, pb.y), std::max(pc.y, pd.y));
 
-    auto uvTileSpace = [&](const glm::vec2& p) -> glm::vec2 {
-        float uBlocks = (p.x - minU) / blockSize; // 0..N across the merged quad
-        float vBlocks = (p.y - minV) / blockSize; // 0..M across the merged quad
-        return glm::vec2(float(tx) + uBlocks, float(ty) + vBlocks);
+    float du = std::max(1e-6f, maxU - minU);
+    float dv = std::max(1e-6f, maxV - minV);
+
+    auto normUV = [&](const glm::vec2& p) -> glm::vec2 {
+        return glm::vec2(
+            (p.x - minU) / du,
+            (p.y - minV) / dv
+        );
     };
 
-    glm::vec2 A = uvTileSpace(pa);
-    glm::vec2 B = uvTileSpace(pb);
-    glm::vec2 C = uvTileSpace(pc);
-    glm::vec2 D = uvTileSpace(pd);
+    glm::vec2 uva = normUV(pa);
+    glm::vec2 uvb = normUV(pb);
+    glm::vec2 uvc = normUV(pc);
+    glm::vec2 uvd = normUV(pd);
 
-    // Optional: flip U for negative-facing side faces to keep orientation consistent
-    // This flips only the fractional part (within the tile), so it remains compatible
-    // with the fragment shader's floor/fract logic.
+    // Optional: flip U for negative-facing sides
+    // (prevents some faces appearing mirrored/rotated)
     if (axis != 1 && dir < 0) {
-        auto flipU = [&](glm::vec2& uv) {
-            float tileU = std::floor(uv.x);
-            float local = uv.x - tileU;          // fract
-            uv.x = tileU + (1.0f - local);
-        };
-        flipU(A); flipU(B); flipU(C); flipU(D);
+        uva.x = 1.0f - uva.x;
+        uvb.x = 1.0f - uvb.x;
+        uvc.x = 1.0f - uvc.x;
+        uvd.x = 1.0f - uvd.x;
     }
 
-    // ----------------------------
-    // Emit vertices + indices
-    // Vertex format: [x y z u v shade alpha]
-    // Here u,v are tile-space uv (NOT final atlas uv)
-    // ----------------------------
+    // Convert 0..1 local UV into atlas UV
+    glm::vec2 A = atlasUV_fromTopLeftTile(tile, uva);
+    glm::vec2 B = atlasUV_fromTopLeftTile(tile, uvb);
+    glm::vec2 C = atlasUV_fromTopLeftTile(tile, uvc);
+    glm::vec2 D = atlasUV_fromTopLeftTile(tile, uvd);
+
     uint32_t base = (uint32_t)(m.verts.size() / 7);
 
     pushVertex(m.verts, a.x, a.y, a.z, A.x, A.y, shade, alpha);
@@ -2188,7 +2191,6 @@ static void addQuad(ChunkMesh2& m,
     m.indices.push_back(base + 2);
     m.indices.push_back(base + 3);
 }
-
 // ----------------------------
 // Chunk container
 // ----------------------------
@@ -2560,9 +2562,9 @@ static ChunkMeshes buildChunkMeshesGreedy_3x3Snapshots(
         }
 
         if (blockId == WATER) {
-            addQuad(out.water, a, b, c, d, shade, alpha, tile, axis, dir, s);
+            addQuad(out.water, a, b, c, d, shade, alpha, tile, axis, dir);
         } else {
-            addQuad(out.solid, a, b, c, d, shade, alpha, tile, axis, dir, s);
+            addQuad(out.solid, a, b, c, d, shade, alpha, tile, axis, dir);
         }
     };
 
@@ -2649,7 +2651,11 @@ static ChunkMeshes buildChunkMeshesGreedy_3x3Snapshots(
                         if (!done) ++h;
                     }
 
-                    emitQuad(axis, cur.dir, i, u, v, u + w, v + h, cur.id);
+                    for (int vv = v; vv < v + h; ++vv) {
+                        for (int uu = u; uu < u + w; ++uu) {
+                            emitQuad(axis, cur.dir, i, uu, vv, uu + 1, vv + 1, cur.id);
+                        }
+                    }
 
                     for (int dv = 0; dv < h; ++dv)
                         for (int du = 0; du < w; ++du)
@@ -2743,17 +2749,8 @@ int main() {
         "in float vAlpha;\n"
         "uniform sampler2D uAtlas;\n"
         "out vec4 FragColor;\n"
-        "const float tilesX = 8.0;\n"
-        "const float tilesY = 8.0;\n"
-        "const float inset  = 0.0010;\n"
         "void main(){\n"
-        "  vec2 tile = floor(vUV);\n"
-        "  vec2 local = fract(vUV);\n"
-        "  vec2 tw = vec2(1.0/tilesX, 1.0/tilesY);\n"
-        "  vec2 uv0 = tile * tw + inset * tw;\n"
-        "  vec2 uv1 = (tile + 1.0) * tw - inset * tw;\n"
-        "  vec2 atlasUV = mix(uv0, uv1, local);\n"
-        "  vec4 tex = texture(uAtlas, atlasUV);\n"
+        "  vec4 tex = texture(uAtlas, vUV);\n"
         "  tex.rgb *= vShade;\n"
         "  tex.a *= vAlpha;\n"
         "  if (tex.a <= 0.01) discard;\n"
