@@ -1907,6 +1907,19 @@ void mouse_callback(GLFWwindow* window, double xpos, double ypos) {
     gCameraFront = glm::normalize(direction);
 }
 
+static inline uint32_t hash_u32(uint32_t x) {
+    x ^= x >> 16;
+    x *= 0x7feb352d;
+    x ^= x >> 15;
+    x *= 0x846ca68b;
+    x ^= x >> 16;
+    return x;
+}
+
+static inline float hash_float01(uint32_t x) {
+    return (hash_u32(x) & 0x00FFFFFF) / float(0x01000000); // [0,1)
+}
+
 int main() {
     if (!glfwInit()) {
         return -1;
@@ -1916,7 +1929,15 @@ int main() {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 
-    GLFWwindow* window = glfwCreateWindow(800, 600, "Triangle", nullptr, nullptr);
+    // --- Fullscreen ---
+    GLFWmonitor* monitor = glfwGetPrimaryMonitor();
+    const GLFWvidmode* mode = glfwGetVideoMode(monitor);
+    if (!monitor || !mode) {
+        glfwTerminate();
+        return -1;
+    }
+
+    GLFWwindow* window = glfwCreateWindow(mode->width, mode->height, "Triangle", monitor, nullptr);
     if (!window) {
         glfwTerminate();
         return -1;
@@ -1930,54 +1951,74 @@ int main() {
         return -1;
     }
 
-    glViewport(0, 0, 800, 600);
+    glViewport(0, 0, mode->width, mode->height);
     glfwSetFramebufferSizeCallback(window, onFramebufferResize);
     glfwSetCursorPosCallback(window, mouse_callback);
     glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
 
     glEnable(GL_DEPTH_TEST);
 
-    glm::vec3 cameraPos   = glm::vec3(0.0f, 0.0f, 3.0f);
-    glm::vec3 cameraUp    = glm::vec3(0.0f, 1.0f, 0.0f);
-    float cameraSpeed     = 2.5f;
-    float deltaTime       = 0.0f;
-    float lastFrame       = 0.0f;
+    glm::vec3 cameraPos = glm::vec3(0.0f, 0.0f, 3.0f);
+    glm::vec3 cameraUp  = glm::vec3(0.0f, 1.0f, 0.0f);
+    float cameraSpeed   = 2.5f;
+    float deltaTime     = 0.0f;
+    float lastFrame     = 0.0f;
 
     // --- FPS tracking ---
     double fps_prev_time = glfwGetTime();
     int fps_frames = 0;
     double fps_value = 0.0;
 
+    // --- Persistent wall state (fixed in world once spawned) ---
+    bool wallSpawned = false;
+    glm::vec3 wallCenter(0.0f);
+    glm::vec3 wallRight(1.0f, 0.0f, 0.0f);
+    glm::vec3 wallUp(0.0f, 1.0f, 0.0f);
+    glm::vec3 wallForward(0.0f, 0.0f, -1.0f);
+
     // ----------------------------
     // Cube data
     // ----------------------------
     float cubeVertices[] = {
-        -0.5f,-0.5f, 0.5f, 0,1,1,  0.5f,-0.5f, 0.5f, 0,1,1,
-         0.5f, 0.5f, 0.5f, 0,1,1, -0.5f, 0.5f, 0.5f, 0,1,1,
-
-        -0.5f,-0.5f,-0.5f, 1,0,0,  0.5f,-0.5f,-0.5f, 1,0,0,
-         0.5f, 0.5f,-0.5f, 1,0,0, -0.5f, 0.5f,-0.5f, 1,0,0,
-
-        -0.5f,-0.5f,-0.5f, 0,1,0, -0.5f, 0.5f,-0.5f, 0,1,0,
-        -0.5f, 0.5f, 0.5f, 0,1,0, -0.5f,-0.5f, 0.5f, 0,1,0,
-
-         0.5f,-0.5f,-0.5f, 0,0,1,  0.5f, 0.5f,-0.5f, 0,0,1,
-         0.5f, 0.5f, 0.5f, 0,0,1,  0.5f,-0.5f, 0.5f, 0,0,1,
-
-        -0.5f,-0.5f,-0.5f, 1,1,0,  0.5f,-0.5f,-0.5f, 1,1,0,
-         0.5f,-0.5f, 0.5f, 1,1,0, -0.5f,-0.5f, 0.5f, 1,1,0,
-
-        -0.5f, 0.5f,-0.5f, 1,0,1,  0.5f, 0.5f,-0.5f, 1,0,1,
-         0.5f, 0.5f, 0.5f, 1,0,1, -0.5f, 0.5f, 0.5f, 1,0,1
+        // Front face (cyan)
+        -0.5f, -0.5f,  0.5f,  0.0f, 1.0f, 1.0f,
+         0.5f, -0.5f,  0.5f,  0.0f, 1.0f, 1.0f,
+         0.5f,  0.5f,  0.5f,  0.0f, 1.0f, 1.0f,
+        -0.5f,  0.5f,  0.5f,  0.0f, 1.0f, 1.0f,
+        // Back face (red)
+        -0.5f, -0.5f, -0.5f,  1.0f, 0.0f, 0.0f,
+         0.5f, -0.5f, -0.5f,  1.0f, 0.0f, 0.0f,
+         0.5f,  0.5f, -0.5f,  1.0f, 0.0f, 0.0f,
+        -0.5f,  0.5f, -0.5f,  1.0f, 0.0f, 0.0f,
+        // Left face (green)
+        -0.5f, -0.5f, -0.5f,  0.0f, 1.0f, 0.0f,
+        -0.5f,  0.5f, -0.5f,  0.0f, 1.0f, 0.0f,
+        -0.5f,  0.5f,  0.5f,  0.0f, 1.0f, 0.0f,
+        -0.5f, -0.5f,  0.5f,  0.0f, 1.0f, 0.0f,
+        // Right face (blue)
+         0.5f, -0.5f, -0.5f,  0.0f, 0.0f, 1.0f,
+         0.5f,  0.5f, -0.5f,  0.0f, 0.0f, 1.0f,
+         0.5f,  0.5f,  0.5f,  0.0f, 0.0f, 1.0f,
+         0.5f, -0.5f,  0.5f,  0.0f, 0.0f, 1.0f,
+        // Bottom face (yellow)
+        -0.5f, -0.5f, -0.5f,  1.0f, 1.0f, 0.0f,
+         0.5f, -0.5f, -0.5f,  1.0f, 1.0f, 0.0f,
+         0.5f, -0.5f,  0.5f,  1.0f, 1.0f, 0.0f,
+        -0.5f, -0.5f,  0.5f,  1.0f, 1.0f, 0.0f,
+        // Top face (magenta)
+        -0.5f,  0.5f, -0.5f,  1.0f, 0.0f, 1.0f,
+         0.5f,  0.5f, -0.5f,  1.0f, 0.0f, 1.0f,
+         0.5f,  0.5f,  0.5f,  1.0f, 0.0f, 1.0f,
+        -0.5f,  0.5f,  0.5f,  1.0f, 0.0f, 1.0f
     };
 
     unsigned int cubeIndices[] = {
-         0,1,2, 0,2,3,
-         4,5,6, 4,6,7,
-         8,9,10, 8,10,11,
-        12,13,14, 12,14,15,
-        16,17,18, 16,18,19,
-        20,21,22, 20,22,23
+        0, 1, 2, 0, 2, 3,
+        4, 5, 6, 4, 6, 7,
+        8, 9,10, 8,10,11,
+       12,13,14,12,14,15,
+       16,17,18,16,18,19,
+       20,21,22,20,22,23
     };
 
     unsigned int VBO, VAO, EBO;
@@ -1993,58 +2034,152 @@ int main() {
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO);
     glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(cubeIndices), cubeIndices, GL_STATIC_DRAW);
 
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6*sizeof(float), (void*)0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)0);
     glEnableVertexAttribArray(0);
 
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6*sizeof(float), (void*)(3*sizeof(float)));
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)(3 * sizeof(float)));
     glEnableVertexAttribArray(1);
 
     // ----------------------------
-    // Shaders
+    // Cube shaders
     // ----------------------------
-    const char* vertexShaderSource =
+    const char* cubeVS =
         "#version 330 core\n"
         "layout(location = 0) in vec3 aPos;\n"
         "layout(location = 1) in vec3 aColor;\n"
         "uniform mat4 MVP;\n"
         "out vec3 vColor;\n"
-        "void main() {\n"
-        "    gl_Position = MVP * vec4(aPos,1.0);\n"
-        "    vColor = aColor;\n"
-        "}";
+        "void main(){ gl_Position = MVP * vec4(aPos,1.0); vColor=aColor; }\n";
 
-    const char* fragmentShaderSource =
+    const char* cubeFS =
         "#version 330 core\n"
         "in vec3 vColor;\n"
         "out vec4 FragColor;\n"
-        "void main() {\n"
-        "    FragColor = vec4(vColor,1.0);\n"
-        "}";
+        "void main(){ FragColor = vec4(vColor,1.0); }\n";
 
-    unsigned int vertexShader = glCreateShader(GL_VERTEX_SHADER);
-    glShaderSource(vertexShader, 1, &vertexShaderSource, nullptr);
-    glCompileShader(vertexShader);
+    unsigned int cubeVert = glCreateShader(GL_VERTEX_SHADER);
+    glShaderSource(cubeVert, 1, &cubeVS, nullptr);
+    glCompileShader(cubeVert);
 
-    unsigned int fragmentShader = glCreateShader(GL_FRAGMENT_SHADER);
-    glShaderSource(fragmentShader, 1, &fragmentShaderSource, nullptr);
-    glCompileShader(fragmentShader);
+    unsigned int cubeFrag = glCreateShader(GL_FRAGMENT_SHADER);
+    glShaderSource(cubeFrag, 1, &cubeFS, nullptr);
+    glCompileShader(cubeFrag);
 
-    unsigned int shaderProgram = glCreateProgram();
-    glAttachShader(shaderProgram, vertexShader);
-    glAttachShader(shaderProgram, fragmentShader);
-    glLinkProgram(shaderProgram);
+    unsigned int cubeProgram = glCreateProgram();
+    glAttachShader(cubeProgram, cubeVert);
+    glAttachShader(cubeProgram, cubeFrag);
+    glLinkProgram(cubeProgram);
 
-    glDeleteShader(vertexShader);
-    glDeleteShader(fragmentShader);
+    glDeleteShader(cubeVert);
+    glDeleteShader(cubeFrag);
+
+    // ----------------------------
+    // FPS overlay (7-seg) line renderer (OpenGL 3.3 core)
+    // ----------------------------
+    const char* lineVS =
+        "#version 330 core\n"
+        "layout(location=0) in vec2 aPos;\n"
+        "uniform vec2 uScreen;\n"
+        "void main(){\n"
+        "  vec2 ndc = vec2((aPos.x / uScreen.x) * 2.0 - 1.0,\n"
+        "                 1.0 - (aPos.y / uScreen.y) * 2.0);\n"
+        "  gl_Position = vec4(ndc, 0.0, 1.0);\n"
+        "}\n";
+
+    const char* lineFS =
+        "#version 330 core\n"
+        "out vec4 FragColor;\n"
+        "uniform vec4 uColor;\n"
+        "void main(){ FragColor = uColor; }\n";
+
+    unsigned int lineVert = glCreateShader(GL_VERTEX_SHADER);
+    glShaderSource(lineVert, 1, &lineVS, nullptr);
+    glCompileShader(lineVert);
+
+    unsigned int lineFrag = glCreateShader(GL_FRAGMENT_SHADER);
+    glShaderSource(lineFrag, 1, &lineFS, nullptr);
+    glCompileShader(lineFrag);
+
+    unsigned int lineProgram = glCreateProgram();
+    glAttachShader(lineProgram, lineVert);
+    glAttachShader(lineProgram, lineFrag);
+    glLinkProgram(lineProgram);
+
+    glDeleteShader(lineVert);
+    glDeleteShader(lineFrag);
+
+    unsigned int lineVAO = 0, lineVBO = 0;
+    glGenVertexArrays(1, &lineVAO);
+    glGenBuffers(1, &lineVBO);
+
+    glBindVertexArray(lineVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, lineVBO);
+    glBufferData(GL_ARRAY_BUFFER, 1024 * sizeof(float), nullptr, GL_DYNAMIC_DRAW); // will resize as needed
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(0);
+
+    auto pushLine = [](std::vector<float>& v, float x0, float y0, float x1, float y1) {
+        v.push_back(x0); v.push_back(y0);
+        v.push_back(x1); v.push_back(y1);
+    };
+
+    // 7 segments: a,b,c,d,e,f,g using bitmask
+    //  a
+    // f b
+    //  g
+    // e c
+    //  d
+    const uint8_t segMask[10] = {
+        0b0111111, // 0: a b c d e f
+        0b0000110, // 1: b c
+        0b1011011, // 2: a b d e g
+        0b1001111, // 3: a b c d g
+        0b1100110, // 4: b c f g
+        0b1101101, // 5: a c d f g
+        0b1111101, // 6: a c d e f g
+        0b0000111, // 7: a b c
+        0b1111111, // 8: all
+        0b1101111  // 9: a b c d f g
+    };
+
+    auto drawDigit7Seg = [&](std::vector<float>& v, int digit, float x, float y, float w, float h) {
+        if (digit < 0 || digit > 9) return;
+        uint8_t m = segMask[digit];
+
+        float x0 = x,     x1 = x + w;
+        float y0 = y,     y1 = y + h;
+        float ym = y + h * 0.5f;
+
+        // a: top
+        if (m & (1 << 0)) pushLine(v, x0, y0, x1, y0);
+        // b: upper-right
+        if (m & (1 << 1)) pushLine(v, x1, y0, x1, ym);
+        // c: lower-right
+        if (m & (1 << 2)) pushLine(v, x1, ym, x1, y1);
+        // d: bottom
+        if (m & (1 << 3)) pushLine(v, x0, y1, x1, y1);
+        // e: lower-left
+        if (m & (1 << 4)) pushLine(v, x0, ym, x0, y1);
+        // f: upper-left
+        if (m & (1 << 5)) pushLine(v, x0, y0, x0, ym);
+        // g: middle
+        if (m & (1 << 6)) pushLine(v, x0, ym, x1, ym);
+    };
+
+    auto snap = [](float v, float step) { return std::round(v / step) * step; };
 
     // ============================
     // Main Loop
     // ============================
     while (!glfwWindowShouldClose(window)) {
 
-        float currentFrame = glfwGetTime();
+        float currentFrame = (float)glfwGetTime();
         deltaTime = currentFrame - lastFrame;
         lastFrame = currentFrame;
+
+        // Respawn wall in front of you with R
+        if (glfwGetKey(window, GLFW_KEY_R) == GLFW_PRESS)
+            wallSpawned = false;
 
         // Movement
         if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
@@ -2064,44 +2199,171 @@ int main() {
             glfwGetKey(window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS)
             cameraPos.y -= cameraSpeed * deltaTime;
 
-        glClearColor(0.1f,0.1f,0.1f,1.0f);
+        // Render prep
+        glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-        glUseProgram(shaderProgram);
+        // framebuffer size (HiDPI safe)
+        int fbW = 0, fbH = 0;
+        glfwGetFramebufferSize(window, &fbW, &fbH);
+        if (fbW <= 0) fbW = mode->width;
+        if (fbH <= 0) fbH = mode->height;
+
+        // ----------------------------
+        // Draw cubes (wall)
+        // ----------------------------
+        glUseProgram(cubeProgram);
         glBindVertexArray(VAO);
 
-        glm::mat4 model = glm::mat4(1.0f);
-        glm::mat4 view  = glm::lookAt(cameraPos, cameraPos + gCameraFront, cameraUp);
-        glm::mat4 proj  = glm::perspective(glm::radians(45.0f), 800.0f/600.0f, 0.1f, 100.0f);
-        glm::mat4 mvp   = proj * view * model;
+        glm::vec3 forwardNow = glm::normalize(gCameraFront);
+        glm::mat4 view = glm::lookAt(cameraPos, cameraPos + forwardNow, cameraUp);
+        glm::mat4 proj = glm::perspective(glm::radians(45.0f), float(fbW) / float(fbH), 0.1f, 2000.0f);
 
-        int mvpLoc = glGetUniformLocation(shaderProgram, "MVP");
-        glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, &mvp[0][0]);
+        int mvpLoc = glGetUniformLocation(cubeProgram, "MVP");
 
-        glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_INT, 0);
+        // --- Spawn wall ONCE (fixed in world) ---
+        const float SPACING = 2.0f;         // 1 full block gap between cubes
+        const float WALL_DISTANCE = 40.0f;  // how far in front of you it spawns
 
-        // FPS in window title
+        if (!wallSpawned) {
+            wallForward = glm::normalize(gCameraFront);
+            wallRight   = glm::normalize(glm::cross(wallForward, cameraUp));
+            wallUp      = glm::normalize(glm::cross(wallRight, wallForward));
+
+            glm::vec3 desiredCenter = cameraPos + wallForward * WALL_DISTANCE;
+
+            float cx = snap(glm::dot(desiredCenter, wallRight),   SPACING);
+            float cy = snap(glm::dot(desiredCenter, wallUp),      SPACING);
+            float cz = snap(glm::dot(desiredCenter, wallForward), SPACING);
+
+            wallCenter = wallRight * cx + wallUp * cy + wallForward * cz;
+            wallSpawned = true;
+        }
+
+        // --- Draw big aligned wall (fixed in world) ---
+        const int WALL_HALF_W = 0.5;
+        const int WALL_HALF_H = 0.5;
+        const int THICKNESS   = 1;
+
+        const int DRAW_LIMIT = 600000; // safety brake; increase to hurt
+        int draws = 0;
+
+        for (int t = 0; t < THICKNESS; ++t) {
+            float depth = float(t) * SPACING;
+
+            for (int y = -WALL_HALF_H; y <= WALL_HALF_H; ++y) {
+                for (int x = -WALL_HALF_W; x <= WALL_HALF_W; ++x) {
+
+                    glm::vec3 pos =
+                        wallCenter
+                        + wallRight * (float(x) * SPACING)
+                        + wallUp    * (float(y) * SPACING)
+                        - wallForward * depth;
+
+                    glm::mat4 modelM(1.0f);
+                    modelM = glm::translate(modelM, pos);
+
+                    glm::mat4 mvp = proj * view * modelM;
+                    glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, &mvp[0][0]);
+
+                    glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_INT, 0);
+
+                    if (++draws >= DRAW_LIMIT) goto done_wall;
+                }
+            }
+        }
+    done_wall: ;
+
+        // ----------------------------
+        // FPS calculation
+        // ----------------------------
         double now = glfwGetTime();
         fps_frames++;
-
         double elapsed = now - fps_prev_time;
         if (elapsed >= 0.25) {
             fps_value = fps_frames / elapsed;
             fps_prev_time = now;
             fps_frames = 0;
-
-            char title[128];
-            snprintf(title, sizeof(title), "FPS: %.1f", fps_value);
-            glfwSetWindowTitle(window, title);
         }
+
+        // ----------------------------
+        // Draw FPS overlay (top-left) as 7-seg digits
+        // ----------------------------
+        // Format like "144.1"
+        char fpsStr[32];
+        snprintf(fpsStr, sizeof(fpsStr), "%.1f", fps_value);
+
+        std::vector<float> lineVerts;
+        lineVerts.reserve(512);
+
+        float startX = 20.0f;
+        float startY = 20.0f;
+        float digitW = 18.0f;
+        float digitH = 32.0f;
+        float gapX   = 8.0f;
+
+        float x = startX;
+        float y = startY;
+
+        for (const char* p = fpsStr; *p; ++p) {
+            if (*p >= '0' && *p <= '9') {
+                drawDigit7Seg(lineVerts, *p - '0', x, y, digitW, digitH);
+                x += digitW + gapX;
+            } else if (*p == '.') {
+                float size = 3.0f;
+                float eps  = 0.3f;   // overlap amount (tweak 0.3–1.0)
+
+                float dx = x;
+                float dy = y + digitH * 0.9f;
+
+                // top
+                pushLine(lineVerts, dx,       dy,       dx + size + eps, dy);
+                // right
+                pushLine(lineVerts, dx + size,      dy - eps, dx + size,       dy + size + eps);
+                // bottom
+                pushLine(lineVerts, dx,       dy + size, dx + size + eps, dy + size);
+                // left
+                pushLine(lineVerts, dx,             dy - eps, dx,              dy + size + eps);
+
+                x += size + gapX;
+            } else {
+                x += digitW + gapX;
+            }
+        }
+
+        glUseProgram(lineProgram);
+        glBindVertexArray(lineVAO);
+
+        int uScreenLoc = glGetUniformLocation(lineProgram, "uScreen");
+        int uColorLoc  = glGetUniformLocation(lineProgram, "uColor");
+        glUniform2f(uScreenLoc, (float)fbW, (float)fbH);
+        glUniform4f(uColorLoc, 1.0f, 1.0f, 1.0f, 1.0f);
+
+        glDisable(GL_DEPTH_TEST);
+        glLineWidth(2.0f);
+
+        glBindBuffer(GL_ARRAY_BUFFER, lineVBO);
+        glBufferData(GL_ARRAY_BUFFER, lineVerts.size() * sizeof(float), lineVerts.data(), GL_DYNAMIC_DRAW);
+
+        // Each vertex is (x,y). GL_LINES => 2 vertices per line segment.
+        glDrawArrays(GL_LINES, 0, (GLsizei)(lineVerts.size() / 2));
+
+        glEnable(GL_DEPTH_TEST);
 
         glfwSwapBuffers(window);
         glfwPollEvents();
     }
 
+    // Cleanup
     glDeleteVertexArrays(1, &VAO);
     glDeleteBuffers(1, &VBO);
     glDeleteBuffers(1, &EBO);
+
+    glDeleteVertexArrays(1, &lineVAO);
+    glDeleteBuffers(1, &lineVBO);
+
+    glDeleteProgram(cubeProgram);
+    glDeleteProgram(lineProgram);
 
     glfwDestroyWindow(window);
     glfwTerminate();
