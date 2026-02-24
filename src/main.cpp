@@ -1883,12 +1883,14 @@ int pauseMenuButtonAtCursor(double mx, double my, int width, int height) {
 // ✅ Never draw bottom-of-world face (-Y at worldY==0)
 // ✅ Raycast (voxel DDA) + block breaking (LMB) + placing (RMB)
 // ✅ Highlight selected block with a white wireframe outline
+// ✅ Procedural generation: 1 layer of noise (default), optional 3 layers via flag
+// ✅ Block types: GRASS, DIRT, STONE (plus AIR)
 //
-// FIXED: slow mine/place while chunks loading
-// - edits now enqueue URGENT MESH for the edited chunk and edge neighbors
-// - AND enqueue URGENT GEN for any neighbor chunks that are missing/unready when you edit on a border
-// - mesh workers pop urgent first (dist2 = -1)
-// - main thread uploads urgent meshes first, with a bigger upload budget while urgent uploads exist
+// Notes:
+// - “UNKNOWN suppression” means: faces against missing/unready neighbor chunks are not drawn.
+//   Therefore: if you mine a block that would expose a face *toward an UNKNOWN neighbor*,
+//   you won’t see that face until the neighbor chunk is generated. This code already
+//   triggers URGENT GEN for border-neighbor chunks on edits to minimize the wait.
 
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
@@ -2113,40 +2115,92 @@ static inline int dist2Chunks(int cx, int cz, int pcx, int pcz) {
 struct MeshDone { int cx, cz; };
 
 // ============================================================
-// Refactored greedy mesher (NO world callback)
-// - Inputs are snapshots of 3x3 neighbor chunk blocks (copies)
-// - UNKNOWN suppression: if either side UNKNOWN => don't emit face
-// - Bottom face suppression: don't emit -Y faces at worldY==0
+// Simple deterministic value noise (2D), smooth interpolation
+// ============================================================
+static inline uint32_t hash2_u32(int x, int z, uint32_t seed) {
+    uint32_t h = (uint32_t)x * 0x8da6b343u ^ (uint32_t)z * 0xd8163841u ^ seed;
+    h ^= (h >> 16);
+    h *= 0x7feb352du;
+    h ^= (h >> 15);
+    h *= 0x846ca68bu;
+    h ^= (h >> 16);
+    return h;
+}
+
+static inline float u32_to_01(uint32_t h) {
+    // 24-bit mantissa-ish
+    return (float)(h & 0x00FFFFFFu) / (float)0x01000000u;
+}
+
+static inline float smoothstep01(float t) {
+    // classic smoothstep
+    return t * t * (3.0f - 2.0f * t);
+}
+
+static inline float lerp(float a, float b, float t) {
+    return a + (b - a) * t;
+}
+
+static float valueNoise2D(float x, float z, uint32_t seed) {
+    int x0 = (int)std::floor(x);
+    int z0 = (int)std::floor(z);
+    int x1 = x0 + 1;
+    int z1 = z0 + 1;
+
+    float fx = x - (float)x0;
+    float fz = z - (float)z0;
+
+    float sx = smoothstep01(fx);
+    float sz = smoothstep01(fz);
+
+    float v00 = u32_to_01(hash2_u32(x0, z0, seed));
+    float v10 = u32_to_01(hash2_u32(x1, z0, seed));
+    float v01 = u32_to_01(hash2_u32(x0, z1, seed));
+    float v11 = u32_to_01(hash2_u32(x1, z1, seed));
+
+    float ix0 = lerp(v00, v10, sx);
+    float ix1 = lerp(v01, v11, sx);
+    return lerp(ix0, ix1, sz); // [0,1)
+}
+
+// ============================================================
+// Greedy mesher based on 3x3 snapshots (NO world callback)
+// - UNKNOWN suppression (255)
+// - Bottom-of-world suppression
+// - Materials: uses block ID for color + merges only same id/dir
 // ============================================================
 struct ChunkSnapshot {
     bool ready = false;
     std::vector<uint8_t> blocks;
 };
 
+static glm::vec3 blockBaseColor(uint8_t id) {
+    // simple flat colors; tweak as you like
+    switch (id) {
+        default: return glm::vec3(1.0f, 1.0f, 1.0f);
+        case 1:  return glm::vec3(0.25f, 0.80f, 0.25f); // GRASS
+        case 2:  return glm::vec3(0.55f, 0.40f, 0.25f); // DIRT
+        case 3:  return glm::vec3(0.55f, 0.55f, 0.55f); // STONE
+    }
+}
+
+static float faceShade(int axis, int dir) {
+    // cheap lighting-ish: make top a bit brighter, bottom darker
+    if (axis == 1 && dir > 0) return 1.05f; // top
+    if (axis == 1 && dir < 0) return 0.70f; // bottom
+    if (axis == 0) return 0.90f;            // X sides
+    return 0.85f;                            // Z sides
+}
+
 static ChunkMesh2 buildChunkMeshGreedy_3x3Snapshots(
-    const ChunkSnapshot neigh[3][3],   // neigh[1][1] is center
+    const ChunkSnapshot neigh[3][3],
     int sx, int sy, int sz,
     const glm::vec3& origin,
-    float blockSize
+    float blockSize,
+    uint8_t AIR,
+    uint8_t UNKNOWN
 ) {
     ChunkMesh2 mesh;
-
-    static constexpr uint8_t AIR     = 0;
-    static constexpr uint8_t SOLID   = 1;
-    static constexpr uint8_t UNKNOWN = 255;
-
-    const glm::vec3 colRight  = {0.0f, 0.0f, 1.0f}; // +X
-    const glm::vec3 colLeft   = {0.0f, 1.0f, 0.0f}; // -X
-    const glm::vec3 colTop    = {1.0f, 0.0f, 1.0f}; // +Y
-    const glm::vec3 colBottom = {1.0f, 1.0f, 0.0f}; // -Y
-    const glm::vec3 colFront  = {0.0f, 1.0f, 1.0f}; // +Z
-    const glm::vec3 colBack   = {1.0f, 0.0f, 0.0f}; // -Z
-
-    auto faceColor = [&](int axis, int dir) -> glm::vec3 {
-        if (axis == 0) return (dir > 0) ? colRight  : colLeft;
-        if (axis == 1) return (dir > 0) ? colTop    : colBottom;
-        return          (dir > 0) ? colFront  : colBack;
-    };
 
     auto sample = [&](int x, int y, int z) -> uint8_t {
         if (y < 0 || y >= sy) return AIR;
@@ -2170,7 +2224,7 @@ static ChunkMesh2 buildChunkMeshGreedy_3x3Snapshots(
         if (!sn.ready) return UNKNOWN;
 
         const int id = idx3(lx, y, lz, sx, sy, sz);
-        return sn.blocks[id] ? SOLID : AIR;
+        return sn.blocks[id];
     };
 
     struct MaskCell { uint8_t id = 0; int dir = 0; };
@@ -2179,15 +2233,16 @@ static ChunkMesh2 buildChunkMeshGreedy_3x3Snapshots(
     int maxDim = std::max(sx, std::max(sy, sz));
     std::vector<MaskCell> mask(maxDim * maxDim);
 
-    auto emitQuad = [&](int axis, int dir, int i, int u0, int v0, int u1, int v1) {
-        // Never draw bottom-of-world face
+    auto emitQuad = [&](int axis, int dir, int i, int u0, int v0, int u1, int v1, uint8_t blockId) {
+        // Never draw bottom-of-world face (-Y at worldY==0)
         if (axis == 1 && dir == -1) {
             int worldY = (i - 1);
             if (worldY <= 0) return;
         }
 
         const float s = blockSize;
-        const glm::vec3 col = faceColor(axis, dir);
+        glm::vec3 col = blockBaseColor(blockId) * faceShade(axis, dir);
+        col = glm::clamp(col, glm::vec3(0.0f), glm::vec3(1.0f));
 
         int uAxis = (axis + 1) % 3;
         int vAxis = (axis + 2) % 3;
@@ -2205,15 +2260,16 @@ static ChunkMesh2 buildChunkMeshGreedy_3x3Snapshots(
         glm::vec3 p11 = corner(i,  u1, v1);
         glm::vec3 p01 = corner(i,  u0, v1);
 
+        // Centered cubes convention (-0.5..0.5)
         glm::vec3 shift(-0.5f * s, -0.5f * s, -0.5f * s);
         glm::vec3 a = p00 + shift;
         glm::vec3 b = p10 + shift;
         glm::vec3 c = p11 + shift;
         glm::vec3 d = p01 + shift;
 
+        // Winding fix
         glm::vec3 axisVec(0.0f); axisVec[axis] = 1.0f;
         glm::vec3 expected = axisVec * float(dir);
-
         glm::vec3 n = glm::cross(b - a, c - a);
         if (glm::dot(n, expected) < 0.0f) std::swap(b, d);
 
@@ -2229,6 +2285,7 @@ static ChunkMesh2 buildChunkMeshGreedy_3x3Snapshots(
         int V = dims[vAxis];
 
         for (int i = 0; i <= A; ++i) {
+            // mask build
             for (int v = 0; v < V; ++v) {
                 for (int u = 0; u < U; ++u) {
                     int c0[3] = {0,0,0};
@@ -2244,19 +2301,25 @@ static ChunkMesh2 buildChunkMeshGreedy_3x3Snapshots(
                     uint8_t bS = sample(c1[0], c1[1], c1[2]);
 
                     MaskCell cell{};
+
+                    // UNKNOWN suppression
                     if (aS == UNKNOWN || bS == UNKNOWN) {
                         cell = {};
-                    } else if (aS == SOLID && bS == AIR) {
-                        cell.id = SOLID; cell.dir = +1;
-                    } else if (aS == AIR && bS == SOLID) {
-                        cell.id = SOLID; cell.dir = -1;
+                    }
+                    // visible face if one side solid, other air
+                    else if (aS != AIR && bS == AIR) {
+                        cell.id = aS; cell.dir = +1;
+                    } else if (aS == AIR && bS != AIR) {
+                        cell.id = bS; cell.dir = -1;
                     } else {
                         cell = {};
                     }
+
                     mask[u + U * v] = cell;
                 }
             }
 
+            // greedy merge
             for (int v = 0; v < V; ++v) {
                 for (int u = 0; u < U; ) {
                     MaskCell cur = mask[u + U * v];
@@ -2279,7 +2342,7 @@ static ChunkMesh2 buildChunkMeshGreedy_3x3Snapshots(
                         if (!done) ++h;
                     }
 
-                    emitQuad(axis, cur.dir, i, u, v, u + w, v + h);
+                    emitQuad(axis, cur.dir, i, u, v, u + w, v + h, cur.id);
 
                     for (int dv = 0; dv < h; ++dv)
                         for (int du = 0; du < w; ++du)
@@ -2292,6 +2355,47 @@ static ChunkMesh2 buildChunkMeshGreedy_3x3Snapshots(
     }
 
     return mesh;
+}
+
+static inline float clamp01(float v) { return std::max(0.0f, std::min(1.0f, v)); }
+
+static float fbm2D(float x, float z, uint32_t seed, int octaves, float lacunarity, float gain) {
+    float sum = 0.0f;
+    float amp = 0.5f;
+    float freq = 1.0f;
+    for (int i = 0; i < octaves; ++i) {
+        sum += amp * valueNoise2D(x * freq, z * freq, seed + 101u * (uint32_t)i);
+        freq *= lacunarity;
+        amp *= gain;
+    }
+    return sum; // ~[0,1)
+}
+
+static float ridge2D(float x, float z, uint32_t seed, int octaves, float lacunarity, float gain) {
+    // Ridged multifractal from value noise: ridge = (1 - |2n-1|)^2 accumulated
+    float sum = 0.0f;
+    float amp = 0.5f;
+    float freq = 1.0f;
+    for (int i = 0; i < octaves; ++i) {
+        float n = valueNoise2D(x * freq, z * freq, seed + 193u * (uint32_t)i); // [0,1)
+        float r = 1.0f - std::abs(n * 2.0f - 1.0f); // [0,1]
+        r = r * r;
+        sum += amp * r;
+        freq *= lacunarity;
+        amp *= gain;
+    }
+    return sum; // ~[0,1]
+}
+
+static float terrace(float h, float step, float strength) {
+    // strength 0..1, step in "height units"
+    if (strength <= 0.0f) return h;
+    float t = std::floor(h / step) * step;
+    float frac = (h - t) / step;
+    // smooth within step
+    float s = smoothstep01(frac);
+    float terraced = t + s * step;
+    return lerp(h, terraced, clamp01(strength));
 }
 
 int main() {
@@ -2383,9 +2487,16 @@ int main() {
     const double UPLOAD_BUDGET_MS_NORMAL = 2.0;
     const double UPLOAD_BUDGET_MS_URGENT = 10.0;
 
+    // Block IDs
     static constexpr uint8_t AIR     = 0;
-    static constexpr uint8_t SOLID   = 1;
+    static constexpr uint8_t GRASS   = 1;
+    static constexpr uint8_t DIRT    = 2;
+    static constexpr uint8_t STONE   = 3;
     static constexpr uint8_t UNKNOWN = 255;
+
+    // Worldgen flags
+    const bool USE_3_LAYERS_NOISE = true; // <--- flip to true for 3-layer gen
+    const uint32_t NOISE_SEED = 1337u;
 
     // ============================================================
     // Chunk storage (pointer-stable)
@@ -2419,16 +2530,6 @@ int main() {
     auto unpinChunk = [&](GpuChunk* ch) {
         if (!ch) return;
         ch->pins.fetch_sub(1, std::memory_order_acq_rel);
-    };
-
-    // ============================================================
-    // Height function
-    // ============================================================
-    auto heightAtWorld = [&](int wx, int wz) -> int {
-        float fx = float(wx) * 0.08f;
-        float fz = float(wz) * 0.08f;
-        float h  = (sinf(fx) + cosf(fz)) * 10.0f + 32.0f;
-        return clampi((int)h, 0, CHUNK_Y);
     };
 
     // Player chunk coords visible to workers
@@ -2507,6 +2608,64 @@ int main() {
     };
 
     // ============================================================
+    // Procedural height using noise
+    // - default: single layer
+    // - optional: 3-layer (more varied)
+    // ============================================================
+    auto heightAtWorld = [&](int wx, int wz) -> int {
+    // Global knobs
+    const int   baseSea = 28;     // baseline
+    const int   maxH    = CHUNK_Y - 1;
+
+    // World-space to noise-space
+    float X = (float)wx;
+    float Z = (float)wz;
+
+    // ----- Domain warp (big features) -----
+    // Warp the sampling coordinates by low-frequency noise so hills don’t look like noise blobs.
+    float warpFreq = 0.010f;
+    float warpAmp  = 35.0f;
+
+    float wxo = (fbm2D(X * warpFreq, Z * warpFreq, NOISE_SEED + 500u, 3, 2.0f, 0.5f) * 2.0f - 1.0f) * warpAmp;
+    float wzo = (fbm2D(X * warpFreq, Z * warpFreq, NOISE_SEED + 700u, 3, 2.0f, 0.5f) * 2.0f - 1.0f) * warpAmp;
+
+    float Xw = X + wxo;
+    float Zw = Z + wzo;
+
+    // ----- Biome selector (plains <-> mountains) -----
+    // Low frequency decides how “mountainy” the area is.
+    float biome = fbm2D(X * 0.0035f, Z * 0.0035f, NOISE_SEED + 900u, 2, 2.0f, 0.5f); // [0,1)
+    float mountaininess = smoothstep01(clamp01((biome - 0.35f) / (0.85f - 0.35f)));    // 0 plains .. 1 mountains
+
+    // ----- Base rolling hills (fbm) -----
+    float hills = fbm2D(Xw * 0.020f, Zw * 0.020f, NOISE_SEED + 100u, 5, 2.0f, 0.5f); // [0,1)
+    hills = (hills * 2.0f - 1.0f); // [-1,1)
+
+    // ----- Mountain ridges -----
+    float ridges = ridge2D(Xw * 0.010f, Zw * 0.010f, NOISE_SEED + 200u, 5, 2.0f, 0.5f); // [0,1]
+    ridges = ridges * ridges; // sharpen further
+
+    // ----- Detail noise -----
+    float detail = (fbm2D(Xw * 0.080f, Zw * 0.080f, NOISE_SEED + 300u, 3, 2.0f, 0.5f) * 2.0f - 1.0f);
+
+    // ----- Combine into height -----
+    float plainsAmp   = 10.0f;
+    float mountainsAmp= 40.0f;
+
+    float plains = hills * plainsAmp + detail * 2.0f;
+    float mtn    = (hills * 8.0f) + (ridges * mountainsAmp) + detail * 4.0f;
+
+    float h = (float)baseSea + lerp(plains, mtn, mountaininess);
+
+    // Optional subtle terraces (looks like erosion/strata). Keep it subtle.
+    h = terrace(h, /*step=*/3.0f, /*strength=*/0.25f * mountaininess);
+
+    // Clamp + integer
+    int hi = (int)std::round(h);
+    return clampi(hi, 1, maxH);
+};
+
+    // ============================================================
     // World accessor for raycast / edits (rare)
     // ============================================================
     auto solidAtWorld = [&](int wx, int wy, int wz) -> uint8_t {
@@ -2526,7 +2685,7 @@ int main() {
         uint8_t out = UNKNOWN;
         if (ch->hasBlocks.load(std::memory_order_acquire) && !ch->inGen.load(std::memory_order_acquire)) {
             std::lock_guard<std::mutex> bl(ch->blocksMutex);
-            out = ch->blocks[idx3(lx, wy, lz, CHUNK_X, CHUNK_Y, CHUNK_Z)] ? SOLID : AIR;
+            out = ch->blocks[idx3(lx, wy, lz, CHUNK_X, CHUNK_Y, CHUNK_Z)];
         }
 
         unpinChunk(ch);
@@ -2546,13 +2705,13 @@ int main() {
             }
             unpinChunk(ch);
         }
+
         if (urgent) queueMeshUrgent(cx, cz);
         else        queueMesh(cx, cz, pcx, pcz);
     };
 
     // If an edit touches a chunk border and the neighbor is missing/unready, urgently generate it
     auto ensureNeighborGeneratedUrgent = [&](int ncx, int ncz) {
-        // create placeholder so it exists in map
         createChunkIfMissing(ncx, ncz);
 
         if (GpuChunk* n = pinChunk(ncx, ncz)) {
@@ -2600,7 +2759,7 @@ int main() {
         // URGENT remesh self
         dirtyAndQueueMesh(cx, cz, true);
 
-        // If border edit, urgently generate + urgent remesh neighbor so the seam updates ASAP
+        // border updates: urgent gen + urgent mesh neighbor
         if (lx == 0) {
             ensureNeighborGeneratedUrgent(cx - 1, cz);
             dirtyAndQueueMesh(cx - 1, cz, true);
@@ -2667,7 +2826,7 @@ int main() {
         // starting cell check
         {
             uint8_t s = solidAtWorld(x, y, z);
-            if (s == SOLID) {
+            if (s != AIR && s != UNKNOWN) {
                 RayHit hit; hit.wx=x; hit.wy=y; hit.wz=z; hit.nx=0; hit.ny=0; hit.nz=0; hit.t=0.0f;
                 return hit;
             }
@@ -2694,8 +2853,8 @@ int main() {
             if (t > maxDist) break;
 
             uint8_t s = solidAtWorld(x, y, z);
-            // do NOT treat UNKNOWN as a hit (prevents border interactions into missing chunks)
-            if (s == SOLID) {
+            // do NOT treat UNKNOWN as a hit
+            if (s != AIR && s != UNKNOWN) {
                 RayHit hit;
                 hit.wx=x; hit.wy=y; hit.wz=z;
                 hit.nx=lastNX; hit.ny=lastNY; hit.nz=lastNZ;
@@ -2708,7 +2867,7 @@ int main() {
     };
 
     // ============================================================
-    // Outline (selected block highlight) — GL_LINES
+    // Outline highlight — GL_LINES
     // ============================================================
     GLuint outlineVAO = 0, outlineVBO = 0;
 
@@ -2788,7 +2947,7 @@ int main() {
 
         {
             std::lock_guard<std::mutex> bl(ch->blocksMutex);
-            ch->blocks.assign(CHUNK_X * CHUNK_Y * CHUNK_Z, 0);
+            ch->blocks.assign(CHUNK_X * CHUNK_Y * CHUNK_Z, AIR);
 
             int baseWX = ch->cpos.x * CHUNK_X;
             int baseWZ = ch->cpos.y * CHUNK_Z;
@@ -2797,9 +2956,38 @@ int main() {
                 for (int xx = 0; xx < CHUNK_X; ++xx) {
                     int wx = baseWX + xx;
                     int wz = baseWZ + zz;
-                    int h  = heightAtWorld(wx, wz);
+
+                    int h = heightAtWorld(wx, wz);
+                    if (h <= 0) continue;
+
+                    // Use a “slope proxy” so dirt is thicker on flatter ground.
+                    // We sample nearby heights (cheap; still deterministic).
+                    int hE = heightAtWorld(wx + 1, wz);
+                    int hW = heightAtWorld(wx - 1, wz);
+                    int hN = heightAtWorld(wx, wz + 1);
+                    int hS = heightAtWorld(wx, wz - 1);
+                    int slope = std::abs(hE - hW) + std::abs(hN - hS); // 0..??
+
+                    // Dirt thickness: more dirt in plains, less on steep slopes
+                    int dirtThickness = 3 + (slope < 4 ? 2 : 0) + (slope < 2 ? 2 : 0); // 3..7
+
+                    // Stone depth variation via noise
+                    float stoneVarN = valueNoise2D((float)wx * 0.06f, (float)wz * 0.06f, NOISE_SEED + 1234u);
+                    int stoneTopOffset = (int)std::round((stoneVarN * 2.0f - 1.0f) * 3.0f); // [-3..3]
+                    int stoneTop = std::max(0, h - (dirtThickness + stoneTopOffset));
+
                     for (int yy = 0; yy < h; ++yy) {
-                        ch->blocks[idx3(xx, yy, zz, CHUNK_X, CHUNK_Y, CHUNK_Z)] = 1;
+                        uint8_t id = STONE;
+
+                        if (yy >= h - 1) {
+                            id = GRASS;
+                        } else if (yy >= stoneTop) {
+                            id = DIRT;
+                        } else {
+                            id = STONE;
+                        }
+
+                        ch->blocks[idx3(xx, yy, zz, CHUNK_X, CHUNK_Y, CHUNK_Z)] = id;
                     }
                 }
             }
@@ -2831,7 +3019,9 @@ int main() {
 
             int pcx = gPlayerCX.load();
             int pcz = gPlayerCZ.load();
-            if (std::abs(wi.cx - pcx) > GEN_RADIUS || std::abs(wi.cz - pcz) > GEN_RADIUS) continue;
+            if (wi.dist2 >= 0) {
+                if (std::abs(wi.cx - pcx) > GEN_RADIUS || std::abs(wi.cz - pcz) > GEN_RADIUS) continue;
+            }
 
             createChunkIfMissing(wi.cx, wi.cz);
             GpuChunk* ch = pinChunk(wi.cx, wi.cz);
@@ -2841,7 +3031,7 @@ int main() {
             unpinChunk(ch);
 
             // When a chunk becomes known, its neighbors’ seam can change (UNKNOWN -> known).
-            // This is NOT urgent by default.
+            // Not urgent by default.
             dirtyAndQueueMesh(wi.cx, wi.cz, false);
             for (int nz=-1; nz<=1; ++nz)
                 for (int nx=-1; nx<=1; ++nx)
@@ -2914,7 +3104,6 @@ int main() {
                 continue;
             }
 
-            // If not dirty, skip (NOTE: edits set dirtyMesh=true; also dirtyAndQueueMesh marks dirty)
             if (!ch->dirtyMesh.load(std::memory_order_acquire)) {
                 ch->inMesh.store(false, std::memory_order_release);
                 unpinChunk(ch);
@@ -2932,7 +3121,9 @@ int main() {
                 neigh,
                 CHUNK_X, CHUNK_Y, CHUNK_Z,
                 ch->origin,
-                BLOCK
+                BLOCK,
+                AIR,
+                UNKNOWN
             );
 
             {
@@ -2941,7 +3132,6 @@ int main() {
                 ch->stagedReady.store(true, std::memory_order_release);
             }
 
-            // enqueue upload (urgent uploads first)
             {
                 uint64_t kk = key64(wi.cx, wi.cz);
                 std::lock_guard<std::mutex> lock(meshDoneMutex);
@@ -3030,6 +3220,9 @@ int main() {
     const float EDIT_REACH = 10.0f;
     std::optional<RayHit> hoverHit;
 
+    // What block to place (pick one)
+    uint8_t gPlaceBlock = DIRT;
+
     // ============================================================
     // Main loop
     // ============================================================
@@ -3105,7 +3298,7 @@ int main() {
 
                     if (!(px == camX && py == camY && pz == camZ)) {
                         uint8_t s = solidAtWorld(px, py, pz);
-                        if (s == AIR) setBlockWorld(px, py, pz, SOLID);
+                        if (s == AIR) setBlockWorld(px, py, pz, gPlaceBlock);
                     }
                 }
             }
@@ -3113,7 +3306,6 @@ int main() {
 
         // ============================================================
         // Upload budget (urgent uploads first)
-        // - if there are urgent uploads waiting, we use a much larger budget until they drain
         // ============================================================
         double budgetMs = UPLOAD_BUDGET_MS_NORMAL;
         {
@@ -3126,8 +3318,8 @@ int main() {
             double elapsedMs = (glfwGetTime() - t0) * 1000.0;
             if (elapsedMs > budgetMs) break;
 
-            MeshDone md;
-            bool isUrgent = false;
+            MeshDone md{};
+            bool got = false;
 
             {
                 std::lock_guard<std::mutex> lock(meshDoneMutex);
@@ -3135,18 +3327,16 @@ int main() {
                     md = meshDoneUrgentQ.front();
                     meshDoneUrgentQ.pop_front();
                     meshDoneUrgentSet.erase(key64(md.cx, md.cz));
-                    isUrgent = true;
+                    got = true;
                 } else if (!meshDoneQ.empty()) {
                     md = meshDoneQ.front();
                     meshDoneQ.pop_front();
                     meshDoneSet.erase(key64(md.cx, md.cz));
-                    isUrgent = false;
-                } else {
-                    break;
+                    got = true;
                 }
             }
 
-            (void)isUrgent;
+            if (!got) break;
 
             GpuChunk* ch = pinChunk(md.cx, md.cz);
             if (!ch) continue;
