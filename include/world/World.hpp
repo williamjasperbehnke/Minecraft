@@ -86,12 +86,32 @@ class World {
 
   private:
     enum class JobType { LoadOrGenerate, Remesh };
+    struct FluidCoord {
+        int x = 0;
+        int y = 0;
+        int z = 0;
+        bool operator==(const FluidCoord &other) const {
+            return x == other.x && y == other.y && z == other.z;
+        }
+    };
+    struct FluidCoordHash {
+        std::size_t operator()(const FluidCoord &c) const {
+            std::size_t h = static_cast<std::size_t>(std::hash<int>{}(c.x));
+            h ^= static_cast<std::size_t>(std::hash<int>{}(c.y)) + 0x9e3779b97f4a7c15ull + (h << 6) +
+                 (h >> 2);
+            h ^= static_cast<std::size_t>(std::hash<int>{}(c.z)) + 0x9e3779b97f4a7c15ull + (h << 6) +
+                 (h >> 2);
+            return h;
+        }
+    };
 
     struct WorkerJob {
         JobType type = JobType::LoadOrGenerate;
         ChunkCoord coord;
         bool urgent = false;
         std::shared_ptr<voxel::Chunk> chunkSnapshot;
+        std::unordered_map<FluidCoord, std::uint8_t, FluidCoordHash> waterLevels;
+        std::unordered_map<FluidCoord, std::uint8_t, FluidCoordHash> lavaLevels;
         std::shared_ptr<voxel::Chunk> px;
         std::shared_ptr<voxel::Chunk> nx;
         std::shared_ptr<voxel::Chunk> pz;
@@ -114,24 +134,6 @@ class World {
         std::shared_ptr<voxel::Chunk> chunk;
         std::unique_ptr<gfx::ChunkMesh> mesh;
         int triangleCount = 0;
-    };
-    struct FluidCoord {
-        int x = 0;
-        int y = 0;
-        int z = 0;
-        bool operator==(const FluidCoord &other) const {
-            return x == other.x && y == other.y && z == other.z;
-        }
-    };
-    struct FluidCoordHash {
-        std::size_t operator()(const FluidCoord &c) const {
-            std::size_t h = static_cast<std::size_t>(std::hash<int>{}(c.x));
-            h ^= static_cast<std::size_t>(std::hash<int>{}(c.y)) + 0x9e3779b97f4a7c15ull + (h << 6) +
-                 (h >> 2);
-            h ^= static_cast<std::size_t>(std::hash<int>{}(c.z)) + 0x9e3779b97f4a7c15ull + (h << 6) +
-                 (h >> 2);
-            return h;
-        }
     };
     struct FluidState {
         std::uint8_t level = 0;

@@ -3,6 +3,7 @@
 #include "voxel/LightingSolver.hpp"
 
 #include <algorithm>
+#include <array>
 #include <glm/vec2.hpp>
 #include <glm/vec3.hpp>
 #include <glm/vec4.hpp>
@@ -150,7 +151,9 @@ void appendTorchCross(gfx::CpuMesh &mesh, float x0, float z0, float x1, float z1
 
 gfx::CpuMesh ChunkMesher::buildFaceCulled(const Chunk &chunk, const gfx::TextureAtlas &atlas,
                                           const BlockRegistry &registry, glm::ivec2 chunkXZ,
-                                          const NeighborChunks &neighbors, bool smoothLighting) {
+                                          const NeighborChunks &neighbors, bool smoothLighting,
+                                          const std::function<int(BlockId, int, int, int)>
+                                              &fluidLevelLookup) {
     gfx::CpuMesh out;
 
     auto neighborAt = [&](int x, int y, int z) -> BlockId {
@@ -234,38 +237,57 @@ gfx::CpuMesh ChunkMesher::buildFaceCulled(const Chunk &chunk, const gfx::Texture
                     const glm::vec4 waterSideUv = flipV(atlas.uvRect(waterDef.sideTile));
                     const glm::vec4 waterTopUv = atlas.uvRect(waterDef.topTile);
                     const glm::vec4 waterBottomUv = atlas.uvRect(waterDef.bottomTile);
-                    constexpr float kWaterSurfaceLower = 0.86f;
                     const auto isWaterNeighbor = [&](int nx, int ny, int nz) {
                         return isWaterLike(neighborAt(nx, ny, nz));
                     };
                     const bool topCovered = isWaterNeighbor(x, y + 1, z);
-                    const float lowY = wy + kWaterSurfaceLower;
-                    float hNW = topCovered ? (wy + 1.0f) : lowY;
-                    float hNE = topCovered ? (wy + 1.0f) : lowY;
-                    float hSW = topCovered ? (wy + 1.0f) : lowY;
-                    float hSE = topCovered ? (wy + 1.0f) : lowY;
-                    if (!topCovered) {
-                        const bool upW = isWaterNeighbor(x - 1, y + 1, z);
-                        const bool upE = isWaterNeighbor(x + 1, y + 1, z);
-                        const bool upN = isWaterNeighbor(x, y + 1, z - 1);
-                        const bool upS = isWaterNeighbor(x, y + 1, z + 1);
-                        const bool upNW = isWaterNeighbor(x - 1, y + 1, z - 1);
-                        const bool upNE = isWaterNeighbor(x + 1, y + 1, z - 1);
-                        const bool upSW = isWaterNeighbor(x - 1, y + 1, z + 1);
-                        const bool upSE = isWaterNeighbor(x + 1, y + 1, z + 1);
-                        if (upW || upN || upNW) {
-                            hNW = wy + 1.0f;
+                    const auto sampleWaterHeight = [&](int sx, int sy, int sz) -> float {
+                        const BlockId sid = neighborAt(sx, sy, sz);
+                        if (!isWaterLike(sid)) {
+                            return 0.0f;
                         }
-                        if (upE || upN || upNE) {
-                            hNE = wy + 1.0f;
+                        if (isWaterLike(neighborAt(sx, sy + 1, sz))) {
+                            return wy + 1.0f;
                         }
-                        if (upW || upS || upSW) {
-                            hSW = wy + 1.0f;
+                        // Plants submerged in water should not lower the fluid surface.
+                        if (isWaterloggedPlant(sid)) {
+                            return wy + 1.0f;
                         }
-                        if (upE || upS || upSE) {
-                            hSE = wy + 1.0f;
+                        int lvl = -1;
+                        if (fluidLevelLookup && sid == WATER) {
+                            const int swx = chunkXZ.x * Chunk::SX + sx;
+                            const int swz = chunkXZ.y * Chunk::SZ + sz;
+                            lvl = fluidLevelLookup(WATER, swx, sy, swz);
                         }
-                    }
+                        if (lvl < 0) {
+                            return wy + 0.86f;
+                        }
+                        lvl = std::clamp(lvl, 0, 7);
+                        // Minecraft-like: source/full is highest, larger level is shallower.
+                        const float h = 1.0f - (static_cast<float>(lvl) / 9.0f);
+                        return wy + std::clamp(h, 0.22f, 1.0f);
+                    };
+                    const auto blendCorner = [&](int dx, int dz) -> float {
+                        float sum = 0.0f;
+                        int count = 0;
+                        const std::array<glm::ivec2, 4> offs = {
+                            glm::ivec2{0, 0}, glm::ivec2{dx, 0}, glm::ivec2{0, dz},
+                            glm::ivec2{dx, dz}};
+                        for (const auto &o : offs) {
+                            const BlockId sid = neighborAt(x + o.x, y, z + o.y);
+                            if (!isWaterLike(sid)) {
+                                continue;
+                            }
+                            sum += sampleWaterHeight(x + o.x, y, z + o.y);
+                            ++count;
+                        }
+                        return (count > 0) ? (sum / static_cast<float>(count)) : (wy + 0.86f);
+                    };
+
+                    float hNW = topCovered ? (wy + 1.0f) : blendCorner(-1, -1);
+                    float hNE = topCovered ? (wy + 1.0f) : blendCorner(1, -1);
+                    float hSW = topCovered ? (wy + 1.0f) : blendCorner(-1, 1);
+                    float hSE = topCovered ? (wy + 1.0f) : blendCorner(1, 1);
                     const float xMinTop = wx;
                     const float xMaxTop = wx + 1.0f;
                     const float zMinTop = wz;
@@ -349,14 +371,23 @@ gfx::CpuMesh ChunkMesher::buildFaceCulled(const Chunk &chunk, const gfx::Texture
                     const auto &lavaDef = registry.get(LAVA);
                     const glm::vec4 lavaSideUv = flipV(atlas.uvRect(lavaDef.sideTile));
                     const glm::vec4 lavaTopUv = atlas.uvRect(lavaDef.topTile);
-                    constexpr float kLavaSurfaceLower = 0.86f;
                     // Lava should continue to appear emissive even when enclosed.
                     constexpr float kMinLavaBlockLight = 12.0f / 15.0f;
                     const auto isLavaNeighbor = [&](int nx, int ny, int nz) {
                         return neighborAt(nx, ny, nz) == LAVA;
                     };
                     const bool topCovered = isLavaNeighbor(x, y + 1, z);
-                    const float topY = wy + (topCovered ? 1.0f : kLavaSurfaceLower);
+                    float topY = wy + 0.86f;
+                    if (topCovered) {
+                        topY = wy + 1.0f;
+                    } else if (fluidLevelLookup) {
+                        const int lvl = fluidLevelLookup(
+                            LAVA, chunkXZ.x * Chunk::SX + x, y, chunkXZ.y * Chunk::SZ + z);
+                        if (lvl >= 0) {
+                            const float h = 1.0f - (static_cast<float>(std::clamp(lvl, 0, 4)) / 6.0f);
+                            topY = wy + std::clamp(h, 0.26f, 1.0f);
+                        }
+                    }
 
                     const BlockId nPosX = neighborAt(x + 1, y, z);
                     if (hasNeighborChunkFor(x + 1, z) && nPosX != LAVA && !isOpaque(registry, nPosX)) {

@@ -6,6 +6,7 @@
 #include "voxel/Chunk.hpp"
 
 #include <glm/vec2.hpp>
+#include <functional>
 
 namespace voxel {
 
@@ -24,7 +25,9 @@ class ChunkMesher {
 
     static gfx::CpuMesh buildFaceCulled(const Chunk &chunk, const gfx::TextureAtlas &atlas,
                                         const BlockRegistry &registry, glm::ivec2 chunkXZ,
-                                        const NeighborChunks &neighbors, bool smoothLighting);
+                                        const NeighborChunks &neighbors, bool smoothLighting,
+                                        const std::function<int(BlockId, int, int, int)>
+                                            &fluidLevelLookup = {});
 };
 
 } // namespace voxel
