@@ -71,6 +71,7 @@ constexpr BlockId CORAL = 60;
 constexpr BlockId LAVA = 61;
 constexpr BlockId BEDROCK = 62;
 constexpr BlockId WATER_SOURCE = 72;
+constexpr BlockId LAVA_SOURCE = 73;
 
 inline bool isTorch(BlockId id) {
     return id == TORCH || id == TORCH_WALL_POS_X || id == TORCH_WALL_NEG_X ||
@@ -90,8 +91,12 @@ inline bool isWaterLike(BlockId id) {
     return id == WATER || id == WATER_SOURCE || isWaterloggedPlant(id);
 }
 
+inline bool isLavaLike(BlockId id) {
+    return id == LAVA || id == LAVA_SOURCE;
+}
+
 inline bool isFluid(BlockId id) {
-    return isWaterLike(id) || id == LAVA;
+    return isWaterLike(id) || isLavaLike(id);
 }
 
 inline bool isWallTorch(BlockId id) {
@@ -150,7 +155,7 @@ inline std::uint8_t emittedBlockLight(BlockId id) {
     if (isLitFurnace(id)) {
         return 13;
     }
-    if (id == LAVA) {
+    if (isLavaLike(id)) {
         return 12;
     }
     return 0;
@@ -247,6 +252,7 @@ class BlockRegistry {
         defs_[BASALT] = {true, false, 61, 61, 61};
         defs_[RED_SAND] = {true, false, 62, 62, 62};
         defs_[LAVA] = {true, true, 63, 63, 63};
+        defs_[LAVA_SOURCE] = {true, true, 63, 63, 63};
         defs_[BEDROCK] = {true, false, 71, 71, 71};
         defs_[WILDFLOWER] = {true, true, 64, 64, 64};
         defs_[FERN] = {true, true, 65, 65, 65};

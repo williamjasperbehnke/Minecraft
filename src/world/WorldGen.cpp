@@ -1237,7 +1237,7 @@ void WorldGen::fillChunk(voxel::Chunk &chunk, ChunkCoord cc) const {
                                 continue;
                             }
                             if (getAt(lx, wyi, lz) == voxel::AIR || getAt(lx, wyi, lz) == voxel::WATER_SOURCE) {
-                                setAt(lx, wyi, lz, voxel::LAVA);
+                                setAt(lx, wyi, lz, voxel::LAVA_SOURCE);
                             }
                         }
                     }
@@ -1280,7 +1280,7 @@ void WorldGen::fillChunk(voxel::Chunk &chunk, ChunkCoord cc) const {
                     fbm3D((wx - 5200.0f) * 0.085f, y * 0.18f, (wz + 7800.0f) * 0.085f, 2, 2.0f, 0.5f);
                 const float chance = (y <= 6) ? 0.45f : (y <= 9) ? 0.30f : 0.18f;
                 if (heat > -0.08f && noise > 0.40f && hash01(wx, 5401 + y, wz) < chance) {
-                    setAt(lx, y, lz, voxel::LAVA);
+                    setAt(lx, y, lz, voxel::LAVA_SOURCE);
                 }
             }
         }

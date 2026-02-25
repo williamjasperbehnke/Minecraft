@@ -35,7 +35,7 @@ bool isWaterRenderable(BlockId id) {
 }
 
 bool isLavaRenderable(BlockId id) {
-    return id == LAVA;
+    return isLavaLike(id);
 }
 
 glm::vec4 flipV(const glm::vec4 &uv) {
@@ -416,62 +416,113 @@ gfx::CpuMesh ChunkMesher::buildFaceCulled(const Chunk &chunk, const gfx::Texture
                     // Lava should continue to appear emissive even when enclosed.
                     constexpr float kMinLavaBlockLight = 12.0f / 15.0f;
                     const auto isLavaNeighbor = [&](int nx, int ny, int nz) {
-                        return neighborAt(nx, ny, nz) == LAVA;
+                        return isLavaLike(neighborAt(nx, ny, nz));
+                    };
+                    const auto inferLavaLevel = [&](BlockId bid, int sx, int sy, int sz) -> int {
+                        if (!isLavaLike(bid)) {
+                            return -1;
+                        }
+                        if (fluidLevelLookup) {
+                            const int swx = chunkXZ.x * Chunk::SX + sx;
+                            const int swz = chunkXZ.y * Chunk::SZ + sz;
+                            const int lvl = fluidLevelLookup(LAVA, swx, sy, swz);
+                            if (lvl >= 0) {
+                                return std::clamp(lvl, 0, 4);
+                            }
+                        }
+                        if (bid == LAVA_SOURCE) {
+                            return 0;
+                        }
+                        return 4;
                     };
                     const bool topCovered = isLavaNeighbor(x, y + 1, z);
-                    float topY = wy + 0.86f;
-                    if (topCovered) {
-                        topY = wy + 1.0f;
-                    } else if (fluidLevelLookup) {
-                        const int lvl = fluidLevelLookup(
-                            LAVA, chunkXZ.x * Chunk::SX + x, y, chunkXZ.y * Chunk::SZ + z);
-                        if (lvl >= 0) {
-                            const float h = 1.0f - (static_cast<float>(std::clamp(lvl, 0, 4)) / 6.0f);
-                            topY = wy + std::clamp(h, 0.26f, 1.0f);
+                    const auto sampleLavaHeight = [&](int sx, int sy, int sz) -> float {
+                        const BlockId sid = neighborAt(sx, sy, sz);
+                        if (!isLavaLike(sid)) {
+                            return 0.0f;
                         }
-                    }
+                        if (isLavaLike(neighborAt(sx, sy + 1, sz))) {
+                            return wy + 1.0f;
+                        }
+                        const int lvl = inferLavaLevel(sid, sx, sy, sz);
+                        if (lvl < 0) {
+                            return wy + 0.86f;
+                        }
+                        const float h = 1.0f - (static_cast<float>(std::clamp(lvl, 0, 4)) / 6.0f);
+                        return wy + std::clamp(h, 0.26f, 1.0f);
+                    };
+                    const auto blendLavaCorner = [&](int dx, int dz) -> float {
+                        float sum = 0.0f;
+                        int count = 0;
+                        const std::array<glm::ivec2, 4> offs = {
+                            glm::ivec2{0, 0}, glm::ivec2{dx, 0}, glm::ivec2{0, dz},
+                            glm::ivec2{dx, dz}};
+                        for (const auto &o : offs) {
+                            if (!isLavaNeighbor(x + o.x, y, z + o.y)) {
+                                continue;
+                            }
+                            sum += sampleLavaHeight(x + o.x, y, z + o.y);
+                            ++count;
+                        }
+                        return (count > 0) ? (sum / static_cast<float>(count)) : (wy + 0.86f);
+                    };
+                    const auto shouldRenderLavaSide = [&](int nx, int ny, int nz) -> bool {
+                        const BlockId nid = neighborAt(nx, ny, nz);
+                        if (!isLavaLike(nid)) {
+                            return !isOpaque(registry, nid);
+                        }
+                        const float currH = sampleLavaHeight(x, y, z);
+                        const float neighH = sampleLavaHeight(nx, ny, nz);
+                        return (currH - neighH) > 0.02f;
+                    };
+
+                    float hNW = topCovered ? (wy + 1.0f) : blendLavaCorner(-1, -1);
+                    float hNE = topCovered ? (wy + 1.0f) : blendLavaCorner(1, -1);
+                    float hSW = topCovered ? (wy + 1.0f) : blendLavaCorner(-1, 1);
+                    float hSE = topCovered ? (wy + 1.0f) : blendLavaCorner(1, 1);
 
                     const BlockId nPosX = neighborAt(x + 1, y, z);
-                    if (hasNeighborChunkFor(x + 1, z) && nPosX != LAVA && !isOpaque(registry, nPosX)) {
+                    if (hasNeighborChunkFor(x + 1, z) && shouldRenderLavaSide(x + 1, y, z)) {
                         const float sky = lighting.faceSkyLight(x + 1, y, z, 0.86f);
                         const float block =
                             std::max(kMinLavaBlockLight, lighting.faceBlockLight(x + 1, y, z));
                         appendQuad(out, {wx + 1, wy, wz}, {wx + 1, wy, wz + 1},
-                                   {wx + 1, topY, wz + 1}, {wx + 1, topY, wz}, {1, 0, 0}, lavaSideUv,
+                                   {wx + 1, hSE, wz + 1}, {wx + 1, hNE, wz}, {1, 0, 0}, lavaSideUv,
                                    sky, block);
                     }
                     const BlockId nNegX = neighborAt(x - 1, y, z);
-                    if (hasNeighborChunkFor(x - 1, z) && nNegX != LAVA && !isOpaque(registry, nNegX)) {
+                    if (hasNeighborChunkFor(x - 1, z) && shouldRenderLavaSide(x - 1, y, z)) {
                         const float sky = lighting.faceSkyLight(x - 1, y, z, 0.86f);
                         const float block =
                             std::max(kMinLavaBlockLight, lighting.faceBlockLight(x - 1, y, z));
-                        appendQuad(out, {wx, wy, wz + 1}, {wx, wy, wz}, {wx, topY, wz},
-                                   {wx, topY, wz + 1}, {-1, 0, 0}, lavaSideUv, sky, block);
+                        appendQuad(out, {wx, wy, wz + 1}, {wx, wy, wz}, {wx, hNW, wz},
+                                   {wx, hSW, wz + 1}, {-1, 0, 0}, lavaSideUv, sky, block);
                     }
                     if (!topCovered) {
                         const float sky = lighting.faceSkyLight(x, y + 1, z, 1.00f);
                         const float block =
                             std::max(kMinLavaBlockLight, lighting.faceBlockLight(x, y + 1, z));
-                        appendQuad(out, {wx, topY, wz}, {wx + 1, topY, wz},
-                                   {wx + 1, topY, wz + 1}, {wx, topY, wz + 1}, {0, 1, 0}, lavaTopUv,
-                                   sky, block);
+                        const bool flipDiag = ((x + z) & 1) != 0;
+                        appendQuadWithDiagonal(out, {wx, hNW, wz}, {wx + 1, hNE, wz},
+                                               {wx + 1, hSE, wz + 1}, {wx, hSW, wz + 1}, {0, 1, 0},
+                                               lavaTopUv, sky, block, flipDiag);
                     }
                     const BlockId nPosZ = neighborAt(x, y, z + 1);
-                    if (hasNeighborChunkFor(x, z + 1) && nPosZ != LAVA && !isOpaque(registry, nPosZ)) {
+                    if (hasNeighborChunkFor(x, z + 1) && shouldRenderLavaSide(x, y, z + 1)) {
                         const float sky = lighting.faceSkyLight(x, y, z + 1, 0.90f);
                         const float block =
                             std::max(kMinLavaBlockLight, lighting.faceBlockLight(x, y, z + 1));
                         appendQuad(out, {wx + 1, wy, wz + 1}, {wx, wy, wz + 1},
-                                   {wx, topY, wz + 1}, {wx + 1, topY, wz + 1}, {0, 0, 1}, lavaSideUv,
+                                   {wx, hSW, wz + 1}, {wx + 1, hSE, wz + 1}, {0, 0, 1}, lavaSideUv,
                                    sky, block);
                     }
                     const BlockId nNegZ = neighborAt(x, y, z - 1);
-                    if (hasNeighborChunkFor(x, z - 1) && nNegZ != LAVA && !isOpaque(registry, nNegZ)) {
+                    if (hasNeighborChunkFor(x, z - 1) && shouldRenderLavaSide(x, y, z - 1)) {
                         const float sky = lighting.faceSkyLight(x, y, z - 1, 0.90f);
                         const float block =
                             std::max(kMinLavaBlockLight, lighting.faceBlockLight(x, y, z - 1));
-                        appendQuad(out, {wx, wy, wz}, {wx + 1, wy, wz}, {wx + 1, topY, wz},
-                                   {wx, topY, wz}, {0, 0, -1}, lavaSideUv, sky, block);
+                        appendQuad(out, {wx, wy, wz}, {wx + 1, wy, wz}, {wx + 1, hNE, wz},
+                                   {wx, hNW, wz}, {0, 0, -1}, lavaSideUv, sky, block);
                     }
                     continue;
                 }

@@ -26,6 +26,7 @@ const char *blockName(voxel::BlockId id) {
     case voxel::WATER:
         return "Water";
     case voxel::LAVA:
+    case voxel::LAVA_SOURCE:
         return "Lava";
     case voxel::BEDROCK:
         return "Bedrock";
@@ -136,6 +137,7 @@ float breakSeconds(voxel::BlockId id) {
     case voxel::KELP:
     case voxel::CORAL:
     case voxel::LAVA:
+    case voxel::LAVA_SOURCE:
     case voxel::TORCH:
     case voxel::TORCH_WALL_POS_X:
     case voxel::TORCH_WALL_NEG_X:
@@ -250,6 +252,7 @@ AudioSystem::SoundProfile soundProfileForBlock(voxel::BlockId id) {
     case voxel::GLASS:
         return Profile::Ice;
     case voxel::LAVA:
+    case voxel::LAVA_SOURCE:
         return Profile::Stone;
     case voxel::IRON_INGOT:
     case voxel::COPPER_INGOT:

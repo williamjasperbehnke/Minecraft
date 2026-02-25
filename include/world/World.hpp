@@ -197,7 +197,6 @@ class World {
     std::deque<FluidCoord> lavaFrontier_;
     std::unordered_set<FluidCoord, FluidCoordHash> waterQueued_;
     std::unordered_set<FluidCoord, FluidCoordHash> lavaQueued_;
-    std::unordered_set<FluidCoord, FluidCoordHash> lavaSources_;
     std::unordered_map<FluidCoord, FluidState, FluidCoordHash> waterState_;
     std::unordered_map<FluidCoord, FluidState, FluidCoordHash> lavaState_;
     std::vector<FluidDrop> pendingFluidDrops_;
