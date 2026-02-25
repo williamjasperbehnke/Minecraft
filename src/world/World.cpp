@@ -44,6 +44,17 @@ World::FurnaceCoordKey makeFurnaceKey(int x, int y, int z) {
     return World::FurnaceCoordKey{x, y, z};
 }
 
+bool isWaterBlock(voxel::BlockId id) {
+    return id == voxel::WATER || id == voxel::WATER_SOURCE;
+}
+
+bool isSameFluidBlock(voxel::BlockId fluidId, voxel::BlockId id) {
+    if (fluidId == voxel::WATER) {
+        return isWaterBlock(id);
+    }
+    return id == fluidId;
+}
+
 } // namespace
 
 World::World(const gfx::TextureAtlas &atlas, std::filesystem::path saveRoot, std::uint32_t seed)
@@ -137,8 +148,14 @@ void World::enqueueFluidCellLocked(int wx, int wy, int wz) {
         return;
     }
     const voxel::BlockId id = getBlockLoadedLocked(wx, wy, wz);
-    if (id == voxel::WATER) {
+    if (isWaterBlock(id)) {
         const FluidCoord c{wx, wy, wz};
+        if (waterState_.find(c) == waterState_.end()) {
+            activateFluidCellLocked(wx, wy, wz);
+            if (waterState_.find(c) == waterState_.end()) {
+                return;
+            }
+        }
         if (waterQueued_.insert(c).second) {
             waterFrontier_.push_back(c);
         }
@@ -146,10 +163,42 @@ void World::enqueueFluidCellLocked(int wx, int wy, int wz) {
     }
     if (id == voxel::LAVA) {
         const FluidCoord c{wx, wy, wz};
+        if (lavaState_.find(c) == lavaState_.end()) {
+            activateFluidCellLocked(wx, wy, wz);
+            if (lavaState_.find(c) == lavaState_.end()) {
+                return;
+            }
+        }
         if (lavaQueued_.insert(c).second) {
             lavaFrontier_.push_back(c);
         }
     }
+}
+
+void World::activateFluidCellLocked(int wx, int wy, int wz) {
+    if (wy < 0 || wy >= voxel::Chunk::SY) {
+        return;
+    }
+    const voxel::BlockId id = getBlockLoadedLocked(wx, wy, wz);
+    const bool water = isWaterBlock(id);
+    const bool lava = (id == voxel::LAVA);
+    if (!water && !lava) {
+        return;
+    }
+    const FluidCoord c{wx, wy, wz};
+    auto &stateMap = water ? waterState_ : lavaState_;
+    const auto it = stateMap.find(c);
+    if (it != stateMap.end()) {
+        return;
+    }
+    const int maxLevel = water ? kWaterMaxFlowLevel : kLavaMaxFlowLevel;
+    const bool hasAbove = water ? isWaterBlock(getBlockLoadedLocked(wx, wy + 1, wz))
+                                : (getBlockLoadedLocked(wx, wy + 1, wz) == voxel::LAVA);
+    const bool source = water ? (id == voxel::WATER_SOURCE || voxel::isWaterloggedPlant(id)) : false;
+    // Do not infer sources from neighborhood shape. Source status should come
+    // from explicit stored state (e.g., placed source blocks).
+    const std::uint8_t lvl = static_cast<std::uint8_t>(source ? 0 : (hasAbove ? 0 : maxLevel));
+    setFluidStateLocked(water ? voxel::WATER : voxel::LAVA, wx, wy, wz, lvl, source);
 }
 
 void World::enqueueFluidNeighborsLocked(int wx, int wy, int wz) {
@@ -164,21 +213,26 @@ void World::enqueueFluidNeighborsLocked(int wx, int wy, int wz) {
 
 int World::fluidLevelAtLocked(voxel::BlockId fluidId, int wx, int wy, int wz) const {
     const FluidCoord c{wx, wy, wz};
-    const auto &stateMap = (fluidId == voxel::WATER) ? waterState_ : lavaState_;
+    const auto &stateMap = (fluidId == voxel::LAVA) ? lavaState_ : waterState_;
     const auto it = stateMap.find(c);
     if (it != stateMap.end()) {
         return static_cast<int>(it->second.level);
     }
-    // If no explicit state exists, prefer "thin" flow to avoid creating implicit
-    // hidden sources after source removal.
+    if (fluidId == voxel::WATER) {
+        const voxel::BlockId id = getBlockLoadedLocked(wx, wy, wz);
+        if (id == voxel::WATER_SOURCE || voxel::isWaterloggedPlant(id)) {
+            return 0;
+        }
+    }
+    // Unknown state should not act as an infinite feed source in simulation.
     const int maxLevel = (fluidId == voxel::WATER) ? kWaterMaxFlowLevel : kLavaMaxFlowLevel;
-    return (getBlockLoadedLocked(wx, wy + 1, wz) == fluidId) ? 0 : maxLevel;
+    return maxLevel;
 }
 
 void World::setFluidStateLocked(voxel::BlockId fluidId, int wx, int wy, int wz, std::uint8_t level,
                                 bool source) {
     const FluidCoord c{wx, wy, wz};
-    auto &stateMap = (fluidId == voxel::WATER) ? waterState_ : lavaState_;
+    auto &stateMap = (fluidId == voxel::LAVA) ? lavaState_ : waterState_;
     stateMap[c] = FluidState{level, source};
 }
 
@@ -195,15 +249,15 @@ void World::seedFluidFrontierForChunkLocked(ChunkCoord cc, const voxel::Chunk &c
         for (int lz = 0; lz < voxel::Chunk::SZ; ++lz) {
             for (int y = 0; y < voxel::Chunk::SY; ++y) {
                 const voxel::BlockId id = chunk.get(lx, y, lz);
-                if (id != voxel::WATER && id != voxel::LAVA) {
+                if (id != voxel::LAVA) {
                     continue;
                 }
                 const int wx = baseX + lx;
                 const int wz = baseZ + lz;
                 const bool source = (getBlockLoadedLocked(wx, y + 1, wz) != id);
                 const std::uint8_t inferred = static_cast<std::uint8_t>(
-                    source ? 0 : ((id == voxel::WATER) ? kWaterMaxFlowLevel : kLavaMaxFlowLevel));
-                setFluidStateLocked(id, wx, y, wz, inferred, source);
+                    source ? 0 : kLavaMaxFlowLevel);
+                setFluidStateLocked(voxel::LAVA, wx, y, wz, inferred, source);
                 const bool exposed = (getBlockLoadedLocked(wx, y - 1, wz) == voxel::AIR) ||
                                      (getBlockLoadedLocked(wx + 1, y, wz) == voxel::AIR) ||
                                      (getBlockLoadedLocked(wx - 1, y, wz) == voxel::AIR) ||
@@ -249,10 +303,23 @@ void World::processFluidFrontierLocked(
     const bool waterLikeFluid = (fluidId == voxel::WATER);
     const int maxFlowLevel = (fluidId == voxel::WATER) ? kWaterMaxFlowLevel : kLavaMaxFlowLevel;
     auto isReplaceableForFluid = [fluidId](voxel::BlockId id) {
+        if (fluidId == voxel::WATER && voxel::isWaterloggedPlant(id)) {
+            // Waterlogged plants co-exist with water and should not be replaced by flow.
+            return false;
+        }
         if (id == voxel::AIR || voxel::isPlant(id) || voxel::isTorch(id)) {
             return true;
         }
-        return id == fluidId;
+        return isSameFluidBlock(fluidId, id);
+    };
+    auto queueFluidReplacementDrop = [this](voxel::BlockId replaced, int wx, int wy, int wz) {
+        if (!(voxel::isPlant(replaced) || voxel::isTorch(replaced))) {
+            return;
+        }
+        const voxel::BlockId dropId = voxel::isTorch(replaced) ? voxel::TORCH : replaced;
+        const float dropY = voxel::isPlant(replaced) ? 0.02f : 0.20f;
+        pendingFluidDrops_.push_back(
+            FluidDrop{dropId, 1, glm::vec3(wx, wy, wz) + glm::vec3(0.5f, dropY, 0.5f)});
     };
     int processed = 0;
     while (processed < budget && !frontier.empty()) {
@@ -262,8 +329,11 @@ void World::processFluidFrontierLocked(
         ++processed;
 
         const voxel::BlockId id = getBlockLoadedLocked(cell.x, cell.y, cell.z);
-        if (id != fluidId) {
+        if (!isSameFluidBlock(fluidId, id)) {
             clearFluidStateLocked(cell.x, cell.y, cell.z);
+            if (fluidId == voxel::LAVA) {
+                lavaSources_.erase(cell);
+            }
             continue;
         }
 
@@ -272,20 +342,22 @@ void World::processFluidFrontierLocked(
         auto &stateMap = (fluidId == voxel::WATER) ? waterState_ : lavaState_;
         auto stIt = stateMap.find(key);
         FluidState st = (stIt != stateMap.end()) ? stIt->second : FluidState{};
-        const bool source = st.source;
+        const bool source = (fluidId == voxel::WATER)
+                                                       ? (id == voxel::WATER_SOURCE || voxel::isWaterloggedPlant(id))
+                                                       : ((lavaSources_.find(key) != lavaSources_.end()) || st.source);
         const int prevLevel = static_cast<int>(st.level);
 
         // Recompute own level from feeding neighbors (or source) so disconnected flow retracts.
         int nextLevel = 0;
         if (!source) {
             nextLevel = maxFlowLevel + 1;
-            if (getBlockLoadedLocked(cell.x, wy + 1, cell.z) == fluidId) {
+            if (isSameFluidBlock(fluidId, getBlockLoadedLocked(cell.x, wy + 1, cell.z))) {
                 nextLevel = 0;
             } else {
                 for (const glm::ivec2 d : kDirs) {
                     const int nx = cell.x + d.x;
                     const int nz = cell.z + d.y;
-                    if (getBlockLoadedLocked(nx, wy, nz) != fluidId) {
+                    if (!isSameFluidBlock(fluidId, getBlockLoadedLocked(nx, wy, nz))) {
                         continue;
                     }
                     nextLevel = std::min(nextLevel, fluidLevelAtLocked(fluidId, nx, wy, nz) + 1);
@@ -321,10 +393,11 @@ void World::processFluidFrontierLocked(
         // Gravity-first: place fluid below as strongest flow.
         if (wy > 0) {
             const voxel::BlockId below = getBlockLoadedLocked(cell.x, wy - 1, cell.z);
-            if (isReplaceableForFluid(below) && below != fluidId) {
+            if (isReplaceableForFluid(below) && !isSameFluidBlock(fluidId, below)) {
                 const ChunkCoord downCc = worldToChunk(cell.x, cell.z);
                 auto downIt = chunks_.find(downCc);
                 if (downIt != chunks_.end() && downIt->second.chunk) {
+                    queueFluidReplacementDrop(below, cell.x, wy - 1, cell.z);
                     const int lx = floorMod(cell.x, voxel::Chunk::SX);
                     const int lz = floorMod(cell.z, voxel::Chunk::SZ);
                     downIt->second.chunk->set(lx, wy - 1, lz, fluidId);
@@ -350,10 +423,12 @@ void World::processFluidFrontierLocked(
                 if (!isReplaceableForFluid(nId)) {
                     continue;
                 }
-                if (nId == fluidId) {
+                if (isSameFluidBlock(fluidId, nId)) {
                     const FluidCoord nk{nx, wy, nz};
                     const auto nitState = stateMap.find(nk);
-                    const bool nSource = (nitState != stateMap.end()) ? nitState->second.source : false;
+                    const bool nSource = (fluidId == voxel::WATER)
+                                             ? (nId == voxel::WATER_SOURCE || voxel::isWaterloggedPlant(nId))
+                                             : ((nitState != stateMap.end()) ? nitState->second.source : false);
                     const int nLevel = fluidLevelAtLocked(fluidId, nx, wy, nz);
                     if (nSource || nLevel <= outLevel) {
                         continue;
@@ -364,6 +439,7 @@ void World::processFluidFrontierLocked(
                 if (nit == chunks_.end() || !nit->second.chunk) {
                     continue;
                 }
+                queueFluidReplacementDrop(nId, nx, wy, nz);
                 const int lx = floorMod(nx, voxel::Chunk::SX);
                 const int lz = floorMod(nz, voxel::Chunk::SZ);
                 nit->second.chunk->set(lx, wy, lz, fluidId);
@@ -380,6 +456,13 @@ void World::processFluidFrontierLocked(
             enqueueFluidNeighborsLocked(cell.x, wy, cell.z);
         }
     }
+}
+
+std::vector<World::FluidDrop> World::consumeFluidDrops() {
+    std::lock_guard<std::mutex> lock(chunksMutex_);
+    auto out = std::move(pendingFluidDrops_);
+    pendingFluidDrops_.clear();
+    return out;
 }
 
 void World::enqueueLoadIfNeeded(ChunkCoord cc) {
@@ -656,6 +739,14 @@ void World::updateStream(const glm::vec3 &playerPos) {
                 ++sit;
             }
         }
+        for (auto sit = lavaSources_.begin(); sit != lavaSources_.end();) {
+            const ChunkCoord scc = worldToChunk(sit->x, sit->z);
+            if (scc.x == cc.x && scc.z == cc.z) {
+                sit = lavaSources_.erase(sit);
+            } else {
+                ++sit;
+            }
+        }
 
         // Unloading a chunk exposes border faces on neighboring chunks.
         enqueueNeighborRingRemesh(cc);
@@ -692,7 +783,9 @@ void World::updateFluidSimulation(float dt) {
                                    lavaQueued_, remeshChunks);
     }
     for (const ChunkCoord cc : remeshChunks) {
-        enqueueRemesh(cc, false, true);
+        // Fluid levels can change rapidly; force replacement of older queued
+        // remesh jobs so mesh snapshots stay in sync.
+        enqueueRemesh(cc, true, true);
     }
 }
 
@@ -748,6 +841,9 @@ void World::uploadReadyMeshes() {
         if (result.replaceChunk) {
             entry.chunk = std::move(result.chunk);
             pendingLoad_.erase(result.coord);
+            if (entry.chunk) {
+                seedFluidFrontierForChunkLocked(result.coord, *entry.chunk);
+            }
             // Build this chunk mesh only after load completes in the normal remesh
             // path, so boundary face culling can use available neighbors.
             enqueueRemesh(result.coord, true);
@@ -852,7 +948,7 @@ bool World::isSolidBlock(int wx, int wy, int wz) const {
 
 bool World::isTargetBlock(int wx, int wy, int wz) const {
     const voxel::BlockId id = getBlock(wx, wy, wz);
-    if (id == voxel::AIR || voxel::isFluid(id)) {
+    if (id == voxel::AIR || (voxel::isFluid(id) && !voxel::isWaterloggedPlant(id))) {
         return false;
     }
     return blockRegistry_.get(id).solid;
@@ -886,6 +982,7 @@ bool World::setBlock(int wx, int wy, int wz, voxel::BlockId id) {
 
     const voxel::BlockId prevId = it->second.chunk->get(lx, wy, lz);
     voxel::BlockId nextId = id;
+    const FluidCoord fcoord{wx, wy, wz};
     // Waterlogged underwater flora should leave water behind when removed.
     if (nextId == voxel::AIR && voxel::isWaterloggedPlant(prevId)) {
         nextId = voxel::WATER;
@@ -895,15 +992,48 @@ bool World::setBlock(int wx, int wy, int wz, voxel::BlockId id) {
         return false;
     }
 
+    // Player-placed water is always a source block. But when removing a
+    // waterlogged plant we restore flowing water in-place, not a new source.
+    if (nextId == voxel::WATER && !voxel::isWaterloggedPlant(prevId)) {
+        nextId = voxel::WATER_SOURCE;
+    }
+
     if (prevId == nextId) {
+        if (nextId == voxel::LAVA) {
+            lavaSources_.insert(fcoord);
+            setFluidStateLocked(voxel::LAVA, wx, wy, wz, 0, true);
+            enqueueFluidNeighborsLocked(wx, wy, wz);
+            enqueueRemesh(cc, true, true);
+        } else if (nextId == voxel::WATER_SOURCE) {
+            setFluidStateLocked(voxel::WATER, wx, wy, wz, 0, true);
+            enqueueFluidNeighborsLocked(wx, wy, wz);
+            enqueueRemesh(cc, true, true);
+        }
         return true;
+    }
+    if (prevId == voxel::LAVA) {
+        lavaSources_.erase(fcoord);
     }
     it->second.chunk->set(lx, wy, lz, nextId);
     clearFluidStateLocked(wx, wy, wz);
-    if (nextId == voxel::WATER || nextId == voxel::LAVA) {
+    if (isWaterBlock(nextId) || nextId == voxel::LAVA) {
         // Player-placed fluid blocks are explicit sources.
-        setFluidStateLocked(nextId, wx, wy, wz, 0, true);
+        if (nextId == voxel::LAVA) {
+            setFluidStateLocked(voxel::LAVA, wx, wy, wz, 0, true);
+            lavaSources_.insert(fcoord);
+        } else if (nextId == voxel::WATER_SOURCE) {
+            setFluidStateLocked(voxel::WATER, wx, wy, wz, 0, true);
+        } else {
+            setFluidStateLocked(voxel::WATER, wx, wy, wz, kWaterMaxFlowLevel, false);
+        }
     }
+    activateFluidCellLocked(wx, wy, wz);
+    activateFluidCellLocked(wx, wy - 1, wz);
+    activateFluidCellLocked(wx, wy + 1, wz);
+    activateFluidCellLocked(wx + 1, wy, wz);
+    activateFluidCellLocked(wx - 1, wy, wz);
+    activateFluidCellLocked(wx, wy, wz + 1);
+    activateFluidCellLocked(wx, wy, wz - 1);
     // Any edit can open/close fluid paths nearby.
     enqueueFluidNeighborsLocked(wx, wy, wz);
     enqueueRemesh(cc, true, true);

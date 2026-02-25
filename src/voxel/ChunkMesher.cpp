@@ -64,32 +64,32 @@ glm::ivec2 furnaceFrontNormal(BlockId id) {
 
 void appendQuad(gfx::CpuMesh &mesh, const glm::vec3 &p0, const glm::vec3 &p1, const glm::vec3 &p2,
                 const glm::vec3 &p3, const glm::vec3 &normal, const glm::vec4 &uv, float skyLight,
-                float blockLight) {
+                float blockLight, float fluidLevel = -1.0f) {
     const std::uint32_t base = static_cast<std::uint32_t>(mesh.vertices.size());
     mesh.vertices.push_back(
-        {p0.x, p0.y, p0.z, normal.x, normal.y, normal.z, uv.x, uv.y, skyLight, blockLight});
+        {p0.x, p0.y, p0.z, normal.x, normal.y, normal.z, uv.x, uv.y, skyLight, blockLight, fluidLevel});
     mesh.vertices.push_back(
-        {p1.x, p1.y, p1.z, normal.x, normal.y, normal.z, uv.z, uv.y, skyLight, blockLight});
+        {p1.x, p1.y, p1.z, normal.x, normal.y, normal.z, uv.z, uv.y, skyLight, blockLight, fluidLevel});
     mesh.vertices.push_back(
-        {p2.x, p2.y, p2.z, normal.x, normal.y, normal.z, uv.z, uv.w, skyLight, blockLight});
+        {p2.x, p2.y, p2.z, normal.x, normal.y, normal.z, uv.z, uv.w, skyLight, blockLight, fluidLevel});
     mesh.vertices.push_back(
-        {p3.x, p3.y, p3.z, normal.x, normal.y, normal.z, uv.x, uv.w, skyLight, blockLight});
+        {p3.x, p3.y, p3.z, normal.x, normal.y, normal.z, uv.x, uv.w, skyLight, blockLight, fluidLevel});
     mesh.indices.insert(mesh.indices.end(), {base, base + 1, base + 2, base, base + 2, base + 3});
 }
 
 void appendQuadWithDiagonal(gfx::CpuMesh &mesh, const glm::vec3 &p0, const glm::vec3 &p1,
                             const glm::vec3 &p2, const glm::vec3 &p3, const glm::vec3 &normal,
                             const glm::vec4 &uv, float skyLight, float blockLight,
-                            bool flipDiagonal) {
+                            bool flipDiagonal, float fluidLevel = -1.0f) {
     const std::uint32_t base = static_cast<std::uint32_t>(mesh.vertices.size());
     mesh.vertices.push_back(
-        {p0.x, p0.y, p0.z, normal.x, normal.y, normal.z, uv.x, uv.y, skyLight, blockLight});
+        {p0.x, p0.y, p0.z, normal.x, normal.y, normal.z, uv.x, uv.y, skyLight, blockLight, fluidLevel});
     mesh.vertices.push_back(
-        {p1.x, p1.y, p1.z, normal.x, normal.y, normal.z, uv.z, uv.y, skyLight, blockLight});
+        {p1.x, p1.y, p1.z, normal.x, normal.y, normal.z, uv.z, uv.y, skyLight, blockLight, fluidLevel});
     mesh.vertices.push_back(
-        {p2.x, p2.y, p2.z, normal.x, normal.y, normal.z, uv.z, uv.w, skyLight, blockLight});
+        {p2.x, p2.y, p2.z, normal.x, normal.y, normal.z, uv.z, uv.w, skyLight, blockLight, fluidLevel});
     mesh.vertices.push_back(
-        {p3.x, p3.y, p3.z, normal.x, normal.y, normal.z, uv.x, uv.w, skyLight, blockLight});
+        {p3.x, p3.y, p3.z, normal.x, normal.y, normal.z, uv.x, uv.w, skyLight, blockLight, fluidLevel});
     if (flipDiagonal) {
         mesh.indices.insert(mesh.indices.end(),
                             {base, base + 1, base + 3, base + 1, base + 2, base + 3});
@@ -240,32 +240,74 @@ gfx::CpuMesh ChunkMesher::buildFaceCulled(const Chunk &chunk, const gfx::Texture
                     const auto isWaterNeighbor = [&](int nx, int ny, int nz) {
                         return isWaterLike(neighborAt(nx, ny, nz));
                     };
-                    const bool topCovered = isWaterNeighbor(x, y + 1, z);
-                    const auto sampleWaterHeight = [&](int sx, int sy, int sz) -> float {
-                        const BlockId sid = neighborAt(sx, sy, sz);
-                        if (!isWaterLike(sid)) {
+                    const bool topCovered = isWaterLike(neighborAt(x, y + 1, z));
+                    const bool bottomCovered = (y > 0) && isWaterLike(neighborAt(x, y - 1, z));
+                    const auto inferWaterLevel = [&](BlockId bid, int sx, int sy, int sz) -> int {
+                        if (!isWaterLike(bid)) {
+                            return -1;
+                        }
+                        if (fluidLevelLookup) {
+                            const int swx = chunkXZ.x * Chunk::SX + sx;
+                            const int swz = chunkXZ.y * Chunk::SZ + sz;
+                            const int lvl = fluidLevelLookup(WATER, swx, sy, swz);
+                            if (lvl >= 0) {
+                                return std::clamp(lvl, 0, 7);
+                            }
+                        }
+                        if (isWaterloggedPlant(bid)) {
+                            return 0;
+                        }
+                        if (bid == WATER_SOURCE) {
+                            return 0;
+                        }
+                        // Fallback for water blocks without tracked state.
+                        return 7;
+                    };
+                    const auto cellTopHeight = [&](BlockId bid, int sx, int sy, int sz) -> float {
+                        if (!isWaterLike(bid)) {
                             return 0.0f;
                         }
                         if (isWaterLike(neighborAt(sx, sy + 1, sz))) {
                             return wy + 1.0f;
                         }
-                        // Plants submerged in water should not lower the fluid surface.
-                        if (isWaterloggedPlant(sid)) {
-                            return wy + 1.0f;
-                        }
-                        int lvl = -1;
-                        if (fluidLevelLookup && sid == WATER) {
-                            const int swx = chunkXZ.x * Chunk::SX + sx;
-                            const int swz = chunkXZ.y * Chunk::SZ + sz;
-                            lvl = fluidLevelLookup(WATER, swx, sy, swz);
-                        }
+                        const int lvl = inferWaterLevel(bid, sx, sy, sz);
                         if (lvl < 0) {
                             return wy + 0.86f;
                         }
-                        lvl = std::clamp(lvl, 0, 7);
-                        // Minecraft-like: source/full is highest, larger level is shallower.
-                        const float h = 1.0f - (static_cast<float>(lvl) / 9.0f);
-                        return wy + std::clamp(h, 0.22f, 1.0f);
+                        const float h = 0.86f - (static_cast<float>(lvl) / 7.0f) * 0.56f;
+                        return wy + std::clamp(h, 0.30f, 0.86f);
+                    };
+                    int waterLevelInt = -1;
+                    float waterDebugLevel = -1.0f;
+                    waterLevelInt = inferWaterLevel(id, x, y, z);
+                    if (waterLevelInt >= 0) {
+                        waterDebugLevel = static_cast<float>(waterLevelInt) / 7.0f;
+                    }
+                    const auto shouldRenderWaterSide = [&](int nx, int ny, int nz) -> bool {
+                        const BlockId nid = neighborAt(nx, ny, nz);
+                        if (!isWaterLike(nid)) {
+                            return !isOpaque(registry, nid);
+                        }
+                        // Internal stitch wall only for significant drops to avoid visible holes,
+                        // while suppressing tiny step walls that look like surface gridlines.
+                        constexpr float kInternalStitchMinDrop = 0.10f;
+                        const float currH = cellTopHeight(id, x, y, z);
+                        const float neighH = cellTopHeight(nid, nx, ny, nz);
+                        return (currH - neighH) > kInternalStitchMinDrop;
+                    };
+                    const auto waterSideBaseY = [&](int nx, int ny, int nz) -> float {
+                        const BlockId nid = neighborAt(nx, ny, nz);
+                        if (!isWaterLike(nid)) {
+                            return wy;
+                        }
+                        return cellTopHeight(nid, nx, ny, nz);
+                    };
+                    const auto sampleWaterHeight = [&](int sx, int sy, int sz) -> float {
+                        const BlockId sid = neighborAt(sx, sy, sz);
+                        if (!isWaterLike(sid)) {
+                            return 0.0f;
+                        }
+                        return cellTopHeight(sid, sx, sy, sz);
                     };
                     const auto blendCorner = [&](int dx, int dz) -> float {
                         float sum = 0.0f;
@@ -302,31 +344,31 @@ gfx::CpuMesh ChunkMesher::buildFaceCulled(const Chunk &chunk, const gfx::Texture
                                                    lighting.faceSkyLight(x, y + 1, z, 0.95f));
                         const float block = std::max(lighting.faceBlockLight(x, y, z),
                                                      lighting.faceBlockLight(x, y + 1, z));
-                        const float topMin = std::min(std::min(hNW, hNE), std::min(hSW, hSE));
-                        const float plantTopY = topCovered ? (wy + 1.0f) : (topMin - 0.01f);
+                        const float surfaceY = cellTopHeight(id, x, y, z);
+                        const float plantTopY = std::max(wy + 0.25f, surfaceY - 0.02f);
                         appendCrossPlant(out, wx, wy, wz, plantTopY, flipV(atlas.uvRect(d.sideTile)),
                                          sky, block);
                     }
 
                     const BlockId nPosX = neighborAt(x + 1, y, z);
-                    if (hasNeighborChunkFor(x + 1, z) && !isWaterLike(nPosX) &&
-                        !isOpaque(registry, nPosX)) {
+                    if (hasNeighborChunkFor(x + 1, z) && shouldRenderWaterSide(x + 1, y, z)) {
                         const float sky = lighting.faceSkyLight(x + 1, y, z, 0.86f);
                         const float block = lighting.faceBlockLight(x + 1, y, z);
                         const float faceX = xMaxSide;
-                        appendQuad(out, {faceX, wy, zMinSide}, {faceX, wy, zMaxSide},
+                        const float baseY = waterSideBaseY(x + 1, y, z);
+                        appendQuad(out, {faceX, baseY, zMinSide}, {faceX, baseY, zMaxSide},
                                    {faceX, hSE, zMaxSide}, {faceX, hNE, zMinSide}, {1, 0, 0},
-                                   waterSideUv, sky, block);
+                                   waterSideUv, sky, block, waterDebugLevel);
                     }
                     const BlockId nNegX = neighborAt(x - 1, y, z);
-                    if (hasNeighborChunkFor(x - 1, z) && !isWaterLike(nNegX) &&
-                        !isOpaque(registry, nNegX)) {
+                    if (hasNeighborChunkFor(x - 1, z) && shouldRenderWaterSide(x - 1, y, z)) {
                         const float sky = lighting.faceSkyLight(x - 1, y, z, 0.86f);
                         const float block = lighting.faceBlockLight(x - 1, y, z);
                         const float faceX = xMinSide;
-                        appendQuad(out, {faceX, wy, zMaxSide}, {faceX, wy, zMinSide},
+                        const float baseY = waterSideBaseY(x - 1, y, z);
+                        appendQuad(out, {faceX, baseY, zMaxSide}, {faceX, baseY, zMinSide},
                                    {faceX, hNW, zMinSide}, {faceX, hSW, zMaxSide}, {-1, 0, 0},
-                                   waterSideUv, sky, block);
+                                   waterSideUv, sky, block, waterDebugLevel);
                     }
                     if (!topCovered) {
                         const float sky = lighting.faceSkyLight(x, y + 1, z, 1.00f);
@@ -335,35 +377,35 @@ gfx::CpuMesh ChunkMesher::buildFaceCulled(const Chunk &chunk, const gfx::Texture
                         appendQuadWithDiagonal(out, {xMinTop, hNW, zMinTop},
                                                {xMaxTop, hNE, zMinTop}, {xMaxTop, hSE, zMaxTop},
                                                {xMinTop, hSW, zMaxTop}, {0, 1, 0}, waterTopUv, sky,
-                                               block, flipDiag);
+                                               block, flipDiag, waterDebugLevel);
                     }
                     const BlockId nPosZ = neighborAt(x, y, z + 1);
-                    if (hasNeighborChunkFor(x, z + 1) && !isWaterLike(nPosZ) &&
-                        !isOpaque(registry, nPosZ)) {
+                    if (hasNeighborChunkFor(x, z + 1) && shouldRenderWaterSide(x, y, z + 1)) {
                         const float sky = lighting.faceSkyLight(x, y, z + 1, 0.90f);
                         const float block = lighting.faceBlockLight(x, y, z + 1);
                         const float faceZ = zMaxSide;
-                        appendQuad(out, {xMaxSide, wy, faceZ}, {xMinSide, wy, faceZ},
+                        const float baseY = waterSideBaseY(x, y, z + 1);
+                        appendQuad(out, {xMaxSide, baseY, faceZ}, {xMinSide, baseY, faceZ},
                                    {xMinSide, hSW, faceZ}, {xMaxSide, hSE, faceZ}, {0, 0, 1},
-                                   waterSideUv, sky, block);
+                                   waterSideUv, sky, block, waterDebugLevel);
                     }
                     const BlockId nNegZ = neighborAt(x, y, z - 1);
-                    if (hasNeighborChunkFor(x, z - 1) && !isWaterLike(nNegZ) &&
-                        !isOpaque(registry, nNegZ)) {
+                    if (hasNeighborChunkFor(x, z - 1) && shouldRenderWaterSide(x, y, z - 1)) {
                         const float sky = lighting.faceSkyLight(x, y, z - 1, 0.90f);
                         const float block = lighting.faceBlockLight(x, y, z - 1);
                         const float faceZ = zMinSide;
-                        appendQuad(out, {xMinSide, wy, faceZ}, {xMaxSide, wy, faceZ},
+                        const float baseY = waterSideBaseY(x, y, z - 1);
+                        appendQuad(out, {xMinSide, baseY, faceZ}, {xMaxSide, baseY, faceZ},
                                    {xMaxSide, hNE, faceZ}, {xMinSide, hNW, faceZ}, {0, 0, -1},
-                                   waterSideUv, sky, block);
+                                   waterSideUv, sky, block, waterDebugLevel);
                     }
                     const BlockId nDown = neighborAt(x, y - 1, z);
-                    if (y > 0 && nDown == AIR) {
+                    if (y > 0 && !bottomCovered && nDown == AIR) {
                         const float sky = lighting.faceSkyLight(x, y - 1, z, 0.56f);
                         const float block = lighting.faceBlockLight(x, y - 1, z);
                         appendQuad(out, {xMinTop, wy, zMaxTop}, {xMaxTop, wy, zMaxTop},
                                    {xMaxTop, wy, zMinTop}, {xMinTop, wy, zMinTop}, {0, -1, 0},
-                                   waterBottomUv, sky, block);
+                                   waterBottomUv, sky, block, waterDebugLevel);
                     }
                     continue;
                 }

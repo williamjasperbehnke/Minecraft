@@ -4,6 +4,7 @@ layout(location = 1) in vec3 aNormal;
 layout(location = 2) in vec2 aUV;
 layout(location = 3) in float aSkyLight;
 layout(location = 4) in float aBlockLight;
+layout(location = 5) in float aFluidLevel;
 
 uniform mat4 uProj;
 uniform mat4 uView;
@@ -14,6 +15,7 @@ out float vSky;
 out float vBlock;
 out vec3 vNormal;
 out vec3 vWorldPos;
+out float vFluidLevel;
 
 void main() {
     float day = clamp(uDaylight, 0.0, 1.0);
@@ -21,6 +23,7 @@ void main() {
     vBlock = clamp(aBlockLight, 0.0, 1.0);
     vNormal = normalize(aNormal);
     vWorldPos = aPos;
+    vFluidLevel = aFluidLevel;
     vUV = aUV;
     gl_Position = uProj * uView * vec4(aPos, 1.0);
 }

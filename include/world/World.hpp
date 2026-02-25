@@ -37,6 +37,11 @@ struct WorldDebugStats {
 
 class World {
   public:
+    struct FluidDrop {
+        voxel::BlockId id = voxel::AIR;
+        int count = 0;
+        glm::vec3 pos{0.0f};
+    };
     struct FurnaceCoordKey {
         int x = 0;
         int y = 0;
@@ -81,6 +86,7 @@ class World {
 
     void setStreamingRadii(int loadRadius, int unloadRadius);
     void setSmoothLighting(bool enabled);
+    std::vector<FluidDrop> consumeFluidDrops();
     WorldDebugStats debugStats() const;
     std::vector<ChunkCoord> loadedChunkCoords() const;
 
@@ -146,6 +152,7 @@ class World {
     void workerLoop();
     voxel::BlockId getBlockLoadedLocked(int wx, int wy, int wz) const;
     void enqueueFluidCellLocked(int wx, int wy, int wz);
+    void activateFluidCellLocked(int wx, int wy, int wz);
     void enqueueFluidNeighborsLocked(int wx, int wy, int wz);
     void seedFluidFrontierForChunkLocked(ChunkCoord cc, const voxel::Chunk &chunk);
     void appendFluidRemeshNeighborhoodLocked(ChunkCoord cc, bool waterLike,
@@ -190,8 +197,10 @@ class World {
     std::deque<FluidCoord> lavaFrontier_;
     std::unordered_set<FluidCoord, FluidCoordHash> waterQueued_;
     std::unordered_set<FluidCoord, FluidCoordHash> lavaQueued_;
+    std::unordered_set<FluidCoord, FluidCoordHash> lavaSources_;
     std::unordered_map<FluidCoord, FluidState, FluidCoordHash> waterState_;
     std::unordered_map<FluidCoord, FluidState, FluidCoordHash> lavaState_;
+    std::vector<FluidDrop> pendingFluidDrops_;
     float waterStepAccum_ = 0.0f;
     float lavaStepAccum_ = 0.0f;
 };

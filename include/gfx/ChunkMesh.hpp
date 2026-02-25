@@ -16,6 +16,7 @@ struct Vertex {
     float v;
     float skyLight;
     float blockLight;
+    float fluidLevel;
 };
 
 struct CpuMesh {

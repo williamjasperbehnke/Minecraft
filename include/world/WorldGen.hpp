@@ -10,7 +10,7 @@ namespace world {
 
 class WorldGen {
   public:
-    static constexpr std::uint32_t kGeneratorVersion = 36;
+    static constexpr std::uint32_t kGeneratorVersion = 37;
 
     explicit WorldGen(std::uint32_t seed = 1337u) : seed_(seed) {}
 

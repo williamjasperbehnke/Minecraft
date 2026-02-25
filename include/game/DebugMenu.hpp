@@ -34,6 +34,7 @@ struct DebugConfig {
     bool showClouds = true;
     bool showStars = true;
     bool showFog = false;
+    bool showWaterLevelDebug = false;
     float timeOfDay01 = 0.25f;
     float moonPhase01 = 0.0f;
 };

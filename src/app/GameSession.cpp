@@ -387,7 +387,28 @@ bool GameSession::run() {
             if (targetId != voxel::AIR && mineCooldown <= 0.0f) {
                 miningProgress += dt / game::breakSeconds(targetId);
                 if (miningProgress >= 1.0f) {
-                    if (world.setBlock(target.x, target.y, target.z, voxel::AIR)) {
+                    bool brokeTarget = false;
+                    if (targetId == voxel::KELP) {
+                        // Breaking the base of kelp should clear the whole contiguous stalk.
+                        for (int y = target.y; y < voxel::Chunk::SY; ++y) {
+                            const voxel::BlockId segId = world.getBlock(target.x, y, target.z);
+                            if (segId != voxel::KELP) {
+                                break;
+                            }
+                            if (!world.setBlock(target.x, y, target.z, voxel::AIR)) {
+                                break;
+                            }
+                            itemDrops.spawn(voxel::KELP,
+                                            glm::vec3(target.x, y, target.z) +
+                                                glm::vec3(0.5f, 0.02f, 0.5f),
+                                            1);
+                            brokeTarget = true;
+                        }
+                    } else {
+                        brokeTarget = world.setBlock(target.x, target.y, target.z, voxel::AIR);
+                    }
+
+                    if (brokeTarget) {
                         if (voxel::isFurnace(targetId)) {
                             world::FurnaceState wstate{};
                             if (world.getFurnaceState(target.x, target.y, target.z, wstate)) {
@@ -418,11 +439,13 @@ bool GameSession::run() {
                         if (voxel::isPlant(targetId)) {
                             dropPos.y = static_cast<float>(target.y) + 0.02f;
                         }
-                        const voxel::BlockId dropId =
-                            voxel::isTorch(targetId)
-                                ? voxel::TORCH
-                                : (voxel::isFurnace(targetId) ? voxel::FURNACE : targetId);
-                        itemDrops.spawn(dropId, dropPos, 1);
+                        if (targetId != voxel::KELP) {
+                            const voxel::BlockId dropId =
+                                voxel::isTorch(targetId)
+                                    ? voxel::TORCH
+                                    : (voxel::isFurnace(targetId) ? voxel::FURNACE : targetId);
+                            itemDrops.spawn(dropId, dropPos, 1);
+                        }
                         dropUnsupportedTorchesAround(world, itemDrops, target);
                         dropUnsupportedPlantsAround(world, itemDrops, target);
                         audio.playBreak(game::soundProfileForBlock(targetId));
@@ -437,16 +460,31 @@ bool GameSession::run() {
             miningProgress = 0.0f;
         }
 
-        if (!blockInput && right && !prevRight && currentHit.has_value()) {
-            const glm::ivec3 place = currentHit->block + currentHit->normal;
-            const glm::vec3 camPos = camera.position();
-            const glm::ivec3 camCell(static_cast<int>(std::floor(camPos.x)),
-                                     static_cast<int>(std::floor(camPos.y)),
-                                     static_cast<int>(std::floor(camPos.z)));
-            const auto slot = inventory.hotbarSlot(selectedBlockIndex);
-            if (slot.id != voxel::AIR && slot.count > 0) {
+        if (!blockInput && right && !prevRight) {
+            std::optional<voxel::RayHit> placeHit = currentHit;
+            if (!placeHit.has_value()) {
+                placeHit = voxel::Raycaster::cast(
+                    camera.position(), camera.forward(), debugCfg.raycastDistance,
+                    [&](int x, int y, int z) { return world.getBlock(x, y, z) != voxel::AIR; });
+            }
+            if (placeHit.has_value()) {
+                glm::ivec3 place = placeHit->block + placeHit->normal;
+                const glm::vec3 camPos = camera.position();
+                const glm::ivec3 camCell(static_cast<int>(std::floor(camPos.x)),
+                                         static_cast<int>(std::floor(camPos.y)),
+                                         static_cast<int>(std::floor(camPos.z)));
+                const auto slot = inventory.hotbarSlot(selectedBlockIndex);
+                if (slot.id != voxel::AIR && slot.count > 0) {
                 bool placementAllowed = true;
                 voxel::BlockId placeId = slot.id;
+                const voxel::BlockId hitId =
+                    world.getBlock(placeHit->block.x, placeHit->block.y, placeHit->block.z);
+
+                if (slot.id == voxel::WATER && voxel::isWaterLike(hitId)) {
+                    // Allow converting flowing water cell into a source by placing
+                    // directly into the hit water block.
+                    place = placeHit->block;
+                }
 
                 if (slot.id == voxel::STICK || slot.id == voxel::IRON_INGOT ||
                     slot.id == voxel::COPPER_INGOT || slot.id == voxel::GOLD_INGOT) {
@@ -463,7 +501,7 @@ bool GameSession::run() {
                 }
 
                 if (placementAllowed && slot.id == voxel::TORCH) {
-                    const glm::ivec3 normal = currentHit->normal;
+                    const glm::ivec3 normal = placeHit->normal;
                     placeId = torchIdForPlacementNormal(normal);
                     if (placeId == voxel::AIR) {
                         placementAllowed = false;
@@ -480,7 +518,7 @@ bool GameSession::run() {
                     }
                 }
                 if (placementAllowed && voxel::isWaterloggedPlant(slot.id)) {
-                    if (world.getBlock(place.x, place.y, place.z) != voxel::WATER) {
+                    if (!voxel::isWaterLike(world.getBlock(place.x, place.y, place.z))) {
                         placementAllowed = false;
                     }
                 }
@@ -493,6 +531,7 @@ bool GameSession::run() {
                     inventory.consumeHotbar(selectedBlockIndex, 1);
                     audio.playPlace(game::soundProfileForBlock(slot.id));
                 }
+            }
             }
         }
         prevLeft = left;
@@ -1700,6 +1739,9 @@ bool GameSession::run() {
 
         world.updateStream(camera.position());
         world.updateFluidSimulation(dt);
+        for (const auto &drop : world.consumeFluidDrops()) {
+            itemDrops.spawn(drop.id, drop.pos, drop.count);
+        }
         world.uploadReadyMeshes();
         stats = world.debugStats();
         mapSystem.observeLoadedChunks(world);
@@ -2625,6 +2667,7 @@ bool GameSession::run() {
         shader.setFloat("uCloudShadowDay", sunVis);
         shader.setFloat("uCloudLayerY", cloudLayerY);
         shader.setFloat("uCloudShadowRange", kCloudShadowRange);
+        shader.setFloat("uWaterLevelDebug", debugCfg.showWaterLevelDebug ? 1.0f : 0.0f);
         const voxel::BlockId heldId = inventory.hotbarSlot(selectedBlockIndex).id;
         const float heldTorchStrength = voxel::isTorch(heldId) ? 0.90f : 0.0f;
         shader.setFloat("uHeldTorchStrength", heldTorchStrength);
@@ -2638,11 +2681,23 @@ bool GameSession::run() {
             shader.setInt("uAlphaPass", 0);
             world.draw();
 
-            // Pass 2: transparent geometry blends over opaque; no depth writes.
-            glEnable(GL_BLEND);
+            // Pass 2a: transparent depth prepass (no color), so only nearest
+            // transparent surface per pixel survives.
+            glDisable(GL_BLEND);
             glDepthMask(GL_TRUE);
+            glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
             shader.setInt("uAlphaPass", 1);
             world.drawTransparent(camera.position(), camera.forward());
+
+            // Pass 2b: transparent color pass, reading depth from prepass.
+            glEnable(GL_BLEND);
+            glDepthMask(GL_FALSE);
+            glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+            glDepthFunc(GL_LEQUAL);
+            shader.setInt("uAlphaPass", 1);
+            world.drawTransparent(camera.position(), camera.forward());
+            glDepthFunc(GL_LESS);
+            glDepthMask(GL_TRUE);
         } else {
             glDisable(GL_BLEND);
             glDepthMask(GL_TRUE);

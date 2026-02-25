@@ -52,7 +52,7 @@ bool isStepControl(int id) {
 }
 
 bool isToggleControl(int id) {
-    return id >= 7 && id <= 12;
+    return (id >= 7 && id <= 12) || id == 16;
 }
 
 bool isSliderControl(int id) {
@@ -89,6 +89,8 @@ const char *controlLabel(int id) {
         return "Stars";
     case 12:
         return "Fog";
+    case 16:
+        return "Water Level Debug";
     case 13:
         return "Time Of Day";
     case 14:
@@ -128,7 +130,7 @@ const char *DebugMenu::renderModeName(RenderMode mode) {
 
 void DebugMenu::printMenuHint() const {
     core::Logger::instance().info("Debug UI: F1 toggle panel, mouse click +/- "
-                                  "buttons, F3 cycle render mode.");
+                                  "buttons, F3 cycle render mode, F8 water level debug.");
 }
 
 void DebugMenu::initRenderer() {
@@ -274,6 +276,9 @@ void DebugMenu::applyClick(float mx, float my, DebugConfig &cfg) {
             case 12:
                 cfg.showFog = !cfg.showFog;
                 return;
+            case 16:
+                cfg.showWaterLevelDebug = !cfg.showWaterLevelDebug;
+                return;
             default:
                 break;
             }
@@ -363,6 +368,9 @@ void DebugMenu::update(GLFWwindow *window, DebugConfig &cfg, const world::WorldD
         const int next = (static_cast<int>(cfg.renderMode) + 1) % 3;
         cfg.renderMode = static_cast<RenderMode>(next);
     }
+    if (keyPressed(window, GLFW_KEY_F8)) {
+        cfg.showWaterLevelDebug = !cfg.showWaterLevelDebug;
+    }
 
     int winW = 1;
     int winH = 1;
@@ -393,7 +401,7 @@ void DebugMenu::update(GLFWwindow *window, DebugConfig &cfg, const world::WorldD
         visibleRows_ = {0, 1, 2, 3, 4, 15};
         break;
     case 1:
-        visibleRows_ = {5, 6, 7, 9};
+        visibleRows_ = {5, 6, 7, 9, 16};
         break;
     case 2:
     default:
@@ -613,7 +621,8 @@ void DebugMenu::render(int width, int height) {
                             : (i == 9)  ? lastCfg_.smoothLighting
                             : (i == 10) ? lastCfg_.showClouds
                             : (i == 11) ? lastCfg_.showStars
-                                        : lastCfg_.showFog;
+                            : (i == 12) ? lastCfg_.showFog
+                                        : lastCfg_.showWaterLevelDebug;
             const Rect toggle{panelX_ + panelW_ - 136.0f, y + 6.0f, 100.0f, 28.0f};
             const bool hover = toggle.contains(mouseX_, mouseY_);
             drawRect(toggle.x, toggle.y, toggle.w, toggle.h, 0.10f, 0.12f, 0.16f, hover ? 0.99f : 0.95f);

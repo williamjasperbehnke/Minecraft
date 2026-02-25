@@ -4,6 +4,7 @@ in float vSky;
 in float vBlock;
 in vec3 vNormal;
 in vec3 vWorldPos;
+in float vFluidLevel;
 
 uniform sampler2D uAtlas;
 uniform int uRenderMode; // 0 = textured, 1 = flat
@@ -22,8 +23,17 @@ uniform float uCloudShadowStrength;
 uniform float uCloudShadowDay;
 uniform float uCloudLayerY;
 uniform float uCloudShadowRange;
+uniform float uWaterLevelDebug;
 
 out vec4 FragColor;
+
+vec3 waterDebugColor(float level01) {
+    // 0.0 (source/high) -> cyan, 1.0 (thin/low) -> red
+    float t = clamp(level01, 0.0, 1.0);
+    vec3 high = vec3(0.20, 0.95, 1.00);
+    vec3 low = vec3(1.00, 0.28, 0.18);
+    return mix(high, low, t);
+}
 
 uint cloudHashU32(uint x) {
     x ^= x >> 16u;
@@ -144,6 +154,10 @@ void main() {
         vec3 lightTerm = clamp(max(skyTerm, blockTerm), 0.0, 1.0);
         lightTerm = max(lightTerm, vec3(0.035));
         vec3 lit = texel.rgb * lightTerm;
+        if (uWaterLevelDebug > 0.5 && vFluidLevel >= -0.5) {
+            vec3 dbg = waterDebugColor(vFluidLevel);
+            lit = mix(lit, dbg, 0.85);
+        }
         lit = mix(lit, uFogColor, fogT);
         FragColor = vec4(lit, texel.a);
     } else {

@@ -235,7 +235,7 @@ void placeTree(voxel::Chunk &chunk, int lx, int baseY, int lz, int height, voxel
                     continue;
                 }
                 const voxel::BlockId existing = chunk.getUnchecked(x, y, z);
-                if (existing == voxel::AIR || existing == voxel::WATER) {
+                if (existing == voxel::AIR || existing == voxel::WATER_SOURCE || existing == voxel::WATER) {
                     chunk.setRaw(x, y, z, leavesId);
                 }
             }
@@ -273,7 +273,7 @@ void placeFlatCanopyTree(voxel::Chunk &chunk, int lx, int baseY, int lz, int hei
                     continue;
                 }
                 const voxel::BlockId existing = chunk.getUnchecked(x, y, z);
-                if (existing == voxel::AIR || existing == voxel::WATER) {
+                if (existing == voxel::AIR || existing == voxel::WATER_SOURCE || existing == voxel::WATER) {
                     chunk.setRaw(x, y, z, leavesId);
                 }
             }
@@ -771,7 +771,7 @@ void WorldGen::fillChunk(voxel::Chunk &chunk, ChunkCoord cc) const {
                             y == seaLevel) {
                             setAt(lx, y, lz, voxel::ICE);
                         } else {
-                            setAt(lx, y, lz, voxel::WATER);
+                            setAt(lx, y, lz, voxel::WATER_SOURCE);
                         }
                     }
                 }
@@ -779,7 +779,7 @@ void WorldGen::fillChunk(voxel::Chunk &chunk, ChunkCoord cc) const {
 
             const int clearFrom = std::min(voxel::Chunk::SY, std::max(height + 1, seaLevel + 1));
             for (int y = clearFrom; y < voxel::Chunk::SY; ++y) {
-                if (getAt(lx, y, lz) != voxel::WATER) {
+                if (getAt(lx, y, lz) != voxel::WATER_SOURCE) {
                     setAt(lx, y, lz, voxel::AIR);
                 }
             }
@@ -817,7 +817,7 @@ void WorldGen::fillChunk(voxel::Chunk &chunk, ChunkCoord cc) const {
                         continue;
                     }
                     if (wet && y <= seaLevel) {
-                        setAt(lx, y, lz, voxel::WATER);
+                        setAt(lx, y, lz, voxel::WATER_SOURCE);
                     } else {
                         setAt(lx, y, lz, voxel::AIR);
                     }
@@ -1053,7 +1053,7 @@ void WorldGen::fillChunk(voxel::Chunk &chunk, ChunkCoord cc) const {
                             if (!chunk.inBounds(lx, y, lz)) {
                                 continue;
                             }
-                            setAt(lx, y, lz, (y <= seaLevel) ? voxel::WATER : voxel::AIR);
+                            setAt(lx, y, lz, (y <= seaLevel) ? voxel::WATER_SOURCE : voxel::AIR);
                         }
                     }
                 }
@@ -1236,7 +1236,7 @@ void WorldGen::fillChunk(voxel::Chunk &chunk, ChunkCoord cc) const {
                             if (wyi <= 1) {
                                 continue;
                             }
-                            if (getAt(lx, wyi, lz) == voxel::AIR || getAt(lx, wyi, lz) == voxel::WATER) {
+                            if (getAt(lx, wyi, lz) == voxel::AIR || getAt(lx, wyi, lz) == voxel::WATER_SOURCE) {
                                 setAt(lx, wyi, lz, voxel::LAVA);
                             }
                         }
@@ -1263,7 +1263,7 @@ void WorldGen::fillChunk(voxel::Chunk &chunk, ChunkCoord cc) const {
                 if (!isLavaFloor(getAt(lx, y - 1, lz))) {
                     continue;
                 }
-                if (getAt(lx, y + 1, lz) != voxel::AIR && getAt(lx, y + 1, lz) != voxel::WATER) {
+                if (getAt(lx, y + 1, lz) != voxel::AIR && getAt(lx, y + 1, lz) != voxel::WATER_SOURCE) {
                     continue;
                 }
                 int airNeighbors = 0;
@@ -1292,7 +1292,7 @@ void WorldGen::fillChunk(voxel::Chunk &chunk, ChunkCoord cc) const {
             if (riverStrength[lx][lz] < 0.10f) {
                 continue;
             }
-            if (getAt(lx, seaLevel, lz) == voxel::WATER || getAt(lx, seaLevel, lz) == voxel::ICE) {
+            if (getAt(lx, seaLevel, lz) == voxel::WATER_SOURCE || getAt(lx, seaLevel, lz) == voxel::ICE) {
                 continue;
             }
             bool touchesWater = false;
@@ -1303,7 +1303,7 @@ void WorldGen::fillChunk(voxel::Chunk &chunk, ChunkCoord cc) const {
                 if (nx < 0 || nz < 0 || nx >= voxel::Chunk::SX || nz >= voxel::Chunk::SZ) {
                     continue;
                 }
-                if (getAt(nx, seaLevel, nz) == voxel::WATER ||
+                if (getAt(nx, seaLevel, nz) == voxel::WATER_SOURCE ||
                     getAt(nx, seaLevel, nz) == voxel::ICE) {
                     touchesWater = true;
                     break;
@@ -1323,7 +1323,7 @@ void WorldGen::fillChunk(voxel::Chunk &chunk, ChunkCoord cc) const {
                         y == seaLevel) {
                         setAt(lx, y, lz, voxel::ICE);
                     } else {
-                        setAt(lx, y, lz, voxel::WATER);
+                        setAt(lx, y, lz, voxel::WATER_SOURCE);
                     }
                 } else {
                     break;
@@ -1688,7 +1688,7 @@ void WorldGen::fillChunk(voxel::Chunk &chunk, ChunkCoord cc) const {
             if (floorY < 2 || floorY >= seaLevel - 1) {
                 continue;
             }
-            if (getAt(lx, floorY + 1, lz) != voxel::WATER) {
+            if (getAt(lx, floorY + 1, lz) != voxel::WATER_SOURCE) {
                 continue;
             }
 
@@ -1709,7 +1709,7 @@ void WorldGen::fillChunk(voxel::Chunk &chunk, ChunkCoord cc) const {
             const bool warmCoast = (biome == Biome::Rainforest || biome == Biome::Savanna ||
                                     biome == Biome::Desert || biome == Biome::Badlands);
             if (warmCoast && depth >= 3 && depth <= 11 && floraNoise > 0.12f &&
-                hash01(wx, 9101, wz) < 0.18f && getAt(lx, floorY + 1, lz) == voxel::WATER) {
+                hash01(wx, 9101, wz) < 0.18f && getAt(lx, floorY + 1, lz) == voxel::WATER_SOURCE) {
                 setAt(lx, floorY + 1, lz, voxel::CORAL);
                 continue;
             }
@@ -1719,7 +1719,7 @@ void WorldGen::fillChunk(voxel::Chunk &chunk, ChunkCoord cc) const {
                 const int kelpHeight = 2 + static_cast<int>(hash01(wx, 9103, wz) * 5.0f);
                 int placed = 0;
                 for (int k = 1; k <= kelpHeight && floorY + k <= seaLevel; ++k) {
-                    if (getAt(lx, floorY + k, lz) != voxel::WATER) {
+                    if (getAt(lx, floorY + k, lz) != voxel::WATER_SOURCE) {
                         break;
                     }
                     setAt(lx, floorY + k, lz, voxel::KELP);
@@ -1732,7 +1732,7 @@ void WorldGen::fillChunk(voxel::Chunk &chunk, ChunkCoord cc) const {
 
             // Seagrass carpets in shallower waters.
             if (depth >= 2 && depth <= 9 && floraNoise > -0.22f && hash01(wx, 9104, wz) < 0.34f &&
-                getAt(lx, floorY + 1, lz) == voxel::WATER) {
+                getAt(lx, floorY + 1, lz) == voxel::WATER_SOURCE) {
                 setAt(lx, floorY + 1, lz, voxel::SEAGRASS);
             }
         }

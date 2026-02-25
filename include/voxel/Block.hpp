@@ -70,6 +70,7 @@ constexpr BlockId KELP = 59;
 constexpr BlockId CORAL = 60;
 constexpr BlockId LAVA = 61;
 constexpr BlockId BEDROCK = 62;
+constexpr BlockId WATER_SOURCE = 72;
 
 inline bool isTorch(BlockId id) {
     return id == TORCH || id == TORCH_WALL_POS_X || id == TORCH_WALL_NEG_X ||
@@ -86,7 +87,7 @@ inline bool isWaterloggedPlant(BlockId id) {
 }
 
 inline bool isWaterLike(BlockId id) {
-    return id == WATER || isWaterloggedPlant(id);
+    return id == WATER || id == WATER_SOURCE || isWaterloggedPlant(id);
 }
 
 inline bool isFluid(BlockId id) {
@@ -187,6 +188,7 @@ class BlockRegistry {
         defs_[STONE] = {true, false, 4, 4, 4};
         defs_[SAND] = {true, false, 5, 5, 5};
         defs_[WATER] = {true, true, 6, 6, 6};
+        defs_[WATER_SOURCE] = {true, true, 6, 6, 6};
         defs_[WOOD] = {true, false, 7, 8, 8};
         defs_[LEAVES] = {true, true, 9, 9, 9};
         defs_[COAL_ORE] = {true, false, 10, 10, 10};
