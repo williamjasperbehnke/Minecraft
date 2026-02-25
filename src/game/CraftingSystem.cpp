@@ -1,6 +1,7 @@
 #include "game/CraftingSystem.hpp"
 
 #include <algorithm>
+#include <cmath>
 
 namespace game {
 
@@ -123,6 +124,204 @@ bool CraftingSystem::consumeInputs(State &state, int gridSize) const {
     const bool consumed = recipe->consume(state.input, activeInputCount(gridSize), gridSize);
     updateOutput(state, gridSize);
     return consumed;
+}
+
+bool CraftingSystem::recipeIngredientMatches(const RecipeInfo::IngredientInfo &ingredient,
+                                             voxel::BlockId id) const {
+    if (ingredient.allowAnyWood) {
+        return id == voxel::WOOD || id == voxel::SPRUCE_WOOD || id == voxel::BIRCH_WOOD;
+    }
+    if (ingredient.allowAnyPlanks) {
+        return id == voxel::OAK_PLANKS || id == voxel::SPRUCE_PLANKS || id == voxel::BIRCH_PLANKS;
+    }
+    return ingredient.id == id;
+}
+
+bool CraftingSystem::takeIngredientFromInventory(Inventory &inventory,
+                                                 const RecipeInfo::IngredientInfo &ingredient,
+                                                 voxel::BlockId &takenId) const {
+    for (int i = 0; i < Inventory::kSlotCount; ++i) {
+        auto &slot = inventory.slot(i);
+        if (slot.id == voxel::AIR || slot.count <= 0 || !recipeIngredientMatches(ingredient, slot.id)) {
+            continue;
+        }
+        takenId = slot.id;
+        slot.count -= 1;
+        if (slot.count <= 0) {
+            slot = {};
+        }
+        return true;
+    }
+    return false;
+}
+
+bool CraftingSystem::tryAddRecipeSet(const RecipeInfo &recipe, Inventory &inventory,
+                                     State &crafting, int activeInputs) const {
+    Inventory invBackup = inventory;
+    State craftBackup = crafting;
+
+    auto compatible = [&](const Inventory::Slot &slot, const RecipeInfo::IngredientInfo &ingredient) {
+        if (slot.id == voxel::AIR || slot.count <= 0) {
+            return false;
+        }
+        return recipeIngredientMatches(ingredient, slot.id);
+    };
+
+    if (!recipe.shapedCells.empty()) {
+        const int gridSize = static_cast<int>(std::round(std::sqrt(static_cast<float>(activeInputs))));
+        if (gridSize * gridSize != activeInputs) {
+            inventory = invBackup;
+            crafting = craftBackup;
+            return false;
+        }
+        const int baseSize = std::max(2, recipe.minGridSize);
+        int minRow = baseSize;
+        int minCol = baseSize;
+        int maxRow = -1;
+        int maxCol = -1;
+        for (const auto &cell : recipe.shapedCells) {
+            if (cell.slot < 0 || cell.slot >= baseSize * baseSize) {
+                inventory = invBackup;
+                crafting = craftBackup;
+                return false;
+            }
+            const int row = cell.slot / baseSize;
+            const int col = cell.slot % baseSize;
+            minRow = std::min(minRow, row);
+            minCol = std::min(minCol, col);
+            maxRow = std::max(maxRow, row);
+            maxCol = std::max(maxCol, col);
+        }
+        const int patternH = maxRow - minRow + 1;
+        const int patternW = maxCol - minCol + 1;
+        if (patternH <= 0 || patternW <= 0 || patternH > gridSize || patternW > gridSize) {
+            inventory = invBackup;
+            crafting = craftBackup;
+            return false;
+        }
+
+        std::vector<int> mappedSlots(recipe.shapedCells.size(), -1);
+        int bestScore = -1;
+        bool foundPlacement = false;
+        for (int offY = 0; offY <= (gridSize - patternH); ++offY) {
+            for (int offX = 0; offX <= (gridSize - patternW); ++offX) {
+                bool ok = true;
+                int score = 0;
+                std::vector<int> trialSlots(recipe.shapedCells.size(), -1);
+                for (std::size_t i = 0; i < recipe.shapedCells.size(); ++i) {
+                    const auto &cell = recipe.shapedCells[i];
+                    const int row = cell.slot / baseSize;
+                    const int col = cell.slot % baseSize;
+                    const int relRow = row - minRow;
+                    const int relCol = col - minCol;
+                    const int mapped = (offY + relRow) * gridSize + (offX + relCol);
+                    if (mapped < 0 || mapped >= activeInputs) {
+                        ok = false;
+                        break;
+                    }
+                    trialSlots[i] = mapped;
+                    const auto &dst = crafting.input[mapped];
+                    if (dst.id != voxel::AIR && dst.count > 0) {
+                        if (!compatible(dst, cell.ingredient)) {
+                            ok = false;
+                            break;
+                        }
+                        score += 1;
+                    }
+                    if (dst.count + cell.ingredient.count > Inventory::kMaxStack) {
+                        ok = false;
+                        break;
+                    }
+                }
+                if (ok && score > bestScore) {
+                    mappedSlots = std::move(trialSlots);
+                    bestScore = score;
+                    foundPlacement = true;
+                }
+            }
+        }
+        if (!foundPlacement) {
+            inventory = invBackup;
+            crafting = craftBackup;
+            return false;
+        }
+
+        for (std::size_t i = 0; i < recipe.shapedCells.size(); ++i) {
+            const auto &cell = recipe.shapedCells[i];
+            auto &dst = crafting.input[mappedSlots[i]];
+            for (int n = 0; n < cell.ingredient.count; ++n) {
+                voxel::BlockId taken = voxel::AIR;
+                if (!takeIngredientFromInventory(inventory, cell.ingredient, taken)) {
+                    inventory = invBackup;
+                    crafting = craftBackup;
+                    return false;
+                }
+                if (dst.id == voxel::AIR || dst.count <= 0) {
+                    dst.id = taken;
+                    dst.count = 0;
+                }
+                dst.count += 1;
+            }
+        }
+        return true;
+    }
+
+    for (const auto &ingredient : recipe.ingredients) {
+        for (int n = 0; n < ingredient.count; ++n) {
+            voxel::BlockId taken = voxel::AIR;
+            if (!takeIngredientFromInventory(inventory, ingredient, taken)) {
+                inventory = invBackup;
+                crafting = craftBackup;
+                return false;
+            }
+
+            int placeIdx = -1;
+            int firstEmpty = -1;
+            int matchingOccupied = 0;
+            int leastMatchingIdx = -1;
+            int leastMatchingCount = Inventory::kMaxStack + 1;
+            for (int i = 0; i < activeInputs; ++i) {
+                const auto &dst = crafting.input[i];
+                if (dst.id == voxel::AIR || dst.count <= 0) {
+                    if (firstEmpty < 0) {
+                        firstEmpty = i;
+                    }
+                    continue;
+                }
+                if (!recipeIngredientMatches(ingredient, dst.id)) {
+                    continue;
+                }
+                ++matchingOccupied;
+                if (dst.count < Inventory::kMaxStack && dst.count < leastMatchingCount) {
+                    leastMatchingCount = dst.count;
+                    leastMatchingIdx = i;
+                }
+            }
+
+            const int desiredSlotsForIngredient = std::max(1, ingredient.count);
+            if (matchingOccupied < desiredSlotsForIngredient && firstEmpty >= 0) {
+                placeIdx = firstEmpty;
+            } else if (leastMatchingIdx >= 0) {
+                placeIdx = leastMatchingIdx;
+            } else if (firstEmpty >= 0) {
+                placeIdx = firstEmpty;
+            }
+            if (placeIdx < 0) {
+                inventory = invBackup;
+                crafting = craftBackup;
+                return false;
+            }
+
+            auto &dst = crafting.input[placeIdx];
+            if (dst.id == voxel::AIR || dst.count <= 0) {
+                dst.id = taken;
+                dst.count = 0;
+            }
+            dst.count += 1;
+        }
+    }
+
+    return true;
 }
 
 } // namespace game

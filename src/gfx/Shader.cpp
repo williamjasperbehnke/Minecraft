@@ -1,5 +1,6 @@
 #include "gfx/Shader.hpp"
 
+#include "app/util/ShaderProgramUtils.hpp"
 #include "core/Logger.hpp"
 
 #include <glad/glad.h>
@@ -19,21 +20,6 @@ std::string readFile(const std::string &path) {
     return ss.str();
 }
 
-unsigned int compile(unsigned int type, const std::string &source) {
-    const char *src = source.c_str();
-    unsigned int shader = glCreateShader(type);
-    glShaderSource(shader, 1, &src, nullptr);
-    glCompileShader(shader);
-
-    int ok = 0;
-    glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
-    if (!ok) {
-        char buf[1024];
-        glGetShaderInfoLog(shader, sizeof(buf), nullptr, buf);
-        throw std::runtime_error(std::string("Shader compile error: ") + buf);
-    }
-    return shader;
-}
 } // namespace
 
 namespace gfx {
@@ -42,23 +28,9 @@ Shader::Shader(const std::string &vertexPath, const std::string &fragmentPath) {
     const std::string vs = readFile(vertexPath);
     const std::string fs = readFile(fragmentPath);
 
-    const unsigned int vert = compile(GL_VERTEX_SHADER, vs);
-    const unsigned int frag = compile(GL_FRAGMENT_SHADER, fs);
-
-    program_ = glCreateProgram();
-    glAttachShader(program_, vert);
-    glAttachShader(program_, frag);
-    glLinkProgram(program_);
-
-    int ok = 0;
-    glGetProgramiv(program_, GL_LINK_STATUS, &ok);
-    glDeleteShader(vert);
-    glDeleteShader(frag);
-    if (!ok) {
-        char buf[1024];
-        glGetProgramInfoLog(program_, sizeof(buf), nullptr, buf);
-        throw std::runtime_error(std::string("Shader link error: ") + buf);
-    }
+    program_ = app::util::linkInLineProgram(
+        app::util::compileInlineShader(GL_VERTEX_SHADER, vs.c_str()),
+        app::util::compileInlineShader(GL_FRAGMENT_SHADER, fs.c_str()));
 }
 
 Shader::~Shader() {

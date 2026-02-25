@@ -1,5 +1,6 @@
 #include "game/DebugMenu.hpp"
 
+#include "app/util/ShaderProgramUtils.hpp"
 #include "core/Logger.hpp"
 #include "world/World.hpp"
 
@@ -9,25 +10,10 @@
 
 #include <algorithm>
 #include <cstdio>
-#include <stdexcept>
 #include <string>
 
 namespace game {
 namespace {
-
-unsigned int compileShader(unsigned int type, const char *src) {
-    unsigned int shader = glCreateShader(type);
-    glShaderSource(shader, 1, &src, nullptr);
-    glCompileShader(shader);
-    int ok = 0;
-    glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
-    if (!ok) {
-        char log[1024];
-        glGetShaderInfoLog(shader, sizeof(log), nullptr, log);
-        throw std::runtime_error(std::string("DebugMenu shader compile failed: ") + log);
-    }
-    return shader;
-}
 
 float textWidthPx(const std::string &text) {
     return static_cast<float>(stb_easy_font_width(const_cast<char *>(text.c_str())));
@@ -173,23 +159,9 @@ void DebugMenu::initRenderer() {
         }
     )";
 
-    const unsigned int vshader = compileShader(GL_VERTEX_SHADER, vs);
-    const unsigned int fshader = compileShader(GL_FRAGMENT_SHADER, fs);
-
-    shader_ = glCreateProgram();
-    glAttachShader(shader_, vshader);
-    glAttachShader(shader_, fshader);
-    glLinkProgram(shader_);
-
-    int ok = 0;
-    glGetProgramiv(shader_, GL_LINK_STATUS, &ok);
-    glDeleteShader(vshader);
-    glDeleteShader(fshader);
-    if (!ok) {
-        char log[1024];
-        glGetProgramInfoLog(shader_, sizeof(log), nullptr, log);
-        throw std::runtime_error(std::string("DebugMenu shader link failed: ") + log);
-    }
+    shader_ = app::util::linkInLineProgram(
+        app::util::compileInlineShader(GL_VERTEX_SHADER, vs),
+        app::util::compileInlineShader(GL_FRAGMENT_SHADER, fs));
 
     glGenVertexArrays(1, &vao_);
     glGenBuffers(1, &vbo_);
@@ -367,11 +339,11 @@ void DebugMenu::adjustControl(DebugConfig &cfg, int idx, int dir) const {
         cfg.hudScale = std::clamp(cfg.hudScale + dir * 0.1f, 0.8f, 1.8f);
         break;
     case 5:
-        cfg.loadRadius = std::clamp(cfg.loadRadius + dir, 2, 16);
+        cfg.loadRadius = std::clamp(cfg.loadRadius + dir, 2, 64);
         cfg.unloadRadius = std::max(cfg.unloadRadius, cfg.loadRadius + 1);
         break;
     case 6:
-        cfg.unloadRadius = std::clamp(cfg.unloadRadius + dir, cfg.loadRadius + 1, 20);
+        cfg.unloadRadius = std::clamp(cfg.unloadRadius + dir, cfg.loadRadius + 1, 72);
         break;
     default:
         break;

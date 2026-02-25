@@ -4,16 +4,18 @@
 #include "world/ChunkCoord.hpp"
 
 #include <cstdint>
+#include <string>
 
 namespace world {
 
 class WorldGen {
   public:
-    static constexpr std::uint32_t kGeneratorVersion = 17;
+    static constexpr std::uint32_t kGeneratorVersion = 36;
 
     explicit WorldGen(std::uint32_t seed = 1337u) : seed_(seed) {}
 
     void fillChunk(voxel::Chunk &chunk, ChunkCoord cc) const;
+    std::string biomeLabelAt(int wx, int wz) const;
 
   private:
     float hash01(std::int32_t x, std::int32_t y, std::int32_t z) const;

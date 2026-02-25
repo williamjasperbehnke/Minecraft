@@ -25,6 +25,10 @@ const char *blockName(voxel::BlockId id) {
         return "Leaves";
     case voxel::WATER:
         return "Water";
+    case voxel::LAVA:
+        return "Lava";
+    case voxel::BEDROCK:
+        return "Bedrock";
     case voxel::COAL_ORE:
         return "Coal Ore";
     case voxel::COPPER_ORE:
@@ -57,10 +61,32 @@ const char *blockName(voxel::BlockId id) {
         return "Cactus";
     case voxel::SANDSTONE:
         return "Sandstone";
+    case voxel::MUD:
+        return "Mud";
+    case voxel::MOSS:
+        return "Moss Block";
+    case voxel::BASALT:
+        return "Basalt";
+    case voxel::RED_SAND:
+        return "Red Sand";
     case voxel::TALL_GRASS:
         return "Tall Grass";
     case voxel::FLOWER:
         return "Flower";
+    case voxel::WILDFLOWER:
+        return "Wildflower";
+    case voxel::FERN:
+        return "Fern";
+    case voxel::DRY_GRASS:
+        return "Dry Grass";
+    case voxel::DEAD_BUSH:
+        return "Dead Bush";
+    case voxel::SEAGRASS:
+        return "Seagrass";
+    case voxel::KELP:
+        return "Kelp";
+    case voxel::CORAL:
+        return "Coral";
     case voxel::TORCH:
     case voxel::TORCH_WALL_POS_X:
     case voxel::TORCH_WALL_NEG_X:
@@ -102,6 +128,14 @@ float breakSeconds(voxel::BlockId id) {
     case voxel::BIRCH_LEAVES:
     case voxel::TALL_GRASS:
     case voxel::FLOWER:
+    case voxel::WILDFLOWER:
+    case voxel::FERN:
+    case voxel::DRY_GRASS:
+    case voxel::DEAD_BUSH:
+    case voxel::SEAGRASS:
+    case voxel::KELP:
+    case voxel::CORAL:
+    case voxel::LAVA:
     case voxel::TORCH:
     case voxel::TORCH_WALL_POS_X:
     case voxel::TORCH_WALL_NEG_X:
@@ -113,6 +147,8 @@ float breakSeconds(voxel::BlockId id) {
     case voxel::GRAVEL:
     case voxel::CLAY:
     case voxel::SNOW_BLOCK:
+    case voxel::MUD:
+    case voxel::RED_SAND:
         return 0.34f;
     case voxel::WOOD:
     case voxel::SPRUCE_WOOD:
@@ -142,8 +178,12 @@ float breakSeconds(voxel::BlockId id) {
         return 0.94f;
     case voxel::STONE:
     case voxel::SANDSTONE:
+    case voxel::BASALT:
+    case voxel::BEDROCK:
     case voxel::ICE:
         return 0.68f;
+    case voxel::MOSS:
+        return 0.40f;
     default:
         return 0.45f;
     }
@@ -158,8 +198,11 @@ AudioSystem::SoundProfile soundProfileForBlock(voxel::BlockId id) {
     case voxel::GRASS:
     case voxel::DIRT:
     case voxel::CLAY:
+    case voxel::MUD:
+    case voxel::MOSS:
         return Profile::Dirt;
     case voxel::STONE:
+    case voxel::BEDROCK:
     case voxel::COAL_ORE:
     case voxel::COPPER_ORE:
     case voxel::IRON_ORE:
@@ -189,8 +232,16 @@ AudioSystem::SoundProfile soundProfileForBlock(voxel::BlockId id) {
     case voxel::BIRCH_LEAVES:
     case voxel::TALL_GRASS:
     case voxel::FLOWER:
+    case voxel::WILDFLOWER:
+    case voxel::FERN:
+    case voxel::DRY_GRASS:
+    case voxel::DEAD_BUSH:
+    case voxel::SEAGRASS:
+    case voxel::KELP:
+    case voxel::CORAL:
         return Profile::Foliage;
     case voxel::SAND:
+    case voxel::RED_SAND:
     case voxel::GRAVEL:
         return Profile::Sand;
     case voxel::SNOW_BLOCK:
@@ -198,6 +249,8 @@ AudioSystem::SoundProfile soundProfileForBlock(voxel::BlockId id) {
     case voxel::ICE:
     case voxel::GLASS:
         return Profile::Ice;
+    case voxel::LAVA:
+        return Profile::Stone;
     case voxel::IRON_INGOT:
     case voxel::COPPER_INGOT:
     case voxel::GOLD_INGOT:

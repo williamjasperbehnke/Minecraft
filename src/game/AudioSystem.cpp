@@ -208,6 +208,30 @@ std::size_t profileIndex(AudioSystem::SoundProfile profile) {
     return static_cast<std::size_t>(profile);
 }
 
+bool loadBufferPool(const std::vector<std::string> &paths, std::vector<ALuint> &pool,
+                    const char *emptyWarnLabel) {
+    releaseBuffers(pool);
+    pool.reserve(paths.size());
+    for (const std::string &path : paths) {
+        ALuint buffer = 0;
+        alGenBuffers(1, &buffer);
+        if (alGetError() != AL_NO_ERROR || buffer == 0) {
+            core::Logger::instance().warn("Failed to allocate audio buffer: " + path);
+            continue;
+        }
+        if (!loadWav(path, buffer)) {
+            alDeleteBuffers(1, &buffer);
+            continue;
+        }
+        pool.push_back(buffer);
+    }
+    if (pool.empty()) {
+        core::Logger::instance().warn(std::string("No ") + emptyWarnLabel + " sounds loaded");
+        return false;
+    }
+    return true;
+}
+
 } // namespace
 
 struct AudioSystem::Impl {
@@ -302,29 +326,7 @@ bool AudioSystem::loadPickupSounds(const std::vector<std::string> &paths) {
     if (impl_ == nullptr) {
         return false;
     }
-
-    releaseBuffers(impl_->pickupBuffers);
-
-    impl_->pickupBuffers.reserve(paths.size());
-    for (const std::string &path : paths) {
-        ALuint buffer = 0;
-        alGenBuffers(1, &buffer);
-        if (alGetError() != AL_NO_ERROR || buffer == 0) {
-            core::Logger::instance().warn("Failed to allocate audio buffer: " + path);
-            continue;
-        }
-        if (!loadWav(path, buffer)) {
-            alDeleteBuffers(1, &buffer);
-            continue;
-        }
-        impl_->pickupBuffers.push_back(buffer);
-    }
-
-    if (impl_->pickupBuffers.empty()) {
-        core::Logger::instance().warn("No pickup sounds loaded");
-        return false;
-    }
-    return true;
+    return loadBufferPool(paths, impl_->pickupBuffers, "pickup");
 }
 
 bool AudioSystem::loadSwimSounds(const std::vector<std::string> &paths) {
@@ -334,28 +336,7 @@ bool AudioSystem::loadSwimSounds(const std::vector<std::string> &paths) {
     if (impl_ == nullptr) {
         return false;
     }
-
-    releaseBuffers(impl_->swimBuffers);
-    impl_->swimBuffers.reserve(paths.size());
-    for (const std::string &path : paths) {
-        ALuint buffer = 0;
-        alGenBuffers(1, &buffer);
-        if (alGetError() != AL_NO_ERROR || buffer == 0) {
-            core::Logger::instance().warn("Failed to allocate audio buffer: " + path);
-            continue;
-        }
-        if (!loadWav(path, buffer)) {
-            alDeleteBuffers(1, &buffer);
-            continue;
-        }
-        impl_->swimBuffers.push_back(buffer);
-    }
-
-    if (impl_->swimBuffers.empty()) {
-        core::Logger::instance().warn("No swim sounds loaded");
-        return false;
-    }
-    return true;
+    return loadBufferPool(paths, impl_->swimBuffers, "swim");
 }
 
 bool AudioSystem::loadWaterBobSounds(const std::vector<std::string> &paths) {
@@ -365,28 +346,7 @@ bool AudioSystem::loadWaterBobSounds(const std::vector<std::string> &paths) {
     if (impl_ == nullptr) {
         return false;
     }
-
-    releaseBuffers(impl_->bobBuffers);
-    impl_->bobBuffers.reserve(paths.size());
-    for (const std::string &path : paths) {
-        ALuint buffer = 0;
-        alGenBuffers(1, &buffer);
-        if (alGetError() != AL_NO_ERROR || buffer == 0) {
-            core::Logger::instance().warn("Failed to allocate audio buffer: " + path);
-            continue;
-        }
-        if (!loadWav(path, buffer)) {
-            alDeleteBuffers(1, &buffer);
-            continue;
-        }
-        impl_->bobBuffers.push_back(buffer);
-    }
-
-    if (impl_->bobBuffers.empty()) {
-        core::Logger::instance().warn("No water bob sounds loaded");
-        return false;
-    }
-    return true;
+    return loadBufferPool(paths, impl_->bobBuffers, "water bob");
 }
 
 bool AudioSystem::loadBreakSounds(SoundProfile profile, const std::vector<std::string> &paths) {
@@ -396,30 +356,8 @@ bool AudioSystem::loadBreakSounds(SoundProfile profile, const std::vector<std::s
     if (impl_ == nullptr) {
         return false;
     }
-
     auto &breakPool = impl_->breakPools[profileIndex(profile)];
-    releaseBuffers(breakPool);
-
-    breakPool.reserve(paths.size());
-    for (const std::string &path : paths) {
-        ALuint buffer = 0;
-        alGenBuffers(1, &buffer);
-        if (alGetError() != AL_NO_ERROR || buffer == 0) {
-            core::Logger::instance().warn("Failed to allocate audio buffer: " + path);
-            continue;
-        }
-        if (!loadWav(path, buffer)) {
-            alDeleteBuffers(1, &buffer);
-            continue;
-        }
-        breakPool.push_back(buffer);
-    }
-
-    if (breakPool.empty()) {
-        core::Logger::instance().warn("No break sounds loaded");
-        return false;
-    }
-    return true;
+    return loadBufferPool(paths, breakPool, "break");
 }
 
 bool AudioSystem::loadFootstepSounds(SoundProfile profile, const std::vector<std::string> &paths) {
@@ -429,30 +367,8 @@ bool AudioSystem::loadFootstepSounds(SoundProfile profile, const std::vector<std
     if (impl_ == nullptr) {
         return false;
     }
-
     auto &footPool = impl_->footstepPools[profileIndex(profile)];
-    releaseBuffers(footPool);
-
-    footPool.reserve(paths.size());
-    for (const std::string &path : paths) {
-        ALuint buffer = 0;
-        alGenBuffers(1, &buffer);
-        if (alGetError() != AL_NO_ERROR || buffer == 0) {
-            core::Logger::instance().warn("Failed to allocate audio buffer: " + path);
-            continue;
-        }
-        if (!loadWav(path, buffer)) {
-            alDeleteBuffers(1, &buffer);
-            continue;
-        }
-        footPool.push_back(buffer);
-    }
-
-    if (footPool.empty()) {
-        core::Logger::instance().warn("No footstep sounds loaded");
-        return false;
-    }
-    return true;
+    return loadBufferPool(paths, footPool, "footstep");
 }
 
 bool AudioSystem::loadPlaceSounds(SoundProfile profile, const std::vector<std::string> &paths) {
@@ -462,30 +378,191 @@ bool AudioSystem::loadPlaceSounds(SoundProfile profile, const std::vector<std::s
     if (impl_ == nullptr) {
         return false;
     }
-
     auto &placePool = impl_->placePools[profileIndex(profile)];
-    releaseBuffers(placePool);
+    return loadBufferPool(paths, placePool, "place");
+}
 
-    placePool.reserve(paths.size());
-    for (const std::string &path : paths) {
-        ALuint buffer = 0;
-        alGenBuffers(1, &buffer);
-        if (alGetError() != AL_NO_ERROR || buffer == 0) {
-            core::Logger::instance().warn("Failed to allocate audio buffer: " + path);
-            continue;
-        }
-        if (!loadWav(path, buffer)) {
-            alDeleteBuffers(1, &buffer);
-            continue;
-        }
-        placePool.push_back(buffer);
-    }
-
-    if (placePool.empty()) {
-        core::Logger::instance().warn("No place sounds loaded");
-        return false;
-    }
-    return true;
+bool AudioSystem::loadDefaultAssets() {
+    bool ok = true;
+    ok = loadPickupSounds({
+             "assets/audio/pickup/pickup.wav",
+         }) &&
+         ok;
+    ok = loadBreakSounds(SoundProfile::Default,
+                         {
+                             "assets/audio/break/break_1.wav",
+                             "assets/audio/break/break_2.wav",
+                             "assets/audio/break/break_3.wav",
+                         }) &&
+         ok;
+    ok = loadBreakSounds(SoundProfile::Stone,
+                         {
+                             "assets/audio/break/break_stone_1.wav",
+                             "assets/audio/break/break_stone_2.wav",
+                             "assets/audio/break/break_stone_3.wav",
+                         }) &&
+         ok;
+    ok = loadBreakSounds(SoundProfile::Dirt,
+                         {
+                             "assets/audio/break/break_dirt_1.wav",
+                             "assets/audio/break/break_dirt_2.wav",
+                             "assets/audio/break/break_dirt_3.wav",
+                         }) &&
+         ok;
+    ok = loadBreakSounds(SoundProfile::Wood,
+                         {
+                             "assets/audio/break/break_wood_1.wav",
+                             "assets/audio/break/break_wood_2.wav",
+                             "assets/audio/break/break_wood_3.wav",
+                         }) &&
+         ok;
+    ok = loadBreakSounds(SoundProfile::Foliage,
+                         {
+                             "assets/audio/break/break_foliage_1.wav",
+                             "assets/audio/break/break_foliage_2.wav",
+                             "assets/audio/break/break_foliage_3.wav",
+                         }) &&
+         ok;
+    ok = loadBreakSounds(SoundProfile::Sand,
+                         {
+                             "assets/audio/break/break_sand_1.wav",
+                             "assets/audio/break/break_sand_2.wav",
+                             "assets/audio/break/break_sand_3.wav",
+                         }) &&
+         ok;
+    ok = loadBreakSounds(SoundProfile::Snow,
+                         {
+                             "assets/audio/break/break_snow_1.wav",
+                             "assets/audio/break/break_snow_2.wav",
+                         }) &&
+         ok;
+    ok = loadBreakSounds(SoundProfile::Ice,
+                         {
+                             "assets/audio/break/break_ice_1.wav",
+                             "assets/audio/break/break_ice_2.wav",
+                         }) &&
+         ok;
+    ok = loadFootstepSounds(SoundProfile::Default,
+                            {
+                                "assets/audio/step/step_default_1.wav",
+                                "assets/audio/step/step_default_2.wav",
+                            }) &&
+         ok;
+    ok = loadFootstepSounds(SoundProfile::Stone,
+                            {
+                                "assets/audio/step/step_stone_1.wav",
+                                "assets/audio/step/step_stone_2.wav",
+                                "assets/audio/step/step_stone_3.wav",
+                            }) &&
+         ok;
+    ok = loadFootstepSounds(SoundProfile::Dirt,
+                            {
+                                "assets/audio/step/step_dirt_1.wav",
+                                "assets/audio/step/step_dirt_2.wav",
+                                "assets/audio/step/step_dirt_3.wav",
+                            }) &&
+         ok;
+    ok = loadFootstepSounds(SoundProfile::Grass,
+                            {
+                                "assets/audio/step/step_grass_1.wav",
+                                "assets/audio/step/step_grass_2.wav",
+                                "assets/audio/step/step_grass_3.wav",
+                            }) &&
+         ok;
+    ok = loadFootstepSounds(SoundProfile::Wood,
+                            {
+                                "assets/audio/step/step_wood_1.wav",
+                                "assets/audio/step/step_wood_2.wav",
+                                "assets/audio/step/step_wood_3.wav",
+                            }) &&
+         ok;
+    ok = loadFootstepSounds(SoundProfile::Foliage,
+                            {
+                                "assets/audio/step/step_foliage_1.wav",
+                                "assets/audio/step/step_foliage_2.wav",
+                                "assets/audio/step/step_foliage_3.wav",
+                            }) &&
+         ok;
+    ok = loadFootstepSounds(SoundProfile::Sand,
+                            {
+                                "assets/audio/step/step_sand_1.wav",
+                                "assets/audio/step/step_sand_2.wav",
+                                "assets/audio/step/step_sand_3.wav",
+                            }) &&
+         ok;
+    ok = loadFootstepSounds(SoundProfile::Snow,
+                            {
+                                "assets/audio/step/step_snow_1.wav",
+                                "assets/audio/step/step_snow_2.wav",
+                            }) &&
+         ok;
+    ok = loadFootstepSounds(SoundProfile::Ice,
+                            {
+                                "assets/audio/step/step_ice_1.wav",
+                                "assets/audio/step/step_ice_2.wav",
+                            }) &&
+         ok;
+    ok = loadPlaceSounds(SoundProfile::Default,
+                         {
+                             "assets/audio/place/place_default_1.wav",
+                             "assets/audio/place/place_default_2.wav",
+                         }) &&
+         ok;
+    ok = loadPlaceSounds(SoundProfile::Stone,
+                         {
+                             "assets/audio/place/place_stone_1.wav",
+                             "assets/audio/place/place_stone_2.wav",
+                         }) &&
+         ok;
+    ok = loadPlaceSounds(SoundProfile::Dirt,
+                         {
+                             "assets/audio/place/place_dirt_1.wav",
+                             "assets/audio/place/place_dirt_2.wav",
+                         }) &&
+         ok;
+    ok = loadPlaceSounds(SoundProfile::Wood,
+                         {
+                             "assets/audio/place/place_wood_1.wav",
+                             "assets/audio/place/place_wood_2.wav",
+                         }) &&
+         ok;
+    ok = loadPlaceSounds(SoundProfile::Foliage,
+                         {
+                             "assets/audio/place/place_foliage_1.wav",
+                             "assets/audio/place/place_foliage_2.wav",
+                         }) &&
+         ok;
+    ok = loadPlaceSounds(SoundProfile::Sand,
+                         {
+                             "assets/audio/place/place_sand_1.wav",
+                             "assets/audio/place/place_sand_2.wav",
+                         }) &&
+         ok;
+    ok = loadPlaceSounds(SoundProfile::Snow,
+                         {
+                             "assets/audio/place/place_snow_1.wav",
+                             "assets/audio/place/place_snow_2.wav",
+                         }) &&
+         ok;
+    ok = loadPlaceSounds(SoundProfile::Ice,
+                         {
+                             "assets/audio/place/place_ice_1.wav",
+                             "assets/audio/place/place_ice_2.wav",
+                         }) &&
+         ok;
+    ok = loadSwimSounds({
+             "assets/audio/swim/swim_1.wav",
+             "assets/audio/swim/swim_2.wav",
+             "assets/audio/swim/swim_3.wav",
+         }) &&
+         ok;
+    ok = loadWaterBobSounds({
+             "assets/audio/bob/bob_1.wav",
+             "assets/audio/bob/bob_2.wav",
+             "assets/audio/bob/bob_3.wav",
+         }) &&
+         ok;
+    return ok;
 }
 
 void AudioSystem::playPickup() {
@@ -593,6 +670,10 @@ bool AudioSystem::loadSwimSounds(const std::vector<std::string> & /*paths*/) {
 }
 
 bool AudioSystem::loadWaterBobSounds(const std::vector<std::string> & /*paths*/) {
+    return false;
+}
+
+bool AudioSystem::loadDefaultAssets() {
     return false;
 }
 

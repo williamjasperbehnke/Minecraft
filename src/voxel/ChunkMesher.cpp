@@ -26,7 +26,15 @@ bool isFaceExposed(const BlockRegistry &registry, BlockId currentId, BlockId nei
 }
 
 bool isCrossPlant(BlockId id) {
-    return id == TALL_GRASS || id == FLOWER;
+    return isPlant(id);
+}
+
+bool isWaterRenderable(BlockId id) {
+    return isWaterLike(id);
+}
+
+bool isLavaRenderable(BlockId id) {
+    return id == LAVA;
 }
 
 glm::vec4 flipV(const glm::vec4 &uv) {
@@ -68,18 +76,40 @@ void appendQuad(gfx::CpuMesh &mesh, const glm::vec3 &p0, const glm::vec3 &p1, co
     mesh.indices.insert(mesh.indices.end(), {base, base + 1, base + 2, base, base + 2, base + 3});
 }
 
-void appendCrossPlant(gfx::CpuMesh &mesh, float wx, float wy, float wz, const glm::vec4 &uv,
-                      float skyLight, float blockLight) {
+void appendQuadWithDiagonal(gfx::CpuMesh &mesh, const glm::vec3 &p0, const glm::vec3 &p1,
+                            const glm::vec3 &p2, const glm::vec3 &p3, const glm::vec3 &normal,
+                            const glm::vec4 &uv, float skyLight, float blockLight,
+                            bool flipDiagonal) {
+    const std::uint32_t base = static_cast<std::uint32_t>(mesh.vertices.size());
+    mesh.vertices.push_back(
+        {p0.x, p0.y, p0.z, normal.x, normal.y, normal.z, uv.x, uv.y, skyLight, blockLight});
+    mesh.vertices.push_back(
+        {p1.x, p1.y, p1.z, normal.x, normal.y, normal.z, uv.z, uv.y, skyLight, blockLight});
+    mesh.vertices.push_back(
+        {p2.x, p2.y, p2.z, normal.x, normal.y, normal.z, uv.z, uv.w, skyLight, blockLight});
+    mesh.vertices.push_back(
+        {p3.x, p3.y, p3.z, normal.x, normal.y, normal.z, uv.x, uv.w, skyLight, blockLight});
+    if (flipDiagonal) {
+        mesh.indices.insert(mesh.indices.end(),
+                            {base, base + 1, base + 3, base + 1, base + 2, base + 3});
+    } else {
+        mesh.indices.insert(mesh.indices.end(),
+                            {base, base + 1, base + 2, base, base + 2, base + 3});
+    }
+}
+
+void appendCrossPlant(gfx::CpuMesh &mesh, float wx, float wy, float wz, float topY,
+                      const glm::vec4 &uv, float skyLight, float blockLight) {
     const float inset = 0.10f;
     const glm::vec3 p0(wx + inset, wy, wz + inset);
     const glm::vec3 p1(wx + 1.0f - inset, wy, wz + 1.0f - inset);
-    const glm::vec3 p2(wx + 1.0f - inset, wy + 1.0f, wz + 1.0f - inset);
-    const glm::vec3 p3(wx + inset, wy + 1.0f, wz + inset);
+    const glm::vec3 p2(wx + 1.0f - inset, topY, wz + 1.0f - inset);
+    const glm::vec3 p3(wx + inset, topY, wz + inset);
 
     const glm::vec3 q0(wx + 1.0f - inset, wy, wz + inset);
     const glm::vec3 q1(wx + inset, wy, wz + 1.0f - inset);
-    const glm::vec3 q2(wx + inset, wy + 1.0f, wz + 1.0f - inset);
-    const glm::vec3 q3(wx + 1.0f - inset, wy + 1.0f, wz + inset);
+    const glm::vec3 q2(wx + inset, topY, wz + 1.0f - inset);
+    const glm::vec3 q3(wx + 1.0f - inset, topY, wz + inset);
 
     appendQuad(mesh, p0, p1, p2, p3, {0.0f, 1.0f, 0.0f}, uv, skyLight, blockLight);
     appendQuad(mesh, q0, q1, q2, q3, {0.0f, 1.0f, 0.0f}, uv, skyLight, blockLight);
@@ -129,6 +159,23 @@ gfx::CpuMesh ChunkMesher::buildFaceCulled(const Chunk &chunk, const gfx::Texture
         }
         if (x >= 0 && x < Chunk::SX && z >= 0 && z < Chunk::SZ) {
             return chunk.getUnchecked(x, y, z);
+        }
+        // Handle diagonals first so out-of-range x/z pairs don't index neighbors
+        // with invalid local coordinates.
+        if (x < 0 && z < 0) {
+            return (neighbors.nxnz != nullptr) ? neighbors.nxnz->getUnchecked(Chunk::SX - 1, y, Chunk::SZ - 1)
+                                               : AIR;
+        }
+        if (x < 0 && z >= Chunk::SZ) {
+            return (neighbors.nxpz != nullptr) ? neighbors.nxpz->getUnchecked(Chunk::SX - 1, y, 0)
+                                               : AIR;
+        }
+        if (x >= Chunk::SX && z < 0) {
+            return (neighbors.pxnz != nullptr) ? neighbors.pxnz->getUnchecked(0, y, Chunk::SZ - 1)
+                                               : AIR;
+        }
+        if (x >= Chunk::SX && z >= Chunk::SZ) {
+            return (neighbors.pxpz != nullptr) ? neighbors.pxpz->getUnchecked(0, y, 0) : AIR;
         }
         if (x < 0 && neighbors.nx != nullptr) {
             return neighbors.nx->getUnchecked(Chunk::SX - 1, y, z);
@@ -182,6 +229,179 @@ gfx::CpuMesh ChunkMesher::buildFaceCulled(const Chunk &chunk, const gfx::Texture
                 const glm::vec4 furnaceFrontUv =
                     flipV(atlas.uvRect(furnaceFrontTile(isLitFurnace(id))));
                 const glm::vec4 sideUv = flipV(atlas.uvRect(d.sideTile));
+                if (isWaterRenderable(id)) {
+                    const auto &waterDef = registry.get(WATER);
+                    const glm::vec4 waterSideUv = flipV(atlas.uvRect(waterDef.sideTile));
+                    const glm::vec4 waterTopUv = atlas.uvRect(waterDef.topTile);
+                    const glm::vec4 waterBottomUv = atlas.uvRect(waterDef.bottomTile);
+                    constexpr float kWaterSurfaceLower = 0.86f;
+                    const auto isWaterNeighbor = [&](int nx, int ny, int nz) {
+                        return isWaterLike(neighborAt(nx, ny, nz));
+                    };
+                    const bool topCovered = isWaterNeighbor(x, y + 1, z);
+                    const float lowY = wy + kWaterSurfaceLower;
+                    float hNW = topCovered ? (wy + 1.0f) : lowY;
+                    float hNE = topCovered ? (wy + 1.0f) : lowY;
+                    float hSW = topCovered ? (wy + 1.0f) : lowY;
+                    float hSE = topCovered ? (wy + 1.0f) : lowY;
+                    if (!topCovered) {
+                        const bool upW = isWaterNeighbor(x - 1, y + 1, z);
+                        const bool upE = isWaterNeighbor(x + 1, y + 1, z);
+                        const bool upN = isWaterNeighbor(x, y + 1, z - 1);
+                        const bool upS = isWaterNeighbor(x, y + 1, z + 1);
+                        const bool upNW = isWaterNeighbor(x - 1, y + 1, z - 1);
+                        const bool upNE = isWaterNeighbor(x + 1, y + 1, z - 1);
+                        const bool upSW = isWaterNeighbor(x - 1, y + 1, z + 1);
+                        const bool upSE = isWaterNeighbor(x + 1, y + 1, z + 1);
+                        if (upW || upN || upNW) {
+                            hNW = wy + 1.0f;
+                        }
+                        if (upE || upN || upNE) {
+                            hNE = wy + 1.0f;
+                        }
+                        if (upW || upS || upSW) {
+                            hSW = wy + 1.0f;
+                        }
+                        if (upE || upS || upSE) {
+                            hSE = wy + 1.0f;
+                        }
+                    }
+                    const float xMinTop = wx;
+                    const float xMaxTop = wx + 1.0f;
+                    const float zMinTop = wz;
+                    const float zMaxTop = wz + 1.0f;
+                    const float xMinSide = wx;
+                    const float xMaxSide = wx + 1.0f;
+                    const float zMinSide = wz;
+                    const float zMaxSide = wz + 1.0f;
+
+                    if (isWaterloggedPlant(id)) {
+                        const float sky = std::max(lighting.faceSkyLight(x, y, z, 0.92f),
+                                                   lighting.faceSkyLight(x, y + 1, z, 0.95f));
+                        const float block = std::max(lighting.faceBlockLight(x, y, z),
+                                                     lighting.faceBlockLight(x, y + 1, z));
+                        const float topMin = std::min(std::min(hNW, hNE), std::min(hSW, hSE));
+                        const float plantTopY = topCovered ? (wy + 1.0f) : (topMin - 0.01f);
+                        appendCrossPlant(out, wx, wy, wz, plantTopY, flipV(atlas.uvRect(d.sideTile)),
+                                         sky, block);
+                    }
+
+                    const BlockId nPosX = neighborAt(x + 1, y, z);
+                    if (hasNeighborChunkFor(x + 1, z) && !isWaterLike(nPosX) &&
+                        !isOpaque(registry, nPosX)) {
+                        const float sky = lighting.faceSkyLight(x + 1, y, z, 0.86f);
+                        const float block = lighting.faceBlockLight(x + 1, y, z);
+                        const float faceX = xMaxSide;
+                        appendQuad(out, {faceX, wy, zMinSide}, {faceX, wy, zMaxSide},
+                                   {faceX, hSE, zMaxSide}, {faceX, hNE, zMinSide}, {1, 0, 0},
+                                   waterSideUv, sky, block);
+                    }
+                    const BlockId nNegX = neighborAt(x - 1, y, z);
+                    if (hasNeighborChunkFor(x - 1, z) && !isWaterLike(nNegX) &&
+                        !isOpaque(registry, nNegX)) {
+                        const float sky = lighting.faceSkyLight(x - 1, y, z, 0.86f);
+                        const float block = lighting.faceBlockLight(x - 1, y, z);
+                        const float faceX = xMinSide;
+                        appendQuad(out, {faceX, wy, zMaxSide}, {faceX, wy, zMinSide},
+                                   {faceX, hNW, zMinSide}, {faceX, hSW, zMaxSide}, {-1, 0, 0},
+                                   waterSideUv, sky, block);
+                    }
+                    if (!topCovered) {
+                        const float sky = lighting.faceSkyLight(x, y + 1, z, 1.00f);
+                        const float block = lighting.faceBlockLight(x, y + 1, z);
+                        const bool flipDiag = ((x + z) & 1) != 0;
+                        appendQuadWithDiagonal(out, {xMinTop, hNW, zMinTop},
+                                               {xMaxTop, hNE, zMinTop}, {xMaxTop, hSE, zMaxTop},
+                                               {xMinTop, hSW, zMaxTop}, {0, 1, 0}, waterTopUv, sky,
+                                               block, flipDiag);
+                    }
+                    const BlockId nPosZ = neighborAt(x, y, z + 1);
+                    if (hasNeighborChunkFor(x, z + 1) && !isWaterLike(nPosZ) &&
+                        !isOpaque(registry, nPosZ)) {
+                        const float sky = lighting.faceSkyLight(x, y, z + 1, 0.90f);
+                        const float block = lighting.faceBlockLight(x, y, z + 1);
+                        const float faceZ = zMaxSide;
+                        appendQuad(out, {xMaxSide, wy, faceZ}, {xMinSide, wy, faceZ},
+                                   {xMinSide, hSW, faceZ}, {xMaxSide, hSE, faceZ}, {0, 0, 1},
+                                   waterSideUv, sky, block);
+                    }
+                    const BlockId nNegZ = neighborAt(x, y, z - 1);
+                    if (hasNeighborChunkFor(x, z - 1) && !isWaterLike(nNegZ) &&
+                        !isOpaque(registry, nNegZ)) {
+                        const float sky = lighting.faceSkyLight(x, y, z - 1, 0.90f);
+                        const float block = lighting.faceBlockLight(x, y, z - 1);
+                        const float faceZ = zMinSide;
+                        appendQuad(out, {xMinSide, wy, faceZ}, {xMaxSide, wy, faceZ},
+                                   {xMaxSide, hNE, faceZ}, {xMinSide, hNW, faceZ}, {0, 0, -1},
+                                   waterSideUv, sky, block);
+                    }
+                    const BlockId nDown = neighborAt(x, y - 1, z);
+                    if (y > 0 && nDown == AIR) {
+                        const float sky = lighting.faceSkyLight(x, y - 1, z, 0.56f);
+                        const float block = lighting.faceBlockLight(x, y - 1, z);
+                        appendQuad(out, {xMinTop, wy, zMaxTop}, {xMaxTop, wy, zMaxTop},
+                                   {xMaxTop, wy, zMinTop}, {xMinTop, wy, zMinTop}, {0, -1, 0},
+                                   waterBottomUv, sky, block);
+                    }
+                    continue;
+                }
+                if (isLavaRenderable(id)) {
+                    const auto &lavaDef = registry.get(LAVA);
+                    const glm::vec4 lavaSideUv = flipV(atlas.uvRect(lavaDef.sideTile));
+                    const glm::vec4 lavaTopUv = atlas.uvRect(lavaDef.topTile);
+                    constexpr float kLavaSurfaceLower = 0.86f;
+                    // Lava should continue to appear emissive even when enclosed.
+                    constexpr float kMinLavaBlockLight = 12.0f / 15.0f;
+                    const auto isLavaNeighbor = [&](int nx, int ny, int nz) {
+                        return neighborAt(nx, ny, nz) == LAVA;
+                    };
+                    const bool topCovered = isLavaNeighbor(x, y + 1, z);
+                    const float topY = wy + (topCovered ? 1.0f : kLavaSurfaceLower);
+
+                    const BlockId nPosX = neighborAt(x + 1, y, z);
+                    if (hasNeighborChunkFor(x + 1, z) && nPosX != LAVA && !isOpaque(registry, nPosX)) {
+                        const float sky = lighting.faceSkyLight(x + 1, y, z, 0.86f);
+                        const float block =
+                            std::max(kMinLavaBlockLight, lighting.faceBlockLight(x + 1, y, z));
+                        appendQuad(out, {wx + 1, wy, wz}, {wx + 1, wy, wz + 1},
+                                   {wx + 1, topY, wz + 1}, {wx + 1, topY, wz}, {1, 0, 0}, lavaSideUv,
+                                   sky, block);
+                    }
+                    const BlockId nNegX = neighborAt(x - 1, y, z);
+                    if (hasNeighborChunkFor(x - 1, z) && nNegX != LAVA && !isOpaque(registry, nNegX)) {
+                        const float sky = lighting.faceSkyLight(x - 1, y, z, 0.86f);
+                        const float block =
+                            std::max(kMinLavaBlockLight, lighting.faceBlockLight(x - 1, y, z));
+                        appendQuad(out, {wx, wy, wz + 1}, {wx, wy, wz}, {wx, topY, wz},
+                                   {wx, topY, wz + 1}, {-1, 0, 0}, lavaSideUv, sky, block);
+                    }
+                    if (!topCovered) {
+                        const float sky = lighting.faceSkyLight(x, y + 1, z, 1.00f);
+                        const float block =
+                            std::max(kMinLavaBlockLight, lighting.faceBlockLight(x, y + 1, z));
+                        appendQuad(out, {wx, topY, wz}, {wx + 1, topY, wz},
+                                   {wx + 1, topY, wz + 1}, {wx, topY, wz + 1}, {0, 1, 0}, lavaTopUv,
+                                   sky, block);
+                    }
+                    const BlockId nPosZ = neighborAt(x, y, z + 1);
+                    if (hasNeighborChunkFor(x, z + 1) && nPosZ != LAVA && !isOpaque(registry, nPosZ)) {
+                        const float sky = lighting.faceSkyLight(x, y, z + 1, 0.90f);
+                        const float block =
+                            std::max(kMinLavaBlockLight, lighting.faceBlockLight(x, y, z + 1));
+                        appendQuad(out, {wx + 1, wy, wz + 1}, {wx, wy, wz + 1},
+                                   {wx, topY, wz + 1}, {wx + 1, topY, wz + 1}, {0, 0, 1}, lavaSideUv,
+                                   sky, block);
+                    }
+                    const BlockId nNegZ = neighborAt(x, y, z - 1);
+                    if (hasNeighborChunkFor(x, z - 1) && nNegZ != LAVA && !isOpaque(registry, nNegZ)) {
+                        const float sky = lighting.faceSkyLight(x, y, z - 1, 0.90f);
+                        const float block =
+                            std::max(kMinLavaBlockLight, lighting.faceBlockLight(x, y, z - 1));
+                        appendQuad(out, {wx, wy, wz}, {wx + 1, wy, wz}, {wx + 1, topY, wz},
+                                   {wx, topY, wz}, {0, 0, -1}, lavaSideUv, sky, block);
+                    }
+                    continue;
+                }
                 if (isCrossPlant(id)) {
                     // Plants should not become fully dim just because a block is directly above:
                     // blend light from their own cell and the cell above.
@@ -189,7 +409,8 @@ gfx::CpuMesh ChunkMesher::buildFaceCulled(const Chunk &chunk, const gfx::Texture
                                                lighting.faceSkyLight(x, y + 1, z, 0.95f));
                     const float block =
                         std::max(lighting.faceBlockLight(x, y, z), lighting.faceBlockLight(x, y + 1, z));
-                    appendCrossPlant(out, wx, wy, wz, flipV(atlas.uvRect(d.sideTile)), sky, block);
+                    appendCrossPlant(out, wx, wy, wz, wy + 1.0f, flipV(atlas.uvRect(d.sideTile)), sky,
+                                     block);
                     continue;
                 }
 
@@ -198,7 +419,8 @@ gfx::CpuMesh ChunkMesher::buildFaceCulled(const Chunk &chunk, const gfx::Texture
                     const float block =
                         std::max(lighting.faceBlockLight(x, y, z), lighting.faceBlockLight(x, y + 1, z));
                     if (id == TORCH) {
-                        appendCrossPlant(out, wx, wy, wz, flipV(atlas.uvRect(d.sideTile)), sky, block);
+                        appendCrossPlant(out, wx, wy, wz, wy + 1.0f, flipV(atlas.uvRect(d.sideTile)),
+                                         sky, block);
                     } else if (isWallTorch(id)) {
                         const glm::ivec2 outward = wallTorchOutward(id);
                         const float dx = static_cast<float>(outward.x);

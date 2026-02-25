@@ -1,8 +1,13 @@
 #include "world/World.hpp"
 
+#include "app/SaveManager.hpp"
 #include "voxel/ChunkMesher.hpp"
 
+#include <glm/geometric.hpp>
+#include <glm/vec2.hpp>
+
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <utility>
 #include <vector>
@@ -13,7 +18,11 @@ namespace {
 constexpr unsigned int kMinWorkerThreads = 2u;
 constexpr unsigned int kMaxWorkerThreads = 8u;
 constexpr int kMaxUnloadsPerUpdate = 2;
-constexpr int kMaxUploadsPerFrame = 2;
+constexpr int kMaxUploadsPerFrame = 6;
+constexpr float kWaterStepInterval = 0.08f;
+constexpr float kLavaStepInterval = 0.24f;
+constexpr int kWaterCellsPerStep = 256;
+constexpr int kLavaCellsPerStep = 96;
 
 int chunkDistance(ChunkCoord a, ChunkCoord b) {
     return std::max(std::abs(a.x - b.x), std::abs(a.z - b.z));
@@ -36,7 +45,7 @@ World::FurnaceCoordKey makeFurnaceKey(int x, int y, int z) {
 } // namespace
 
 World::World(const gfx::TextureAtlas &atlas, std::filesystem::path saveRoot, std::uint32_t seed)
-    : atlas_(atlas), gen_(seed), io_(std::move(saveRoot), WorldGen::kGeneratorVersion) {
+    : atlas_(atlas), gen_(seed), saveRoot_(std::move(saveRoot)) {
     const unsigned int hardwareThreads = std::max(1u, std::thread::hardware_concurrency());
     const unsigned int workerCount =
         std::clamp(hardwareThreads > 1 ? hardwareThreads - 1 : 1u, kMinWorkerThreads,
@@ -83,7 +92,8 @@ World::~World() {
                 rec.state = fState;
                 localFurnaces.push_back(rec);
             }
-            io_.save(*entry.chunk, coord, &localFurnaces);
+            app::SaveManager::saveChunk(saveRoot_, WorldGen::kGeneratorVersion, *entry.chunk, coord,
+                                        &localFurnaces);
         }
     }
 }
@@ -104,6 +114,167 @@ int World::floorMod(int a, int b) {
 
 ChunkCoord World::worldToChunk(int wx, int wz) {
     return ChunkCoord{floorDiv(wx, voxel::Chunk::SX), floorDiv(wz, voxel::Chunk::SZ)};
+}
+
+voxel::BlockId World::getBlockLoadedLocked(int wx, int wy, int wz) const {
+    if (wy < 0 || wy >= voxel::Chunk::SY) {
+        return voxel::AIR;
+    }
+    const ChunkCoord cc = worldToChunk(wx, wz);
+    const auto it = chunks_.find(cc);
+    if (it == chunks_.end() || !it->second.chunk) {
+        return voxel::AIR;
+    }
+    const int lx = floorMod(wx, voxel::Chunk::SX);
+    const int lz = floorMod(wz, voxel::Chunk::SZ);
+    return it->second.chunk->get(lx, wy, lz);
+}
+
+void World::enqueueFluidCellLocked(int wx, int wy, int wz) {
+    if (wy < 0 || wy >= voxel::Chunk::SY) {
+        return;
+    }
+    const voxel::BlockId id = getBlockLoadedLocked(wx, wy, wz);
+    if (id == voxel::WATER || voxel::isWaterloggedPlant(id)) {
+        const FluidCoord c{wx, wy, wz};
+        if (waterQueued_.insert(c).second) {
+            waterFrontier_.push_back(c);
+        }
+        return;
+    }
+    if (id == voxel::LAVA) {
+        const FluidCoord c{wx, wy, wz};
+        if (lavaQueued_.insert(c).second) {
+            lavaFrontier_.push_back(c);
+        }
+    }
+}
+
+void World::enqueueFluidNeighborsLocked(int wx, int wy, int wz) {
+    enqueueFluidCellLocked(wx, wy, wz);
+    enqueueFluidCellLocked(wx, wy - 1, wz);
+    enqueueFluidCellLocked(wx, wy + 1, wz);
+    enqueueFluidCellLocked(wx + 1, wy, wz);
+    enqueueFluidCellLocked(wx - 1, wy, wz);
+    enqueueFluidCellLocked(wx, wy, wz + 1);
+    enqueueFluidCellLocked(wx, wy, wz - 1);
+}
+
+void World::seedFluidFrontierForChunkLocked(ChunkCoord cc, const voxel::Chunk &chunk) {
+    const int baseX = cc.x * voxel::Chunk::SX;
+    const int baseZ = cc.z * voxel::Chunk::SZ;
+    for (int lx = 0; lx < voxel::Chunk::SX; ++lx) {
+        for (int lz = 0; lz < voxel::Chunk::SZ; ++lz) {
+            for (int y = 0; y < voxel::Chunk::SY; ++y) {
+                const voxel::BlockId id = chunk.get(lx, y, lz);
+                if (!voxel::isFluid(id)) {
+                    continue;
+                }
+                const int wx = baseX + lx;
+                const int wz = baseZ + lz;
+                const bool exposed = (getBlockLoadedLocked(wx, y - 1, wz) == voxel::AIR) ||
+                                     (getBlockLoadedLocked(wx + 1, y, wz) == voxel::AIR) ||
+                                     (getBlockLoadedLocked(wx - 1, y, wz) == voxel::AIR) ||
+                                     (getBlockLoadedLocked(wx, y, wz + 1) == voxel::AIR) ||
+                                     (getBlockLoadedLocked(wx, y, wz - 1) == voxel::AIR);
+                if (exposed) {
+                    enqueueFluidCellLocked(wx, y, wz);
+                }
+            }
+        }
+    }
+}
+
+void World::appendFluidRemeshNeighborhoodLocked(
+    ChunkCoord cc, bool waterLike, std::unordered_set<ChunkCoord, ChunkCoordHash> &out) const {
+    out.insert(cc);
+    out.insert(ChunkCoord{cc.x + 1, cc.z});
+    out.insert(ChunkCoord{cc.x - 1, cc.z});
+    out.insert(ChunkCoord{cc.x, cc.z + 1});
+    out.insert(ChunkCoord{cc.x, cc.z - 1});
+    out.insert(ChunkCoord{cc.x + 1, cc.z + 1});
+    out.insert(ChunkCoord{cc.x + 1, cc.z - 1});
+    out.insert(ChunkCoord{cc.x - 1, cc.z + 1});
+    out.insert(ChunkCoord{cc.x - 1, cc.z - 1});
+    if (waterLike) {
+        out.insert(ChunkCoord{cc.x + 2, cc.z});
+        out.insert(ChunkCoord{cc.x - 2, cc.z});
+        out.insert(ChunkCoord{cc.x, cc.z + 2});
+        out.insert(ChunkCoord{cc.x, cc.z - 2});
+        out.insert(ChunkCoord{cc.x + 2, cc.z + 2});
+        out.insert(ChunkCoord{cc.x + 2, cc.z - 2});
+        out.insert(ChunkCoord{cc.x - 2, cc.z + 2});
+        out.insert(ChunkCoord{cc.x - 2, cc.z - 2});
+    }
+}
+
+void World::processFluidFrontierLocked(
+    voxel::BlockId fluidId, int budget, std::deque<FluidCoord> &frontier,
+    std::unordered_set<FluidCoord, FluidCoordHash> &queued,
+    std::unordered_set<ChunkCoord, ChunkCoordHash> &remeshChunks) {
+    static constexpr std::array<glm::ivec2, 4> kDirs = {
+        glm::ivec2{1, 0}, glm::ivec2{-1, 0}, glm::ivec2{0, 1}, glm::ivec2{0, -1}};
+    const bool waterLikeFluid = (fluidId == voxel::WATER);
+    int processed = 0;
+    while (processed < budget && !frontier.empty()) {
+        const FluidCoord cell = frontier.front();
+        frontier.pop_front();
+        queued.erase(cell);
+        ++processed;
+
+        const voxel::BlockId id = getBlockLoadedLocked(cell.x, cell.y, cell.z);
+        if (id != fluidId) {
+            continue;
+        }
+
+        bool changed = false;
+        const int wy = cell.y;
+        if (wy > 0) {
+            const voxel::BlockId below = getBlockLoadedLocked(cell.x, wy - 1, cell.z);
+            if (below == voxel::AIR || voxel::isPlant(below) || voxel::isTorch(below)) {
+                const ChunkCoord downCc = worldToChunk(cell.x, cell.z);
+                auto downIt = chunks_.find(downCc);
+                if (downIt != chunks_.end() && downIt->second.chunk) {
+                    const int lx = floorMod(cell.x, voxel::Chunk::SX);
+                    const int lz = floorMod(cell.z, voxel::Chunk::SZ);
+                    downIt->second.chunk->set(lx, wy - 1, lz, fluidId);
+                    appendFluidRemeshNeighborhoodLocked(downCc, waterLikeFluid, remeshChunks);
+                    enqueueFluidNeighborsLocked(cell.x, wy - 1, cell.z);
+                    changed = true;
+                }
+            }
+        }
+
+        const int dirSeed = (cell.x * 73428767) ^ (cell.y * 912931) ^ (cell.z * 19349663);
+        const int start = std::abs(dirSeed) & 3;
+        const int lateralLimit = (fluidId == voxel::LAVA) ? 1 : 2;
+        int lateralPlaced = 0;
+        for (int i = 0; i < 4 && lateralPlaced < lateralLimit; ++i) {
+            const glm::ivec2 d = kDirs[(start + i) & 3];
+            const int nx = cell.x + d.x;
+            const int nz = cell.z + d.y;
+            const voxel::BlockId nId = getBlockLoadedLocked(nx, wy, nz);
+            if (!(nId == voxel::AIR || voxel::isPlant(nId) || voxel::isTorch(nId))) {
+                continue;
+            }
+            const ChunkCoord ncc = worldToChunk(nx, nz);
+            auto nit = chunks_.find(ncc);
+            if (nit == chunks_.end() || !nit->second.chunk) {
+                continue;
+            }
+            const int lx = floorMod(nx, voxel::Chunk::SX);
+            const int lz = floorMod(nz, voxel::Chunk::SZ);
+            nit->second.chunk->set(lx, wy, lz, fluidId);
+            appendFluidRemeshNeighborhoodLocked(ncc, waterLikeFluid, remeshChunks);
+            enqueueFluidNeighborsLocked(nx, wy, nz);
+            ++lateralPlaced;
+            changed = true;
+        }
+
+        if (changed) {
+            enqueueFluidNeighborsLocked(cell.x, wy, cell.z);
+        }
+    }
 }
 
 void World::enqueueLoadIfNeeded(ChunkCoord cc) {
@@ -146,7 +317,7 @@ void World::enqueueLoadIfNeeded(ChunkCoord cc) {
     scheduleWorkerJob(std::move(job));
 }
 
-void World::enqueueRemesh(ChunkCoord cc, bool force) {
+void World::enqueueRemesh(ChunkCoord cc, bool force, bool urgent) {
     if (force) {
         pendingRemesh_.erase(cc);
     }
@@ -163,6 +334,7 @@ void World::enqueueRemesh(ChunkCoord cc, bool force) {
     WorkerJob job;
     job.type = JobType::Remesh;
     job.coord = cc;
+    job.urgent = urgent;
     job.chunkSnapshot = it->second.chunk;
 
     auto nit = chunks_.find(ChunkCoord{cc.x + 1, cc.z});
@@ -199,8 +371,8 @@ void World::scheduleWorkerJob(WorkerJob job) {
 
 void World::setStreamingRadii(int loadRadius, int unloadRadius) {
     std::lock_guard<std::mutex> lock(chunksMutex_);
-    loadRadius_ = std::clamp(loadRadius, 2, 16);
-    unloadRadius_ = std::clamp(std::max(unloadRadius, loadRadius_ + 1), 3, 20);
+    loadRadius_ = std::clamp(loadRadius, 2, 64);
+    unloadRadius_ = std::clamp(std::max(unloadRadius, loadRadius_ + 1), 3, 72);
     streamDirty_.store(true, std::memory_order_relaxed);
 }
 
@@ -332,7 +504,8 @@ void World::updateStream(const glm::vec3 &playerPos) {
                 rec.state = fState;
                 localFurnaces.push_back(rec);
             }
-            io_.save(*it->second.chunk, cc, &localFurnaces);
+            app::SaveManager::saveChunk(saveRoot_, WorldGen::kGeneratorVersion, *it->second.chunk,
+                                        cc, &localFurnaces);
             for (auto fit = furnaceStates_.begin(); fit != furnaceStates_.end();) {
                 const ChunkCoord fcc = worldToChunk(fit->first.x, fit->first.z);
                 if (fcc.x == cc.x && fcc.z == cc.z) {
@@ -356,6 +529,35 @@ void World::updateStream(const glm::vec3 &playerPos) {
     }
 }
 
+void World::updateFluidSimulation(float dt) {
+    if (dt <= 0.0f) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(chunksMutex_);
+    waterStepAccum_ += dt;
+    lavaStepAccum_ += dt;
+    const int waterSteps = std::min(4, static_cast<int>(waterStepAccum_ / kWaterStepInterval));
+    const int lavaSteps = std::min(2, static_cast<int>(lavaStepAccum_ / kLavaStepInterval));
+    if (waterSteps <= 0 && lavaSteps <= 0) {
+        return;
+    }
+    waterStepAccum_ -= static_cast<float>(waterSteps) * kWaterStepInterval;
+    lavaStepAccum_ -= static_cast<float>(lavaSteps) * kLavaStepInterval;
+
+    std::unordered_set<ChunkCoord, ChunkCoordHash> remeshChunks;
+    if (waterSteps > 0) {
+        processFluidFrontierLocked(voxel::WATER, waterSteps * kWaterCellsPerStep, waterFrontier_,
+                                   waterQueued_, remeshChunks);
+    }
+    if (lavaSteps > 0) {
+        processFluidFrontierLocked(voxel::LAVA, lavaSteps * kLavaCellsPerStep, lavaFrontier_,
+                                   lavaQueued_, remeshChunks);
+    }
+    for (const ChunkCoord cc : remeshChunks) {
+        enqueueRemesh(cc, false, true);
+    }
+}
+
 void World::uploadReadyMeshes() {
     auto enqueueNeighborRingRemesh = [this](ChunkCoord cc) {
         enqueueRemesh(ChunkCoord{cc.x + 1, cc.z}, true);
@@ -370,7 +572,23 @@ void World::uploadReadyMeshes() {
 
     int uploadsThisFrame = 0;
     WorkerResult result;
-    while (uploadsThisFrame < kMaxUploadsPerFrame && completed_.tryPop(result)) {
+    while (uploadsThisFrame < kMaxUploadsPerFrame &&
+           completed_.tryPopBest(result, [this](const WorkerResult &a, const WorkerResult &b) {
+               if (a.urgent != b.urgent) {
+                   return a.urgent;
+               }
+               const ChunkCoord center =
+                   unpackChunkCoord(playerChunkPacked_.load(std::memory_order_relaxed));
+               const int da = chunkDistance(a.coord, center);
+               const int db = chunkDistance(b.coord, center);
+               if (da != db) {
+                   return da < db;
+               }
+               if (a.replaceChunk != b.replaceChunk) {
+                   return a.replaceChunk;
+               }
+               return false;
+           })) {
         std::lock_guard<std::mutex> lock(chunksMutex_);
 
         // Drop stale load results for chunks that were unloaded before worker
@@ -392,11 +610,16 @@ void World::uploadReadyMeshes() {
         if (result.replaceChunk) {
             entry.chunk = std::move(result.chunk);
             pendingLoad_.erase(result.coord);
+            if (entry.chunk) {
+                seedFluidFrontierForChunkLocked(result.coord, *entry.chunk);
+            }
             // Build this chunk mesh only after load completes in the normal remesh
             // path, so boundary face culling can use available neighbors.
             enqueueRemesh(result.coord, true);
             // New chunk may occlude neighbor border faces.
             enqueueNeighborRingRemesh(result.coord);
+            // Don't spend mesh-upload budget on load completion records.
+            continue;
         } else {
             pendingRemesh_.erase(result.coord);
         }
@@ -421,29 +644,45 @@ void World::draw() const {
     }
 }
 
-void World::drawTransparent(const glm::vec3 &cameraPos) const {
+void World::drawTransparent(const glm::vec3 &cameraPos, const glm::vec3 &cameraForward) const {
     std::lock_guard<std::mutex> lock(chunksMutex_);
 
     struct DrawItem {
         const gfx::ChunkMesh *mesh = nullptr;
+        ChunkCoord coord{};
+        float depth = 0.0f;
         float dist2 = 0.0f;
     };
     std::vector<DrawItem> items;
     items.reserve(chunks_.size());
 
+    const glm::vec3 fwd = (std::abs(cameraForward.x) < 1e-6f && std::abs(cameraForward.y) < 1e-6f &&
+                           std::abs(cameraForward.z) < 1e-6f)
+                              ? glm::vec3(0.0f, 0.0f, -1.0f)
+                              : glm::normalize(cameraForward);
     for (const auto &[coord, entry] : chunks_) {
         if (!entry.mesh) {
             continue;
         }
         const float cx = static_cast<float>(coord.x * voxel::Chunk::SX + voxel::Chunk::SX / 2);
         const float cz = static_cast<float>(coord.z * voxel::Chunk::SZ + voxel::Chunk::SZ / 2);
-        const float dx = cx - cameraPos.x;
-        const float dz = cz - cameraPos.z;
-        items.push_back(DrawItem{entry.mesh.get(), dx * dx + dz * dz});
+        const glm::vec3 toChunk(cx - cameraPos.x, 0.0f, cz - cameraPos.z);
+        const float dx = toChunk.x;
+        const float dz = toChunk.z;
+        items.push_back(DrawItem{entry.mesh.get(), coord, glm::dot(toChunk, fwd), dx * dx + dz * dz});
     }
 
     std::sort(items.begin(), items.end(), [](const DrawItem &a, const DrawItem &b) {
-        return a.dist2 > b.dist2; // far-to-near for blending
+        if (a.depth != b.depth) {
+            return a.depth > b.depth; // farther along view direction first
+        }
+        if (a.dist2 != b.dist2) {
+            return a.dist2 > b.dist2;
+        }
+        if (a.coord.x != b.coord.x) {
+            return a.coord.x < b.coord.x;
+        }
+        return a.coord.z < b.coord.z;
     });
 
     for (const DrawItem &item : items) {
@@ -470,8 +709,7 @@ voxel::BlockId World::getBlock(int wx, int wy, int wz) const {
 
 bool World::isSolidBlock(int wx, int wy, int wz) const {
     const voxel::BlockId id = getBlock(wx, wy, wz);
-    if (id == voxel::AIR || id == voxel::WATER || id == voxel::TALL_GRASS ||
-        id == voxel::FLOWER || voxel::isTorch(id)) {
+    if (id == voxel::AIR || voxel::isFluid(id) || voxel::isPlant(id) || voxel::isTorch(id)) {
         return false;
     }
     return blockRegistry_.get(id).solid;
@@ -479,7 +717,7 @@ bool World::isSolidBlock(int wx, int wy, int wz) const {
 
 bool World::isTargetBlock(int wx, int wy, int wz) const {
     const voxel::BlockId id = getBlock(wx, wy, wz);
-    if (id == voxel::AIR || id == voxel::WATER) {
+    if (id == voxel::AIR || voxel::isFluid(id)) {
         return false;
     }
     return blockRegistry_.get(id).solid;
@@ -490,6 +728,10 @@ bool World::isChunkLoadedAt(int wx, int wz) const {
     std::lock_guard<std::mutex> lock(chunksMutex_);
     const auto it = chunks_.find(cc);
     return it != chunks_.end() && static_cast<bool>(it->second.chunk);
+}
+
+std::string World::biomeLabelAt(int wx, int wz) const {
+    return gen_.biomeLabelAt(wx, wz);
 }
 
 bool World::setBlock(int wx, int wy, int wz, voxel::BlockId id) {
@@ -508,30 +750,50 @@ bool World::setBlock(int wx, int wy, int wz, voxel::BlockId id) {
     }
 
     const voxel::BlockId prevId = it->second.chunk->get(lx, wy, lz);
-    if (prevId == id) {
+    voxel::BlockId nextId = id;
+    // Waterlogged underwater flora should leave water behind when removed.
+    if (nextId == voxel::AIR && voxel::isWaterloggedPlant(prevId)) {
+        nextId = voxel::WATER;
+    }
+    // Bedrock at world bottom is immutable.
+    if (prevId == voxel::BEDROCK && nextId != voxel::BEDROCK) {
+        return false;
+    }
+
+    if (prevId == nextId) {
         return true;
     }
-    it->second.chunk->set(lx, wy, lz, id);
-    enqueueRemesh(cc, true);
+    it->second.chunk->set(lx, wy, lz, nextId);
+    // Any edit can open/close fluid paths nearby.
+    enqueueFluidNeighborsLocked(wx, wy, wz);
+    enqueueRemesh(cc, true, true);
 
     // Lighting/faces can change across chunk seams even when the edited block is
     // not on a border, so always refresh direct neighbors.
-    enqueueRemesh(ChunkCoord{cc.x - 1, cc.z}, true);
-    enqueueRemesh(ChunkCoord{cc.x + 1, cc.z}, true);
-    enqueueRemesh(ChunkCoord{cc.x, cc.z - 1}, true);
-    enqueueRemesh(ChunkCoord{cc.x, cc.z + 1}, true);
-    enqueueRemesh(ChunkCoord{cc.x - 1, cc.z - 1}, true);
-    enqueueRemesh(ChunkCoord{cc.x - 1, cc.z + 1}, true);
-    enqueueRemesh(ChunkCoord{cc.x + 1, cc.z - 1}, true);
-    enqueueRemesh(ChunkCoord{cc.x + 1, cc.z + 1}, true);
+    enqueueRemesh(ChunkCoord{cc.x - 1, cc.z}, true, true);
+    enqueueRemesh(ChunkCoord{cc.x + 1, cc.z}, true, true);
+    enqueueRemesh(ChunkCoord{cc.x, cc.z - 1}, true, true);
+    enqueueRemesh(ChunkCoord{cc.x, cc.z + 1}, true, true);
+    enqueueRemesh(ChunkCoord{cc.x - 1, cc.z - 1}, true, true);
+    enqueueRemesh(ChunkCoord{cc.x - 1, cc.z + 1}, true, true);
+    enqueueRemesh(ChunkCoord{cc.x + 1, cc.z - 1}, true, true);
+    enqueueRemesh(ChunkCoord{cc.x + 1, cc.z + 1}, true, true);
 
     // Emissive block changes can cross chunk boundaries even when the modified
     // block is not on an edge, so refresh a second ring for seam correctness.
-    if (voxel::emittedBlockLight(prevId) != voxel::emittedBlockLight(id)) {
-        enqueueRemesh(ChunkCoord{cc.x - 2, cc.z}, true);
-        enqueueRemesh(ChunkCoord{cc.x + 2, cc.z}, true);
-        enqueueRemesh(ChunkCoord{cc.x, cc.z - 2}, true);
-        enqueueRemesh(ChunkCoord{cc.x, cc.z + 2}, true);
+    if (voxel::emittedBlockLight(prevId) != voxel::emittedBlockLight(nextId)) {
+        enqueueRemesh(ChunkCoord{cc.x - 2, cc.z}, true, true);
+        enqueueRemesh(ChunkCoord{cc.x + 2, cc.z}, true, true);
+        enqueueRemesh(ChunkCoord{cc.x, cc.z - 2}, true, true);
+        enqueueRemesh(ChunkCoord{cc.x, cc.z + 2}, true, true);
+    }
+    // Water surface blending/culling can depend on immediate and second-ring
+    // neighbors near chunk boundaries; refresh one extra ring for water edits.
+    if (voxel::isWaterLike(prevId) || voxel::isWaterLike(nextId)) {
+        enqueueRemesh(ChunkCoord{cc.x - 2, cc.z - 2}, true, true);
+        enqueueRemesh(ChunkCoord{cc.x - 2, cc.z + 2}, true, true);
+        enqueueRemesh(ChunkCoord{cc.x + 2, cc.z - 2}, true, true);
+        enqueueRemesh(ChunkCoord{cc.x + 2, cc.z + 2}, true, true);
     }
 
     return true;
@@ -587,6 +849,9 @@ std::vector<glm::ivec3> World::loadedFurnacePositions() const {
 void World::workerLoop() {
     while (running_.load()) {
         auto maybeJob = workerJobs_.waitPopBest([this](const WorkerJob &a, const WorkerJob &b) {
+            if (a.urgent != b.urgent) {
+                return a.urgent;
+            }
             const ChunkCoord center =
                 unpackChunkCoord(playerChunkPacked_.load(std::memory_order_relaxed));
             const int da = chunkDistance(a.coord, center);
@@ -609,7 +874,8 @@ void World::workerLoop() {
         if (job.type == JobType::LoadOrGenerate) {
             auto chunk = std::make_shared<voxel::Chunk>();
             std::vector<world::FurnaceRecordLocal> loadedFurnaces;
-            if (!io_.load(*chunk, job.coord, &loadedFurnaces)) {
+            if (!app::SaveManager::loadChunk(saveRoot_, WorldGen::kGeneratorVersion, *chunk,
+                                             job.coord, &loadedFurnaces)) {
                 gen_.fillChunk(*chunk, job.coord);
             } else if (!loadedFurnaces.empty()) {
                 std::lock_guard<std::mutex> lock(chunksMutex_);
@@ -622,7 +888,8 @@ void World::workerLoop() {
             }
             // Defer mesh build to remesh jobs after chunk registration so
             // neighbor-aware edge culling happens before any faces are rendered.
-            completed_.push(WorkerResult{job.coord, std::move(chunk), gfx::CpuMesh{}, true});
+            completed_.push(
+                WorkerResult{job.coord, job.urgent, std::move(chunk), gfx::CpuMesh{}, true});
         } else {
             if (!job.chunkSnapshot) {
                 continue;
@@ -634,7 +901,7 @@ void World::workerLoop() {
             const gfx::CpuMesh mesh = voxel::ChunkMesher::buildFaceCulled(
                 *job.chunkSnapshot, atlas_, blockRegistry_, glm::ivec2(job.coord.x, job.coord.z),
                 neighbors, smoothLighting_.load(std::memory_order_relaxed));
-            completed_.push(WorkerResult{job.coord, nullptr, mesh, false});
+            completed_.push(WorkerResult{job.coord, job.urgent, nullptr, mesh, false});
         }
     }
 }

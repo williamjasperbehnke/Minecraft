@@ -1,5 +1,11 @@
 #include "gfx/HudRenderer.hpp"
 
+#include "app/util/ShaderProgramUtils.hpp"
+#include "app/menus/CraftingMenu.hpp"
+#include "app/menus/CreativeMenu.hpp"
+#include "app/menus/FurnaceMenu.hpp"
+#include "app/menus/HudDrawContext.hpp"
+#include "app/menus/RecipeMenu.hpp"
 #include "game/GameRules.hpp"
 #include "game/SmeltingSystem.hpp"
 #include "voxel/Chunk.hpp"
@@ -14,51 +20,13 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <stdexcept>
 #include <vector>
 
 namespace gfx {
 namespace {
 
-unsigned int compile(unsigned int type, const char *src) {
-    const unsigned int s = glCreateShader(type);
-    glShaderSource(s, 1, &src, nullptr);
-    glCompileShader(s);
-    int ok = 0;
-    glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
-    if (!ok) {
-        char log[1024];
-        glGetShaderInfoLog(s, sizeof(log), nullptr, log);
-        throw std::runtime_error(std::string("HUD shader compile failed: ") + log);
-    }
-    return s;
-}
-
-unsigned int link(unsigned int vs, unsigned int fs) {
-    const unsigned int p = glCreateProgram();
-    glAttachShader(p, vs);
-    glAttachShader(p, fs);
-    glLinkProgram(p);
-    int ok = 0;
-    glGetProgramiv(p, GL_LINK_STATUS, &ok);
-    if (!ok) {
-        char log[1024];
-        glGetProgramInfoLog(p, sizeof(log), nullptr, log);
-        throw std::runtime_error(std::string("HUD shader link failed: ") + log);
-    }
-    glDeleteShader(vs);
-    glDeleteShader(fs);
-    return p;
-}
-
 float textWidthPx(const std::string &text) {
     return static_cast<float>(stb_easy_font_width(const_cast<char *>(text.c_str())));
-}
-
-glm::vec3 mapColorForBlock(voxel::BlockId id, const voxel::BlockRegistry &registry,
-                           const TextureAtlas &atlas) {
-    const voxel::BlockDef &def = registry.get(id);
-    return atlas.tileAverageColor(def.topTile);
 }
 
 } // namespace
@@ -88,7 +56,9 @@ out vec4 FragColor;
 void main() { FragColor = vColor; }
 )";
 
-    uiShader_ = link(compile(GL_VERTEX_SHADER, vs), compile(GL_FRAGMENT_SHADER, fs));
+    uiShader_ = app::util::linkInLineProgram(
+        app::util::compileInlineShader(GL_VERTEX_SHADER, vs),
+        app::util::compileInlineShader(GL_FRAGMENT_SHADER, fs));
 
     glGenVertexArrays(1, &uiVao_);
     glGenBuffers(1, &uiVbo_);
@@ -125,7 +95,9 @@ out vec4 FragColor;
 void main() { FragColor = uColor; }
 )";
 
-    lineShader_ = link(compile(GL_VERTEX_SHADER, vs), compile(GL_FRAGMENT_SHADER, fs));
+    lineShader_ = app::util::linkInLineProgram(
+        app::util::compileInlineShader(GL_VERTEX_SHADER, vs),
+        app::util::compileInlineShader(GL_FRAGMENT_SHADER, fs));
 
     constexpr float edge[24 * 3] = {0, 0, 0, 1, 0, 0, 1, 0, 0, 1, 1, 0, 1, 1, 0, 0, 1, 0,
                                     0, 1, 0, 0, 0, 0, 0, 0, 1, 1, 0, 1, 1, 0, 1, 1, 1, 1,
@@ -180,7 +152,9 @@ void main() {
 }
 )";
 
-    crackShader_ = link(compile(GL_VERTEX_SHADER, vs), compile(GL_FRAGMENT_SHADER, fs));
+    crackShader_ = app::util::linkInLineProgram(
+        app::util::compileInlineShader(GL_VERTEX_SHADER, vs),
+        app::util::compileInlineShader(GL_FRAGMENT_SHADER, fs));
 
     constexpr float cube[36 * 5] = {
         // +Z
@@ -243,7 +217,9 @@ void main() {
 }
 )";
 
-    iconShader_ = link(compile(GL_VERTEX_SHADER, vs), compile(GL_FRAGMENT_SHADER, fs));
+    iconShader_ = app::util::linkInLineProgram(
+        app::util::compileInlineShader(GL_VERTEX_SHADER, vs),
+        app::util::compileInlineShader(GL_FRAGMENT_SHADER, fs));
     glGenVertexArrays(1, &iconVao_);
     glGenBuffers(1, &iconVbo_);
     glBindVertexArray(iconVao_);
@@ -307,282 +283,124 @@ void HudRenderer::drawText(float x, float y, const std::string &text, unsigned c
     }
 }
 
-void HudRenderer::renderTitleScreen(int width, int height, const std::vector<std::string> &worlds,
-                                    int selectedWorld, bool createMode, bool editSeed,
-                                    const std::string &createName, const std::string &createSeed,
-                                    float cursorX, float cursorY) {
-    init2D();
-    verts_.clear();
-
-    const float w = static_cast<float>(width);
-    const float h = static_cast<float>(height);
-    const float cx = w * 0.5f;
-
-    // Layered sky/ground background.
-    drawRect(0.0f, 0.0f, w, h, 0.08f, 0.13f, 0.20f, 1.0f);
-    drawRect(0.0f, h * 0.40f, w, h * 0.60f, 0.17f, 0.28f, 0.38f, 0.72f);
-    drawRect(0.0f, h * 0.80f, w, h * 0.20f, 0.24f, 0.19f, 0.13f, 0.78f);
-    for (int i = 0; i < 8; ++i) {
-        const float px = 80.0f + static_cast<float>(i) * (w / 8.5f);
-        const float py = 86.0f + std::sin(static_cast<float>(i) * 1.2f) * 14.0f;
-        drawRect(px, py, 42.0f, 18.0f, 0.90f, 0.93f, 0.97f, 0.15f);
+void HudRenderer::drawTooltipPanel(int width, int height, float uiScale, const std::string &text,
+                                   float rawX, float rawY) {
+    if (text.empty()) {
+        return;
     }
-
-    const std::string title = "VOXELCRAFT";
-    const float titleW = textWidthPx(title);
-    drawText(cx - titleW * 0.5f + 3.0f, 56.0f, title, 18, 14, 10, 200);
-    drawText(cx - titleW * 0.5f, 53.0f, title, 255, 226, 128, 255);
-    const std::string subtitle = "Singleplayer World Select";
-    drawText(cx - textWidthPx(subtitle) * 0.5f, 82.0f, subtitle, 214, 224, 240, 255);
-
-    const float panelW = std::min(760.0f, w - 60.0f);
-    const float panelX = cx - panelW * 0.5f;
-    const float panelY = 118.0f;
-    const float panelH = h - 170.0f;
-    drawRect(panelX, panelY, panelW, panelH, 0.06f, 0.07f, 0.09f, 0.88f);
-    drawRect(panelX + 2.0f, panelY + 2.0f, panelW - 4.0f, panelH - 4.0f, 0.14f, 0.15f, 0.18f,
-             0.90f);
-    drawRect(panelX + 2.0f, panelY + 2.0f, panelW - 4.0f, 34.0f, 0.18f, 0.21f, 0.26f, 0.92f);
-    const std::string panelTitle = "Select World";
-    drawText(panelX + panelW * 0.5f - textWidthPx(panelTitle) * 0.5f, panelY + 14.0f, panelTitle,
-             244, 246, 252, 255);
-
-    const float rowX = panelX + 18.0f;
-    const float rowW = panelW - 36.0f;
-    const float rowY0 = panelY + 48.0f;
-    const float rowH = 30.0f;
-    const float listH = panelH - 130.0f;
-    drawRect(rowX, rowY0 - 2.0f, rowW, listH, 0.09f, 0.10f, 0.12f, 0.78f);
-    const int maxRows = static_cast<int>(std::max(1.0f, (listH - 4.0f) / rowH));
-    const int total = static_cast<int>(worlds.size());
-    int scroll = 0;
-    if (selectedWorld >= maxRows) {
-        scroll = selectedWorld - maxRows + 1;
-    }
-
-    if (worlds.empty()) {
-        const std::string emptyText = "No worlds yet. Click New World to begin.";
-        drawText(rowX + rowW * 0.5f - textWidthPx(emptyText) * 0.5f, rowY0 + 12.0f, emptyText, 222,
-                 226, 236, 255);
-    } else {
-        const int visible = std::min(maxRows, total - scroll);
-        for (int i = 0; i < visible; ++i) {
-            const int idx = scroll + i;
-            const float y = rowY0 + static_cast<float>(i) * rowH;
-            const bool selected = idx == selectedWorld;
-            const bool hover = cursorX >= rowX && cursorX <= (rowX + rowW) && cursorY >= y &&
-                               cursorY <= (y + rowH - 4.0f);
-            if (selected) {
-                drawRect(rowX + 2.0f, y + 1.0f, rowW - 4.0f, rowH - 6.0f, 0.70f, 0.56f, 0.24f,
-                         0.96f);
-                drawRect(rowX + 4.0f, y + 3.0f, rowW - 8.0f, rowH - 10.0f, 0.88f, 0.70f, 0.33f,
-                         0.95f);
-            } else if (hover) {
-                drawRect(rowX + 2.0f, y + 1.0f, rowW - 4.0f, rowH - 6.0f, 0.24f, 0.29f, 0.36f,
-                         0.94f);
-                drawRect(rowX + 3.0f, y + 2.0f, rowW - 6.0f, rowH - 8.0f, 0.32f, 0.38f, 0.46f,
-                         0.94f);
-            } else {
-                drawRect(rowX + 2.0f, y + 1.0f, rowW - 4.0f, rowH - 6.0f, 0.13f, 0.14f, 0.17f,
-                         0.90f);
-            }
-            drawText(rowX + rowW * 0.5f - textWidthPx(worlds[idx]) * 0.5f, y + 9.0f, worlds[idx],
-                     245, 246, 250, 255);
-        }
-    }
-
-    struct Btn {
-        float x;
-        float y;
-        float w;
-        float h;
-        const char *label;
-    };
-    const float btnY = panelY + panelH - 68.0f;
-    const float btnW = (rowW - 12.0f) * 0.25f;
-    const float btnH = 36.0f;
-    const Btn buttons[4] = {
-        {rowX, btnY, btnW, btnH, "Load Selected"},
-        {rowX + (btnW + 4.0f), btnY, btnW, btnH, "New World"},
-        {rowX + 2.0f * (btnW + 4.0f), btnY, btnW, btnH, "Refresh"},
-        {rowX + 3.0f * (btnW + 4.0f), btnY, btnW, btnH, "Quit"},
-    };
-    for (int i = 0; i < 4; ++i) {
-        const Btn &btn = buttons[i];
-        const bool hover = cursorX >= btn.x && cursorX <= (btn.x + btn.w) && cursorY >= btn.y &&
-                           cursorY <= (btn.y + btn.h);
-        const bool active = (i == 1 && createMode);
-        if (active || hover) {
-            drawRect(btn.x, btn.y, btn.w, btn.h, 0.52f, 0.39f, 0.16f, 0.98f);
-            drawRect(btn.x + 2.0f, btn.y + 2.0f, btn.w - 4.0f, btn.h - 4.0f, 0.82f, 0.64f, 0.30f,
-                     0.95f);
-        } else {
-            drawRect(btn.x, btn.y, btn.w, btn.h, 0.11f, 0.11f, 0.13f, 0.95f);
-            drawRect(btn.x + 1.0f, btn.y + 1.0f, btn.w - 2.0f, btn.h - 2.0f, 0.21f, 0.22f, 0.25f,
-                     0.95f);
-        }
-        const std::string label(btn.label);
-        const float labelX = btn.x + btn.w * 0.5f - textWidthPx(label) * 0.5f;
-        drawText(labelX, btn.y + 13.0f, label, 245, 246, 250, 255);
-    }
-
-    if (createMode) {
-        // Modal for world creation.
-        drawRect(0.0f, 0.0f, w, h, 0.02f, 0.03f, 0.04f, 0.52f);
-        const float mw = std::min(560.0f, w - 80.0f);
-        const float mh = 238.0f;
-        const float mx = cx - mw * 0.5f;
-        const float my = h * 0.5f - mh * 0.5f;
-        drawRect(mx, my, mw, mh, 0.08f, 0.09f, 0.11f, 0.98f);
-        drawRect(mx + 2.0f, my + 2.0f, mw - 4.0f, mh - 4.0f, 0.16f, 0.17f, 0.21f, 0.98f);
-        drawRect(mx + 2.0f, my + 2.0f, mw - 4.0f, 34.0f, 0.22f, 0.25f, 0.31f, 0.98f);
-        const std::string createTitle = "Create New World";
-        drawText(mx + mw * 0.5f - textWidthPx(createTitle) * 0.5f, my + 14.0f, createTitle, 246,
-                 248, 252, 255);
-
-        const float fieldX = mx + 16.0f;
-        const float fieldW = mw - 32.0f;
-        const float nameY = my + 58.0f;
-        const float seedY = my + 104.0f;
-        const std::string nameLabel = "Name";
-        const std::string seedLabel = "Seed";
-        drawText(fieldX + fieldW * 0.5f - textWidthPx(nameLabel) * 0.5f, nameY - 12.0f, nameLabel,
-                 214, 220, 234, 255);
-        drawText(fieldX + fieldW * 0.5f - textWidthPx(seedLabel) * 0.5f, seedY - 12.0f, seedLabel,
-                 214, 220, 234, 255);
-
-        const bool nameHover = cursorX >= fieldX && cursorX <= (fieldX + fieldW) &&
-                               cursorY >= nameY && cursorY <= (nameY + 30.0f);
-        const bool seedHover = cursorX >= fieldX && cursorX <= (fieldX + fieldW) &&
-                               cursorY >= seedY && cursorY <= (seedY + 30.0f);
-        drawRect(fieldX, nameY, fieldW, 30.0f, (editSeed ? 0.18f : 0.45f),
-                 (editSeed ? 0.20f : 0.34f), 0.24f, 0.95f);
-        drawRect(fieldX + 1.0f, nameY + 1.0f, fieldW - 2.0f, 28.0f, nameHover ? 0.30f : 0.23f,
-                 nameHover ? 0.34f : 0.26f, 0.39f, 0.95f);
-        drawRect(fieldX, seedY, fieldW, 30.0f, (editSeed ? 0.45f : 0.18f),
-                 (editSeed ? 0.34f : 0.20f), 0.24f, 0.95f);
-        drawRect(fieldX + 1.0f, seedY + 1.0f, fieldW - 2.0f, 28.0f, seedHover ? 0.30f : 0.23f,
-                 seedHover ? 0.34f : 0.26f, 0.39f, 0.95f);
-
-        const std::string nameLine = createName + (!editSeed ? "_" : "");
-        const std::string seedLine = createSeed + (editSeed ? "_" : "");
-        drawText(fieldX + fieldW * 0.5f - textWidthPx(nameLine) * 0.5f, nameY + 10.0f, nameLine,
-                 238, 242, 250, 255);
-        drawText(fieldX + fieldW * 0.5f - textWidthPx(seedLine) * 0.5f, seedY + 10.0f, seedLine,
-                 238, 242, 250, 255);
-
-        const float cby = my + mh - 48.0f;
-        const float cbw = (fieldW - 8.0f) * 0.5f;
-        const Btn createBtn{fieldX, cby, cbw, 34.0f, "Create & Play"};
-        const Btn cancelBtn{fieldX + cbw + 8.0f, cby, cbw, 34.0f, "Cancel"};
-        const Btn modalButtons[2] = {createBtn, cancelBtn};
-        for (int i = 0; i < 2; ++i) {
-            const Btn &btn = modalButtons[i];
-            const bool hover = cursorX >= btn.x && cursorX <= (btn.x + btn.w) && cursorY >= btn.y &&
-                               cursorY <= (btn.y + btn.h);
-            if (i == 0) {
-                drawRect(btn.x, btn.y, btn.w, btn.h, hover ? 0.54f : 0.40f, hover ? 0.41f : 0.30f,
-                         0.15f, 0.98f);
-                drawRect(btn.x + 2.0f, btn.y + 2.0f, btn.w - 4.0f, btn.h - 4.0f,
-                         hover ? 0.83f : 0.68f, hover ? 0.65f : 0.52f, 0.28f, 0.96f);
-            } else {
-                drawRect(btn.x, btn.y, btn.w, btn.h, hover ? 0.26f : 0.15f, hover ? 0.18f : 0.13f,
-                         hover ? 0.18f : 0.14f, 0.98f);
-                drawRect(btn.x + 2.0f, btn.y + 2.0f, btn.w - 4.0f, btn.h - 4.0f,
-                         hover ? 0.36f : 0.24f, hover ? 0.25f : 0.20f, hover ? 0.26f : 0.22f,
-                         0.95f);
-            }
-            const std::string label(btn.label);
-            const float tx = btn.x + btn.w * 0.5f - textWidthPx(label) * 0.5f;
-            drawText(tx, btn.y + 12.0f, label, 245, 246, 250, 255);
-        }
-    }
-
-    const std::string flowText =
-        "Flow: Select world -> Load. New World opens a modal with Create/Cancel.";
-    drawText(panelX + panelW * 0.5f - textWidthPx(flowText) * 0.5f, panelY + panelH - 14.0f,
-             flowText, 198, 206, 222, 255);
-
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glDisable(GL_DEPTH_TEST);
-    glUseProgram(uiShader_);
-    glUniform2f(glGetUniformLocation(uiShader_, "uScreen"), static_cast<float>(width),
-                static_cast<float>(height));
-    glBindVertexArray(uiVao_);
-    glBindBuffer(GL_ARRAY_BUFFER, uiVbo_);
-    glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(verts_.size() * sizeof(UiVertex)),
-                 verts_.data(), GL_DYNAMIC_DRAW);
-    glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(verts_.size()));
-    glEnable(GL_DEPTH_TEST);
+    const float padX = 8.0f * uiScale;
+    const float tipH = 16.0f * uiScale;
+    const float tipW = textWidthPx(text) + padX * 2.0f;
+    const float tipX =
+        std::clamp(rawX, 4.0f * uiScale, static_cast<float>(width) - tipW - 4.0f * uiScale);
+    const float tipY =
+        std::clamp(rawY, 4.0f * uiScale, static_cast<float>(height) - tipH - 4.0f * uiScale);
+    drawRect(tipX, tipY, tipW, tipH, 0.04f, 0.06f, 0.08f, 0.90f);
+    drawRect(tipX + 1.0f, tipY + 1.0f, tipW - 2.0f, tipH - 2.0f, 0.11f, 0.14f, 0.19f, 0.94f);
+    const float tx = tipX + (tipW - textWidthPx(text)) * 0.5f;
+    const float ty = tipY + (tipH - 8.0f) * 0.5f;
+    drawText(tx + 1.0f, ty + 1.0f, text, 14, 16, 20, 220);
+    drawText(tx, ty, text, 228, 234, 246, 255);
 }
 
-void HudRenderer::renderPauseMenu(int width, int height, float cursorX, float cursorY) {
-    init2D();
-    verts_.clear();
-
-    const float w = static_cast<float>(width);
-    const float h = static_cast<float>(height);
-    const float cx = w * 0.5f;
-    const float cy = h * 0.5f;
-
-    drawRect(0.0f, 0.0f, w, h, 0.02f, 0.03f, 0.04f, 0.55f);
-    drawRect(cx - 202.0f, cy - 142.0f, 404.0f, 284.0f, 0.08f, 0.08f, 0.11f, 0.96f);
-    drawRect(cx - 198.0f, cy - 138.0f, 396.0f, 276.0f, 0.16f, 0.17f, 0.21f, 0.96f);
-    drawRect(cx - 198.0f, cy - 138.0f, 396.0f, 38.0f, 0.23f, 0.26f, 0.33f, 0.96f);
-    const std::string pausedTitle = "PAUSED";
-    const std::string pausedSubtitle = "Game is paused. Choose what to do next.";
-    drawText(cx - textWidthPx(pausedTitle) * 0.5f, cy - 122.0f, pausedTitle, 246, 248, 252, 255);
-    drawText(cx - textWidthPx(pausedSubtitle) * 0.5f, cy - 96.0f, pausedSubtitle, 208, 216, 232,
+void HudRenderer::drawInfoPanel(float uiScale, float fps, const std::string &lookedAtText,
+                                const std::string &modeText, const std::string &compassText,
+                                const std::string &biomeText, const std::string &coordText) {
+    const float panelX = 14.0f * uiScale;
+    const float panelY = 14.0f * uiScale;
+    const float panelPadX = 8.0f;
+    const float panelPadY = 8.0f;
+    const float lineStep = 14.0f;
+    const float textH = 8.0f;
+    const std::string fpsText =
+        "FPS: " + std::to_string(static_cast<int>(std::lround(std::max(0.0f, fps))));
+    const float maxLineW = std::max(std::max(textWidthPx(lookedAtText), textWidthPx(modeText)),
+                                    std::max(std::max(textWidthPx(compassText), textWidthPx(biomeText)),
+                                             std::max(textWidthPx(coordText), textWidthPx(fpsText))));
+    const float panelW = maxLineW + panelPadX * 2.0f;
+    const float panelH = panelPadY * 2.0f + textH + lineStep * 5.0f;
+    drawRect(panelX, panelY, panelW, panelH, 0.03f, 0.04f, 0.05f, 0.58f);
+    drawText(panelX + panelPadX, panelY + panelPadY + lineStep * 0.0f, lookedAtText, 235, 239, 247,
              255);
+    drawText(panelX + panelPadX, panelY + panelPadY + lineStep * 1.0f, modeText, 216, 222, 236, 255);
+    drawText(panelX + panelPadX, panelY + panelPadY + lineStep * 2.0f, compassText, 216, 222, 236,
+             255);
+    drawText(panelX + panelPadX, panelY + panelPadY + lineStep * 3.0f, biomeText, 216, 222, 236,
+             255);
+    drawText(panelX + panelPadX, panelY + panelPadY + lineStep * 4.0f, coordText, 216, 222, 236,
+             255);
+    drawText(panelX + panelPadX, panelY + panelPadY + lineStep * 5.0f, fpsText, 216, 222, 236, 255);
+}
 
-    struct Btn {
-        float x;
-        float y;
-        float w;
-        float h;
-        const char *label;
-    };
-    const Btn buttons[4] = {
-        {cx - 140.0f, cy - 70.0f, 280.0f, 36.0f, "Resume"},
-        {cx - 140.0f, cy - 24.0f, 280.0f, 36.0f, "Save World"},
-        {cx - 140.0f, cy + 22.0f, 280.0f, 36.0f, "Save & Title"},
-        {cx - 140.0f, cy + 68.0f, 280.0f, 36.0f, "Save & Quit"},
-    };
-    for (int i = 0; i < 4; ++i) {
-        const Btn &btn = buttons[i];
-        const bool hover = cursorX >= btn.x && cursorX <= (btn.x + btn.w) && cursorY >= btn.y &&
-                           cursorY <= (btn.y + btn.h);
-        if (i == 3) {
-            drawRect(btn.x, btn.y, btn.w, btn.h, hover ? 0.45f : 0.30f, hover ? 0.16f : 0.12f,
-                     hover ? 0.12f : 0.10f, 0.98f);
-            drawRect(btn.x + 2.0f, btn.y + 2.0f, btn.w - 4.0f, btn.h - 4.0f, hover ? 0.68f : 0.48f,
-                     hover ? 0.24f : 0.18f, hover ? 0.18f : 0.14f, 0.95f);
-        } else if (i == 2) {
-            drawRect(btn.x, btn.y, btn.w, btn.h, hover ? 0.21f : 0.15f, hover ? 0.33f : 0.24f,
-                     hover ? 0.52f : 0.40f, 0.98f);
-            drawRect(btn.x + 2.0f, btn.y + 2.0f, btn.w - 4.0f, btn.h - 4.0f, hover ? 0.28f : 0.22f,
-                     hover ? 0.46f : 0.36f, hover ? 0.72f : 0.58f, 0.95f);
-        } else if (hover) {
-            drawRect(btn.x, btn.y, btn.w, btn.h, 0.52f, 0.39f, 0.16f, 0.98f);
-            drawRect(btn.x + 2.0f, btn.y + 2.0f, btn.w - 4.0f, btn.h - 4.0f, 0.80f, 0.62f, 0.30f,
-                     0.95f);
-        } else {
-            drawRect(btn.x, btn.y, btn.w, btn.h, 0.11f, 0.11f, 0.13f, 0.95f);
-            drawRect(btn.x + 1.0f, btn.y + 1.0f, btn.w - 2.0f, btn.h - 2.0f, 0.20f, 0.21f, 0.24f,
-                     0.95f);
-        }
-        const std::string label(btn.label);
-        const float lx = btn.x + btn.w * 0.5f - textWidthPx(label) * 0.5f;
-        drawText(lx, btn.y + 13.0f, label, 245, 246, 250, 255);
+void HudRenderer::flushIconPass(int width, int height, const TextureAtlas &atlas,
+                                const std::vector<IconClipBatch> &iconClipBatches) {
+    glUseProgram(iconShader_);
+    glUniform2f(glGetUniformLocation(iconShader_, "uScreen"), static_cast<float>(width),
+                static_cast<float>(height));
+    glUniform1i(glGetUniformLocation(iconShader_, "uAtlas"), 0);
+    atlas.bind(0);
+    glBindVertexArray(iconVao_);
+    glBindBuffer(GL_ARRAY_BUFFER, iconVbo_);
+    glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(iconVerts_.size() * sizeof(IconVertex)),
+                 iconVerts_.data(), GL_DYNAMIC_DRAW);
+    if (iconClipBatches.empty()) {
+        glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(iconVerts_.size()));
+        return;
     }
 
-    const std::string pauseHint = "Esc closes this menu";
-    drawText(cx - textWidthPx(pauseHint) * 0.5f, cy + 120.0f, pauseHint, 210, 216, 230, 255);
+    int viewport[4] = {0, 0, width, height};
+    glGetIntegerv(GL_VIEWPORT, viewport);
+    const float sx = (width > 0) ? (static_cast<float>(viewport[2]) / static_cast<float>(width)) : 1.0f;
+    const float sy =
+        (height > 0) ? (static_cast<float>(viewport[3]) / static_cast<float>(height)) : 1.0f;
+    std::size_t cursor = 0;
+    for (const IconClipBatch &batch : iconClipBatches) {
+        if (batch.start > cursor) {
+            glDrawArrays(GL_TRIANGLES, static_cast<GLint>(cursor),
+                         static_cast<GLsizei>(batch.start - cursor));
+        }
+        if (batch.count > 0) {
+            const int scX = viewport[0] + std::max(0, static_cast<int>(std::floor(batch.x * sx)));
+            const int scY = viewport[1] + std::max(0, static_cast<int>(std::floor(
+                                                      (static_cast<float>(height) - (batch.y + batch.h)) *
+                                                      sy)));
+            const int scW = std::max(0, static_cast<int>(std::ceil(batch.w * sx)));
+            const int scH = std::max(0, static_cast<int>(std::ceil(batch.h * sy)));
+            glEnable(GL_SCISSOR_TEST);
+            glScissor(scX, scY, scW, scH);
+            glDrawArrays(GL_TRIANGLES, static_cast<GLint>(batch.start),
+                         static_cast<GLsizei>(batch.count));
+            glDisable(GL_SCISSOR_TEST);
+        }
+        cursor = std::max(cursor, batch.start + batch.count);
+    }
+    if (cursor < iconVerts_.size()) {
+        glDrawArrays(GL_TRIANGLES, static_cast<GLint>(cursor),
+                     static_cast<GLsizei>(iconVerts_.size() - cursor));
+    }
+}
 
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glDisable(GL_DEPTH_TEST);
+void HudRenderer::drawLabelOverlay(int width, int height, float uiScale,
+                                   const std::vector<app::menus::RecipeNameLabel> &recipeNameLabels,
+                                   const std::vector<app::menus::SlotLabel> &slotLabels,
+                                   const app::menus::TooltipState &tooltip, bool suppressTooltip) {
+    verts_.clear();
+    for (const app::menus::RecipeNameLabel &label : recipeNameLabels) {
+        drawRect(label.x, label.y, label.w, label.h, 0.04f, 0.06f, 0.08f, 0.86f);
+        drawRect(label.x + 1.0f, label.y + 1.0f, label.w - 2.0f, label.h - 2.0f, 0.11f, 0.14f, 0.19f,
+                 0.92f);
+        const float textX = label.x + (label.w - textWidthPx(label.text)) * 0.5f;
+        const float textY = label.y + (label.h - 8.0f) * 0.5f;
+        drawText(textX + 1.0f, textY + 1.0f, label.text, 14, 16, 20, 220);
+        drawText(textX, textY, label.text, 228, 234, 246, 255);
+    }
+    for (const app::menus::SlotLabel &label : slotLabels) {
+        drawText(label.x + 1.0f, label.y + 1.0f, label.text, 20, 20, 24, 220);
+        drawText(label.x, label.y, label.text, 246, 247, 250, 255);
+    }
+    if (!tooltip.text.empty() && !suppressTooltip) {
+        drawTooltipPanel(width, height, uiScale, tooltip.text, tooltip.x, tooltip.y);
+    }
     glUseProgram(uiShader_);
     glUniform2f(glGetUniformLocation(uiShader_, "uScreen"), static_cast<float>(width),
                 static_cast<float>(height));
@@ -591,639 +409,6 @@ void HudRenderer::renderPauseMenu(int width, int height, float cursorX, float cu
     glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(verts_.size() * sizeof(UiVertex)),
                  verts_.data(), GL_DYNAMIC_DRAW);
     glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(verts_.size()));
-    glEnable(GL_DEPTH_TEST);
-}
-
-void HudRenderer::renderMapOverlay(int width, int height, const game::MapSystem &map,
-                                   int mapCenterWX, int mapCenterWZ, int playerWX, int playerWZ,
-                                   float zoom, float cursorX, float cursorY,
-                                   int selectedWaypoint, const std::string &waypointName,
-                                   std::uint8_t waypointR, std::uint8_t waypointG,
-                                   std::uint8_t waypointB, int waypointIcon,
-                                   bool waypointVisible, float playerHeadingRad,
-                                   bool waypointNameFocused, bool waypointEditorOpen,
-                                   const voxel::BlockRegistry &registry, const TextureAtlas &atlas) {
-    init2D();
-    verts_.clear();
-
-    const float w = static_cast<float>(width);
-    const float h = static_cast<float>(height);
-    const float panelW = std::max(320.0f, std::min(w - 80.0f, w * 0.86f));
-    const float panelH = std::max(260.0f, std::min(h - 60.0f, h * 0.82f));
-    const float panelX = (w - panelW) * 0.5f;
-    const float panelY = (h - panelH) * 0.5f;
-    const float innerPad = 14.0f;
-    const float gridX = panelX + innerPad;
-    const float gridY = panelY + innerPad + 18.0f;
-    const float gridW = panelW - innerPad * 2.0f;
-    const float gridH = panelH - innerPad * 2.0f - 24.0f;
-    const float cell = std::clamp(4.0f * zoom, 2.0f, 14.0f);
-    const int drawCols = std::max(1, static_cast<int>(std::ceil(gridW / cell)));
-    const int drawRows = std::max(1, static_cast<int>(std::ceil(gridH / cell)));
-    const float centerIx = (static_cast<float>(drawCols) - 1.0f) * 0.5f;
-    const float centerIz = (static_cast<float>(drawRows) - 1.0f) * 0.5f;
-
-    drawRect(0.0f, 0.0f, w, h, 0.03f, 0.04f, 0.05f, 0.62f);
-    drawRect(panelX, panelY, panelW, panelH, 0.05f, 0.07f, 0.10f, 0.92f);
-    drawRect(panelX + 2.0f, panelY + 2.0f, panelW - 4.0f, panelH - 4.0f, 0.10f, 0.12f, 0.16f,
-             0.92f);
-    drawRect(gridX, gridY, gridW, gridH, 0.08f, 0.10f, 0.12f, 0.94f);
-    auto drawWaypointShape = [&](float cx, float cy, float size, int icon, float r, float g,
-                                 float b, float a) {
-        const float half = size * 0.5f;
-        switch (icon % 5) {
-        case 0: { // circle
-            const int iy0 = static_cast<int>(std::floor(-half));
-            const int iy1 = static_cast<int>(std::ceil(half));
-            for (int iy = iy0; iy <= iy1; ++iy) {
-                const float y = static_cast<float>(iy);
-                const float xr = std::sqrt(std::max(0.0f, half * half - y * y));
-                drawRect(cx - xr, cy + y, xr * 2.0f, 1.0f, r, g, b, a);
-            }
-        } break;
-        case 1: // square
-            drawRect(cx - half, cy - half, size, size, r, g, b, a);
-            break;
-        case 2: { // triangle
-            const float h = size;
-            const float topY = cy - h * 0.5f;
-            for (int row = 0; row < static_cast<int>(std::ceil(h)); ++row) {
-                const float t = static_cast<float>(row) / std::max(1.0f, h - 1.0f);
-                const float wrow = (0.18f + t * 0.82f) * size;
-                drawRect(cx - wrow * 0.5f, topY + static_cast<float>(row), wrow, 1.0f, r, g, b,
-                         a);
-            }
-        } break;
-        case 3: { // diamond
-            const int iy0 = static_cast<int>(std::floor(-half));
-            const int iy1 = static_cast<int>(std::ceil(half));
-            for (int iy = iy0; iy <= iy1; ++iy) {
-                const float y = std::abs(static_cast<float>(iy));
-                const float xr = std::max(0.0f, half - y);
-                drawRect(cx - xr, cy + static_cast<float>(iy), xr * 2.0f, 1.0f, r, g, b, a);
-            }
-        } break;
-        default: { // plus
-            const float t = std::max(1.0f, size * 0.28f);
-            drawRect(cx - t * 0.5f, cy - half, t, size, r, g, b, a);
-            drawRect(cx - half, cy - t * 0.5f, size, t, r, g, b, a);
-        } break;
-        }
-    };
-    auto drawWaypointIcon = [&](float cx, float cy, float size, int icon, float r, float g,
-                                float b, float a, bool selected) {
-        const float drawSize = selected ? (size + 4.0f) : size;
-        // Soft drop shadow instead of hard outline.
-        drawWaypointShape(cx + 0.9f, cy + 1.1f, drawSize + 1.0f, icon, 0.0f, 0.0f, 0.0f, 0.22f);
-        drawWaypointShape(cx + 0.6f, cy + 0.8f, drawSize + 0.4f, icon, 0.0f, 0.0f, 0.0f, 0.34f);
-        // Soft fringe to reduce jagged edges.
-        drawWaypointShape(cx, cy, drawSize + 0.9f, icon, r, g, b, 0.40f);
-        drawWaypointShape(cx, cy, drawSize, icon, r, g, b, a);
-    };
-
-    for (int iz = 0; iz < drawRows; ++iz) {
-        for (int ix = 0; ix < drawCols; ++ix) {
-            const int dx = static_cast<int>(std::floor(static_cast<float>(ix) - centerIx));
-            const int dz = static_cast<int>(std::floor(static_cast<float>(iz) - centerIz));
-            voxel::BlockId id = voxel::AIR;
-            if (!map.sample(mapCenterWX + dx, mapCenterWZ + dz, id)) {
-                continue;
-            }
-            const glm::vec3 c = mapColorForBlock(id, registry, atlas);
-            const float px = gridX + static_cast<float>(ix) * cell;
-            const float py = gridY + static_cast<float>(iz) * cell;
-            const float pw = std::min(cell, (gridX + gridW) - px);
-            const float ph = std::min(cell, (gridY + gridH) - py);
-            if (pw <= 0.0f || ph <= 0.0f) {
-                continue;
-            }
-            drawRect(px, py, pw, ph, c.r, c.g, c.b, 0.96f);
-        }
-    }
-
-    int hoveredWaypoint = -1;
-    float hoveredWaypointPx = 9999.0f;
-    for (std::size_t i = 0; i < map.waypoints().size(); ++i) {
-        const auto &wp = map.waypoints()[i];
-        const float px = gridX + (static_cast<float>(wp.x - mapCenterWX) + centerIx) * cell;
-        const float py = gridY + (static_cast<float>(wp.z - mapCenterWZ) + centerIz) * cell;
-        if (px < gridX - 10.0f || py < gridY - 10.0f || px > gridX + gridW + 10.0f ||
-            py > gridY + gridH + 10.0f) {
-            continue;
-        }
-        const float rr = static_cast<float>(wp.r) / 255.0f;
-        const float rg = static_cast<float>(wp.g) / 255.0f;
-        const float rb = static_cast<float>(wp.b) / 255.0f;
-        const bool selected =
-            (selectedWaypoint >= 0 && static_cast<std::size_t>(selectedWaypoint) == i);
-        drawWaypointIcon(px + 0.5f, py + 0.5f, 9.0f, static_cast<int>(wp.icon), rr, rg, rb, 0.98f,
-                         selected);
-        const float dx = cursorX - (px + 0.5f);
-        const float dy = cursorY - (py + 0.5f);
-        const float d = std::sqrt(dx * dx + dy * dy);
-        if (d < 9.0f && d < hoveredWaypointPx) {
-            hoveredWaypointPx = d;
-            hoveredWaypoint = static_cast<int>(i);
-        }
-    }
-
-    const float pCenterX = gridX + centerIx * cell +
-                           static_cast<float>(playerWX - mapCenterWX) * cell;
-    const float pCenterY = gridY + centerIz * cell +
-                           static_cast<float>(playerWZ - mapCenterWZ) * cell;
-    auto drawFilledTri = [&](glm::vec2 a, glm::vec2 b, glm::vec2 c, float rr, float rg, float rb,
-                             float ra) {
-        const float minX = std::floor(std::min({a.x, b.x, c.x}));
-        const float maxX = std::ceil(std::max({a.x, b.x, c.x}));
-        const float minY = std::floor(std::min({a.y, b.y, c.y}));
-        const float maxY = std::ceil(std::max({a.y, b.y, c.y}));
-        const auto edge = [](glm::vec2 p0, glm::vec2 p1, glm::vec2 p) {
-            return (p.x - p0.x) * (p1.y - p0.y) - (p.y - p0.y) * (p1.x - p0.x);
-        };
-        for (int y = static_cast<int>(minY); y <= static_cast<int>(maxY); ++y) {
-            for (int x = static_cast<int>(minX); x <= static_cast<int>(maxX); ++x) {
-                const glm::vec2 p(static_cast<float>(x) + 0.5f, static_cast<float>(y) + 0.5f);
-                const float e0 = edge(a, b, p);
-                const float e1 = edge(b, c, p);
-                const float e2 = edge(c, a, p);
-                if ((e0 >= 0.0f && e1 >= 0.0f && e2 >= 0.0f) ||
-                    (e0 <= 0.0f && e1 <= 0.0f && e2 <= 0.0f)) {
-                    drawRect(static_cast<float>(x), static_cast<float>(y), 1.0f, 1.0f, rr, rg, rb,
-                             ra);
-                }
-            }
-        }
-    };
-    const float pDrawX = std::clamp(pCenterX, gridX + 7.0f, gridX + gridW - 7.0f);
-    const float pDrawY = std::clamp(pCenterY, gridY + 7.0f, gridY + gridH - 7.0f);
-    const float iconAngle = playerHeadingRad;
-    const glm::vec2 fwd(std::sin(iconAngle), -std::cos(iconAngle));
-    const glm::vec2 right(-fwd.y, fwd.x);
-    const glm::vec2 center(pDrawX + 0.5f, pDrawY + 0.5f);
-    const glm::vec2 tip = center + fwd * 7.6f;
-    const glm::vec2 baseL = center - fwd * 3.8f - right * 4.8f;
-    const glm::vec2 baseR = center - fwd * 3.8f + right * 4.8f;
-    drawFilledTri(tip + glm::vec2(1.0f, 1.2f), baseL + glm::vec2(1.0f, 1.2f),
-                  baseR + glm::vec2(1.0f, 1.2f), 0.0f, 0.0f, 0.0f, 0.34f);
-    drawFilledTri(tip, baseL, baseR, 0.98f, 0.30f, 0.22f, 0.98f);
-    drawRect(center.x - 1.3f, center.y - 1.3f, 2.6f, 2.6f, 1.0f, 0.92f, 0.84f, 0.96f);
-    const float playerHoverDx = cursorX - pDrawX;
-    const float playerHoverDy = cursorY - pDrawY;
-    const bool hoverPlayer = std::sqrt(playerHoverDx * playerHoverDx + playerHoverDy * playerHoverDy) <
-                             9.0f;
-
-    drawText(panelX + 10.0f, panelY + 10.0f, "World Map", 240, 244, 252, 255);
-    const std::string zoomText =
-        "Zoom: " + std::to_string(static_cast<int>(std::round(zoom * 100.0f))) + "%";
-    drawText(panelX + 96.0f, panelY + 10.0f, zoomText, 208, 216, 232, 255);
-    drawText(panelX + panelW - 196.0f, panelY + 10.0f, "M: Close  +/-: Zoom", 192, 200, 214, 255);
-
-    if (waypointEditorOpen) {
-        const float editorW = 236.0f;
-        const float editorH = 96.0f;
-        const float editorX = panelX + (panelW - editorW) * 0.5f;
-        const float editorY = panelY + (panelH - editorH) * 0.5f;
-        drawRect(editorX, editorY, editorW, editorH, 0.04f, 0.06f, 0.08f, 0.95f);
-        drawRect(editorX + 1.0f, editorY + 1.0f, editorW - 2.0f, editorH - 2.0f, 0.10f, 0.13f, 0.18f,
-                 0.98f);
-        drawText(editorX + 8.0f, editorY + 8.0f, "Waypoint", 226, 232, 246, 255);
-        drawRect(editorX + editorW - 22.0f, editorY + 6.0f, 16.0f, 16.0f, 0.16f, 0.18f, 0.24f, 0.95f);
-        drawText(editorX + editorW - 17.0f, editorY + 10.0f, "X", 240, 128, 128, 255);
-
-        const float nameX = editorX + 8.0f;
-        const float nameY = editorY + 32.0f;
-        const float nameW = editorW - 16.0f;
-        const float nameH = 20.0f;
-        drawRect(nameX, nameY, nameW, nameH, waypointNameFocused ? 0.24f : 0.12f,
-                 waypointNameFocused ? 0.38f : 0.18f, waypointNameFocused ? 0.62f : 0.27f, 0.98f);
-        drawRect(nameX + 1.0f, nameY + 1.0f, nameW - 2.0f, nameH - 2.0f, 0.08f, 0.10f, 0.14f,
-                 0.98f);
-        const std::string shownName = waypointName.empty() ? std::string("(name)") : waypointName;
-        drawText(nameX + 6.0f, nameY + 6.0f, shownName, waypointName.empty() ? 154 : 232,
-                 waypointName.empty() ? 164 : 236, waypointName.empty() ? 182 : 245, 255);
-
-        const float swY = editorY + 58.0f;
-        const float swS = 16.0f;
-        const float swGap = 6.0f;
-        const glm::vec3 palette[5] = {
-            {1.00f, 0.38f, 0.38f}, {0.36f, 0.82f, 1.00f}, {0.40f, 0.92f, 0.42f},
-            {0.96f, 0.90f, 0.34f}, {0.92f, 0.52f, 0.96f},
-        };
-        for (int i = 0; i < 5; ++i) {
-            const float sx = editorX + 8.0f + static_cast<float>(i) * (swS + swGap);
-            const bool selectedColor =
-                (std::abs(static_cast<int>(waypointR) - static_cast<int>(palette[i].r * 255.0f)) <=
-                     8 &&
-                 std::abs(static_cast<int>(waypointG) - static_cast<int>(palette[i].g * 255.0f)) <=
-                     8 &&
-                 std::abs(static_cast<int>(waypointB) - static_cast<int>(palette[i].b * 255.0f)) <=
-                     8);
-            if (selectedColor) {
-                drawRect(sx - 1.0f, swY - 1.0f, swS + 2.0f, swS + 2.0f, 0.36f, 0.56f, 0.88f, 0.95f);
-                drawRect(sx, swY, swS, swS, 0.12f, 0.20f, 0.34f, 0.88f);
-            }
-            drawRect(sx, swY, swS, swS, palette[i].r, palette[i].g, palette[i].b, 0.98f);
-        }
-
-        const float iconX0 = editorX + 118.0f;
-        const float iconY = swY;
-        const float iconW = 18.0f;
-        const float iconGap = 5.0f;
-        const float closeS = 16.0f;
-        const float closeX = editorX + editorW - closeS - 6.0f;
-        const float eyeW = 18.0f;
-        const float eyeH = 18.0f;
-        const float eyeX = closeX - 4.0f - eyeW;
-        const float eyeY = editorY + 5.0f;
-        const float delW = 54.0f;
-        const float delH = 18.0f;
-        const float delX = eyeX - 4.0f - delW;
-        const float delY = editorY + 5.0f;
-        drawRect(delX, delY, delW, delH, 0.36f, 0.10f, 0.10f, 0.95f);
-        drawRect(delX + 1.0f, delY + 1.0f, delW - 2.0f, delH - 2.0f, 0.58f, 0.14f, 0.14f, 0.95f);
-        const std::string delText = "Delete";
-        drawText(delX + (delW - textWidthPx(delText)) * 0.5f, delY + (delH - 8.0f) * 0.5f + 1.0f,
-                 delText, 246, 230, 230, 255);
-        for (int i = 0; i < 5; ++i) {
-            const float bx = iconX0 + static_cast<float>(i) * (iconW + iconGap);
-            const bool active = (std::clamp(waypointIcon, 0, 4) == i);
-            if (active) {
-                drawRect(bx - 1.0f, iconY - 1.0f, iconW + 2.0f, iconW + 2.0f, 0.36f, 0.56f, 0.88f,
-                         0.95f);
-                drawRect(bx, iconY, iconW, iconW, 0.12f, 0.20f, 0.34f, 0.88f);
-            }
-            drawWaypointShape(bx + iconW * 0.5f, iconY + iconW * 0.5f, iconW - 5.0f, i, 0.92f,
-                              0.95f, 0.99f, 1.0f);
-        }
-        drawRect(eyeX, eyeY, eyeW, eyeH, 0.10f, 0.12f, 0.16f, 0.94f);
-        drawRect(eyeX + 1.0f, eyeY + 1.0f, eyeW - 2.0f, eyeH - 2.0f,
-                 waypointVisible ? 0.22f : 0.14f, waypointVisible ? 0.34f : 0.20f,
-                 waypointVisible ? 0.56f : 0.26f, 0.95f);
-        const float cx = eyeX + eyeW * 0.5f;
-        const float cy = eyeY + eyeH * 0.5f;
-        // Eye outline
-        drawRect(cx - 4.5f, cy - 1.0f, 9.0f, 2.0f, 0.90f, 0.94f, 0.99f, 0.96f);
-        drawRect(cx - 3.5f, cy - 2.0f, 7.0f, 1.0f, 0.90f, 0.94f, 0.99f, 0.96f);
-        drawRect(cx - 3.5f, cy + 1.0f, 7.0f, 1.0f, 0.90f, 0.94f, 0.99f, 0.96f);
-        if (waypointVisible) {
-            drawRect(cx - 1.5f, cy - 1.5f, 3.0f, 3.0f, 0.24f, 0.56f, 0.92f, 0.98f);
-        } else {
-            for (int i = -4; i <= 4; ++i) {
-                drawRect(cx + static_cast<float>(i) * 0.85f - 0.55f,
-                         cy + static_cast<float>(i) * 0.85f - 0.55f, 1.1f, 1.1f, 0.92f, 0.34f,
-                         0.32f, 0.98f);
-            }
-        }
-    }
-
-    if (!waypointEditorOpen) {
-        if (hoveredWaypoint >= 0 && hoveredWaypoint < static_cast<int>(map.waypoints().size())) {
-            const auto &wp = map.waypoints()[hoveredWaypoint];
-            const std::string tip = wp.name.empty() ? std::string("Waypoint") : wp.name;
-            const float rr = static_cast<float>(wp.r) / 255.0f;
-            const float rg = static_cast<float>(wp.g) / 255.0f;
-            const float rb = static_cast<float>(wp.b) / 255.0f;
-            const float padX = 7.0f;
-            const float tipH = 16.0f;
-            const float tipW = textWidthPx(tip) + padX * 2.0f;
-            const float tipX = std::clamp(cursorX + 12.0f, 4.0f, w - tipW - 4.0f);
-            const float tipY = std::clamp(cursorY - 8.0f, 4.0f, h - tipH - 4.0f);
-            drawRect(tipX, tipY, tipW, tipH, rr * 0.45f, rg * 0.45f, rb * 0.45f, 0.94f);
-            drawRect(tipX + 1.0f, tipY + 1.0f, tipW - 2.0f, tipH - 2.0f, rr * 0.78f, rg * 0.78f,
-                     rb * 0.78f, 0.96f);
-            drawText(tipX + (tipW - textWidthPx(tip)) * 0.5f, tipY + 4.0f, tip, 245, 248, 252,
-                     255);
-        } else if (hoverPlayer) {
-            const std::string tip = "Player";
-            const float padX = 7.0f;
-            const float tipH = 16.0f;
-            const float tipW = textWidthPx(tip) + padX * 2.0f;
-            const float tipX = std::clamp(cursorX + 12.0f, 4.0f, w - tipW - 4.0f);
-            const float tipY = std::clamp(cursorY - 8.0f, 4.0f, h - tipH - 4.0f);
-            drawRect(tipX, tipY, tipW, tipH, 0.10f, 0.18f, 0.34f, 0.94f);
-            drawRect(tipX + 1.0f, tipY + 1.0f, tipW - 2.0f, tipH - 2.0f, 0.16f, 0.28f, 0.50f,
-                     0.96f);
-            drawText(tipX + (tipW - textWidthPx(tip)) * 0.5f, tipY + 4.0f, tip, 245, 248, 252,
-                     255);
-        } else if (cursorX >= gridX && cursorX <= (gridX + gridW) && cursorY >= gridY &&
-                   cursorY <= (gridY + gridH)) {
-            const int gx = static_cast<int>(std::floor((cursorX - gridX) / cell));
-            const int gz = static_cast<int>(std::floor((cursorY - gridY) / cell));
-            const int dx = static_cast<int>(std::floor(static_cast<float>(gx) - centerIx));
-            const int dz = static_cast<int>(std::floor(static_cast<float>(gz) - centerIz));
-            voxel::BlockId hoverId = voxel::AIR;
-            if (map.sample(mapCenterWX + dx, mapCenterWZ + dz, hoverId)) {
-                const std::string tip = game::blockName(hoverId);
-                const float padX = 7.0f;
-                const float tipH = 16.0f;
-                const float tipW = textWidthPx(tip) + padX * 2.0f;
-                const float tipX = std::clamp(cursorX + 12.0f, 4.0f, w - tipW - 4.0f);
-                const float tipY = std::clamp(cursorY - 8.0f, 4.0f, h - tipH - 4.0f);
-                drawRect(tipX, tipY, tipW, tipH, 0.04f, 0.06f, 0.08f, 0.92f);
-                drawRect(tipX + 1.0f, tipY + 1.0f, tipW - 2.0f, tipH - 2.0f, 0.11f, 0.14f, 0.19f,
-                         0.94f);
-                drawText(tipX + (tipW - textWidthPx(tip)) * 0.5f, tipY + 4.0f, tip, 228, 234, 246,
-                         255);
-            }
-        }
-    }
-
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glDisable(GL_DEPTH_TEST);
-    glUseProgram(uiShader_);
-    glUniform2f(glGetUniformLocation(uiShader_, "uScreen"), w, h);
-    glBindVertexArray(uiVao_);
-    glBindBuffer(GL_ARRAY_BUFFER, uiVbo_);
-    glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(verts_.size() * sizeof(UiVertex)),
-                 verts_.data(), GL_DYNAMIC_DRAW);
-    glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(verts_.size()));
-    glEnable(GL_DEPTH_TEST);
-}
-
-void HudRenderer::renderMiniMap(int width, int height, const game::MapSystem &map, int playerWX,
-                                int playerWZ, float zoom, bool northLocked, bool showCompass,
-                                bool showWaypoints,
-                                float headingRad,
-                                const voxel::BlockRegistry &registry, const TextureAtlas &atlas) {
-    init2D();
-    verts_.clear();
-
-    const float w = static_cast<float>(width);
-    const float panelW = 190.0f;
-    const float panelH = 190.0f;
-    const float margin = 14.0f;
-    const float panelX = w - panelW - margin;
-    const float panelY = margin;
-    const float innerPad = 10.0f;
-    const float gridX = panelX + innerPad;
-    const float gridY = panelY + innerPad + 14.0f;
-    const float gridW = panelW - innerPad * 2.0f;
-    const float gridH = panelH - innerPad * 2.0f - 36.0f;
-    const float cell = std::clamp(2.2f * zoom, 1.2f, 6.0f);
-    const int drawCols = std::max(1, static_cast<int>(std::ceil(gridW / cell)));
-    const int drawRows = std::max(1, static_cast<int>(std::ceil(gridH / cell)));
-    const float centerIx = (static_cast<float>(drawCols) - 1.0f) * 0.5f;
-    const float centerIz = (static_cast<float>(drawRows) - 1.0f) * 0.5f;
-    auto drawWaypointShape = [&](float cx, float cy, float size, int icon, float r, float g,
-                                 float b, float a) {
-        const float half = size * 0.5f;
-        switch (icon % 5) {
-        case 0: { // circle
-            const int iy0 = static_cast<int>(std::floor(-half));
-            const int iy1 = static_cast<int>(std::ceil(half));
-            for (int iy = iy0; iy <= iy1; ++iy) {
-                const float y = static_cast<float>(iy);
-                const float xr = std::sqrt(std::max(0.0f, half * half - y * y));
-                drawRect(cx - xr, cy + y, xr * 2.0f, 1.0f, r, g, b, a);
-            }
-        } break;
-        case 1:
-            drawRect(cx - half, cy - half, size, size, r, g, b, a);
-            break;
-        case 2: { // triangle
-            const float h = size;
-            const float topY = cy - h * 0.5f;
-            for (int row = 0; row < static_cast<int>(std::ceil(h)); ++row) {
-                const float t = static_cast<float>(row) / std::max(1.0f, h - 1.0f);
-                const float wrow = (0.18f + t * 0.82f) * size;
-                drawRect(cx - wrow * 0.5f, topY + static_cast<float>(row), wrow, 1.0f, r, g, b,
-                         a);
-            }
-        } break;
-        case 3: { // diamond
-            const int iy0 = static_cast<int>(std::floor(-half));
-            const int iy1 = static_cast<int>(std::ceil(half));
-            for (int iy = iy0; iy <= iy1; ++iy) {
-                const float y = std::abs(static_cast<float>(iy));
-                const float xr = std::max(0.0f, half - y);
-                drawRect(cx - xr, cy + static_cast<float>(iy), xr * 2.0f, 1.0f, r, g, b, a);
-            }
-        } break;
-        default: { // plus
-            const float t = std::max(1.0f, size * 0.28f);
-            drawRect(cx - t * 0.5f, cy - half, t, size, r, g, b, a);
-            drawRect(cx - half, cy - t * 0.5f, size, t, r, g, b, a);
-        } break;
-        }
-    };
-
-    drawRect(panelX, panelY, panelW, panelH, 0.05f, 0.07f, 0.10f, 0.86f);
-    drawRect(panelX + 2.0f, panelY + 2.0f, panelW - 4.0f, panelH - 4.0f, 0.10f, 0.12f, 0.16f,
-             0.86f);
-    drawRect(gridX, gridY, gridW, gridH, 0.08f, 0.10f, 0.12f, 0.92f);
-    drawText(panelX + 10.0f, panelY + 8.0f, "Mini Map", 228, 234, 246, 255);
-
-    for (int iz = 0; iz < drawRows; ++iz) {
-        for (int ix = 0; ix < drawCols; ++ix) {
-            const int dx = static_cast<int>(std::floor(static_cast<float>(ix) - centerIx));
-            const int dz = static_cast<int>(std::floor(static_cast<float>(iz) - centerIz));
-            int sdx = dx;
-            int sdz = dz;
-            if (!northLocked) {
-                const float c = std::cos(headingRad);
-                const float s = std::sin(headingRad);
-                const float rx = static_cast<float>(dx) * c - static_cast<float>(dz) * s;
-                const float rz = static_cast<float>(dx) * s + static_cast<float>(dz) * c;
-                sdx = static_cast<int>(std::round(rx));
-                sdz = static_cast<int>(std::round(rz));
-            }
-            voxel::BlockId id = voxel::AIR;
-            if (!map.sample(playerWX + sdx, playerWZ + sdz, id)) {
-                continue;
-            }
-            const glm::vec3 c = mapColorForBlock(id, registry, atlas);
-            const float px = gridX + static_cast<float>(ix) * cell;
-            const float py = gridY + static_cast<float>(iz) * cell;
-            const float pw = std::min(cell, (gridX + gridW) - px);
-            const float ph = std::min(cell, (gridY + gridH) - py);
-            if (pw <= 0.0f || ph <= 0.0f) {
-                continue;
-            }
-            drawRect(px, py, pw, ph, c.r, c.g, c.b, 0.96f);
-        }
-    }
-
-    const float pCenterX = gridX + centerIx * cell;
-    const float pCenterY = gridY + centerIz * cell;
-    auto drawFilledTri = [&](glm::vec2 a, glm::vec2 b, glm::vec2 c, float rr, float rg, float rb,
-                             float ra) {
-        const float minX = std::floor(std::min({a.x, b.x, c.x}));
-        const float maxX = std::ceil(std::max({a.x, b.x, c.x}));
-        const float minY = std::floor(std::min({a.y, b.y, c.y}));
-        const float maxY = std::ceil(std::max({a.y, b.y, c.y}));
-        const auto edge = [](glm::vec2 p0, glm::vec2 p1, glm::vec2 p) {
-            return (p.x - p0.x) * (p1.y - p0.y) - (p.y - p0.y) * (p1.x - p0.x);
-        };
-        for (int y = static_cast<int>(minY); y <= static_cast<int>(maxY); ++y) {
-            for (int x = static_cast<int>(minX); x <= static_cast<int>(maxX); ++x) {
-                const glm::vec2 p(static_cast<float>(x) + 0.5f, static_cast<float>(y) + 0.5f);
-                const float e0 = edge(a, b, p);
-                const float e1 = edge(b, c, p);
-                const float e2 = edge(c, a, p);
-                if ((e0 >= 0.0f && e1 >= 0.0f && e2 >= 0.0f) ||
-                    (e0 <= 0.0f && e1 <= 0.0f && e2 <= 0.0f)) {
-                    drawRect(static_cast<float>(x), static_cast<float>(y), 1.0f, 1.0f, rr, rg, rb,
-                             ra);
-                }
-            }
-        }
-    };
-    const float iconAngle = northLocked ? headingRad : 0.0f;
-    const glm::vec2 fwd(std::sin(iconAngle), -std::cos(iconAngle));
-    const glm::vec2 right(-fwd.y, fwd.x);
-    const glm::vec2 center(pCenterX + 0.5f, pCenterY + 0.5f);
-    const glm::vec2 tip = center + fwd * 6.8f;
-    const glm::vec2 baseL = center - fwd * 3.6f - right * 4.4f;
-    const glm::vec2 baseR = center - fwd * 3.6f + right * 4.4f;
-    drawFilledTri(tip + glm::vec2(0.9f, 1.1f), baseL + glm::vec2(0.9f, 1.1f),
-                  baseR + glm::vec2(0.9f, 1.1f), 0.0f, 0.0f, 0.0f, 0.36f);
-    drawFilledTri(tip, baseL, baseR, 0.98f, 0.30f, 0.22f, 0.98f);
-    drawRect(center.x - 1.2f, center.y - 1.2f, 2.4f, 2.4f, 1.0f, 0.92f, 0.84f, 0.96f);
-
-    // Render waypoints on minimap; clamp to map edge if out of view.
-    if (showWaypoints) {
-        for (const auto &wp : map.waypoints()) {
-            if (!wp.visible) {
-                continue;
-            }
-            float dx = static_cast<float>(wp.x - playerWX);
-            float dz = static_cast<float>(wp.z - playerWZ);
-            if (!northLocked) {
-                const float c = std::cos(headingRad);
-                const float s = std::sin(headingRad);
-                const float sx = dx * c + dz * s;
-                const float sz = -dx * s + dz * c;
-                dx = sx;
-                dz = sz;
-            }
-            float px = pCenterX + dx * cell;
-            float py = pCenterY + dz * cell;
-            const float margin = 5.0f;
-            const float minX = gridX + margin;
-            const float maxX = gridX + gridW - margin;
-            const float minY = gridY + margin;
-            const float maxY = gridY + gridH - margin;
-            const bool clipped = (px < minX || px > maxX || py < minY || py > maxY);
-            px = std::clamp(px, minX, maxX);
-            py = std::clamp(py, minY, maxY);
-            const float rr = static_cast<float>(wp.r) / 255.0f;
-            const float rg = static_cast<float>(wp.g) / 255.0f;
-            const float rb = static_cast<float>(wp.b) / 255.0f;
-            drawWaypointShape(px + 0.6f, py + 0.8f, 7.0f, static_cast<int>(wp.icon), 0.0f, 0.0f,
-                              0.0f, clipped ? 0.30f : 0.40f);
-            drawWaypointShape(px, py, clipped ? 5.5f : 6.5f, static_cast<int>(wp.icon), rr, rg, rb,
-                              clipped ? 0.82f : 0.96f);
-        }
-    }
-
-    if (showCompass) {
-        const float compassR = std::min(gridW, gridH) * 0.44f;
-        const struct Dir {
-            const char *label;
-            float angle;
-        } dirs[4] = {{"N", 0.0f}, {"E", 1.5707964f}, {"S", 3.1415927f}, {"W", 4.7123890f}};
-        for (const auto &d : dirs) {
-            const float a = northLocked ? d.angle : (d.angle - headingRad);
-            const float cx = pCenterX + std::sin(a) * compassR;
-            const float cy = pCenterY - std::cos(a) * compassR;
-            const float lw = textWidthPx(d.label) + 3.0f;
-            const float lh = 10.0f;
-            const float lx = cx - lw * 0.5f;
-            const float ly = cy - lh * 0.5f;
-            drawRect(lx, ly, lw, lh, 0.02f, 0.03f, 0.04f, 0.84f);
-            if (d.label[0] == 'N') {
-                drawText(lx + (lw - textWidthPx(d.label)) * 0.5f + 0.5f, ly + 1.5f, d.label, 246,
-                         118, 98, 252);
-            } else {
-                drawText(lx + (lw - textWidthPx(d.label)) * 0.5f + 0.5f, ly + 1.5f, d.label, 228,
-                         236, 248, 250);
-            }
-        }
-    }
-
-    // Mini-map controls inside panel, below map.
-    const float btnH = 16.0f;
-    const float btnY = panelY + panelH - btnH - 7.0f;
-    const float compassW = 22.0f;
-    const float followW = 22.0f;
-    const float waypointW = 22.0f;
-    const float minusW = 24.0f;
-    const float plusW = 24.0f;
-    const float gap = 4.0f;
-    const float totalW = compassW + followW + waypointW + minusW + plusW + gap * 4.0f;
-    const float btnX0 = panelX + panelW - totalW - 8.0f;
-    const float disabledMul = 0.45f;
-    drawRect(btnX0, btnY, compassW, btnH, 0.09f, 0.11f, 0.14f, 0.90f);
-    drawRect(btnX0 + 1.0f, btnY + 1.0f, compassW - 2.0f, btnH - 2.0f, 0.16f, 0.18f, 0.23f, 0.90f);
-    const float ccx = btnX0 + compassW * 0.5f;
-    const float ccy = btnY + btnH * 0.5f;
-    // Compass icon: ring + cardinal ticks + red north needle.
-    const float cm = showCompass ? 1.0f : disabledMul;
-    drawRect(ccx - 5.0f, ccy - 5.0f, 10.0f, 10.0f, 0.88f * cm, 0.92f * cm, 0.98f * cm, 0.94f);
-    drawRect(ccx - 4.0f, ccy - 4.0f, 8.0f, 8.0f, 0.07f * cm, 0.10f * cm, 0.14f * cm, 0.95f);
-    drawRect(ccx - 0.5f, ccy - 4.0f, 1.0f, 1.6f, 0.92f * cm, 0.95f * cm, 0.99f * cm, 0.95f);
-    drawRect(ccx - 0.5f, ccy + 2.4f, 1.0f, 1.6f, 0.92f * cm, 0.95f * cm, 0.99f * cm, 0.95f);
-    drawRect(ccx - 4.0f, ccy - 0.5f, 1.6f, 1.0f, 0.92f * cm, 0.95f * cm, 0.99f * cm, 0.95f);
-    drawRect(ccx + 2.4f, ccy - 0.5f, 1.6f, 1.0f, 0.92f * cm, 0.95f * cm, 0.99f * cm, 0.95f);
-    drawRect(ccx - 0.8f, ccy - 3.4f, 1.6f, 2.4f, 0.95f * cm, 0.36f * cm, 0.34f * cm, 0.98f);
-    drawRect(ccx - 0.4f, ccy - 2.0f, 0.8f, 4.0f, 0.88f * cm, 0.90f * cm, 0.95f * cm, 0.95f);
-    drawRect(ccx - 0.7f, ccy - 0.7f, 1.4f, 1.4f, 0.95f * cm, 0.95f * cm, 0.99f * cm, 0.98f);
-
-    const float followX = btnX0 + compassW + gap;
-    drawRect(followX, btnY, followW, btnH, 0.09f, 0.11f, 0.14f, 0.90f);
-    drawRect(followX + 1.0f, btnY + 1.0f, followW - 2.0f, btnH - 2.0f, 0.16f, 0.18f, 0.23f,
-             0.90f);
-    const float lcx = followX + followW * 0.5f;
-    const float lcy = btnY + btnH * 0.5f;
-    // Lock icon with locked/unlocked shackle state (North lock toggle).
-    if (northLocked) {
-        drawRect(lcx - 3.0f, lcy - 4.0f, 6.0f, 1.8f, 0.88f, 0.92f, 0.99f, 0.98f);
-        drawRect(lcx - 2.0f, lcy - 2.5f, 1.2f, 1.4f, 0.88f, 0.92f, 0.99f, 0.98f);
-        drawRect(lcx + 0.8f, lcy - 2.5f, 1.2f, 1.4f, 0.88f, 0.92f, 0.99f, 0.98f);
-    } else {
-        drawRect(lcx - 3.0f, lcy - 4.0f, 5.0f, 1.8f, 0.88f, 0.92f, 0.99f, 0.98f);
-        drawRect(lcx - 2.0f, lcy - 2.5f, 1.2f, 1.4f, 0.88f, 0.92f, 0.99f, 0.98f);
-    }
-    drawRect(lcx - 4.0f, lcy - 1.0f, 8.0f, 6.0f, northLocked ? 0.38f : 0.28f,
-             northLocked ? 0.68f : 0.44f, northLocked ? 0.94f : 0.62f, 0.96f);
-    drawRect(lcx - 0.7f, lcy + 1.0f, 1.4f, 2.5f, 0.92f, 0.95f, 0.99f, 0.96f);
-
-    const float waypointX = followX + followW + gap;
-    drawRect(waypointX, btnY, waypointW, btnH, 0.09f, 0.11f, 0.14f, 0.90f);
-    drawRect(waypointX + 1.0f, btnY + 1.0f, waypointW - 2.0f, btnH - 2.0f, 0.16f, 0.18f, 0.23f,
-             0.90f);
-    const float wpx = waypointX + waypointW * 0.5f;
-    const float wpy = btnY + btnH * 0.5f;
-    const float wm = showWaypoints ? 1.0f : disabledMul;
-    // Flag icon
-    drawRect(wpx - 3.6f, wpy - 4.4f, 1.2f, 8.8f, 0.92f * wm, 0.95f * wm, 0.99f * wm, 0.96f);
-    drawRect(wpx - 2.4f, wpy - 4.0f, 5.4f, 3.4f, 0.94f * wm, 0.36f * wm, 0.34f * wm, 0.96f);
-    drawRect(wpx - 2.4f, wpy - 0.8f, 3.9f, 1.0f, 0.94f * wm, 0.36f * wm, 0.34f * wm, 0.96f);
-
-    const float minusX = waypointX + waypointW + gap;
-    drawRect(minusX, btnY, minusW, btnH, 0.12f, 0.15f, 0.20f, 0.94f);
-    drawRect(minusX + 1.0f, btnY + 1.0f, minusW - 2.0f, btnH - 2.0f, 0.20f, 0.24f, 0.32f, 0.92f);
-    drawText(minusX + (minusW - textWidthPx("-")) * 0.5f, btnY + 4.0f, "-", 240, 244, 252, 255);
-    const float plusX = minusX + minusW + gap;
-    drawRect(plusX, btnY, plusW, btnH, 0.12f, 0.15f, 0.20f, 0.94f);
-    drawRect(plusX + 1.0f, btnY + 1.0f, plusW - 2.0f, btnH - 2.0f, 0.20f, 0.24f, 0.32f, 0.92f);
-    drawText(plusX + (plusW - textWidthPx("+")) * 0.5f, btnY + 4.0f, "+", 240, 244, 252, 255);
-    const std::string zoomText = std::to_string(static_cast<int>(std::round(zoom * 100.0f))) + "%";
-    drawText(panelX + 10.0f, btnY + 5.0f, zoomText, 208, 216, 232, 255);
-
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glDisable(GL_DEPTH_TEST);
-    glUseProgram(uiShader_);
-    glUniform2f(glGetUniformLocation(uiShader_, "uScreen"), static_cast<float>(width),
-                static_cast<float>(height));
-    glBindVertexArray(uiVao_);
-    glBindBuffer(GL_ARRAY_BUFFER, uiVbo_);
-    glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(verts_.size() * sizeof(UiVertex)),
-                 verts_.data(), GL_DYNAMIC_DRAW);
-    glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(verts_.size()));
-    glEnable(GL_DEPTH_TEST);
 }
 
 void HudRenderer::render2D(int width, int height, int selectedIndex,
@@ -1254,20 +439,13 @@ void HudRenderer::render2D(int width, int height, int selectedIndex,
                            const std::string &carryingName, const std::string &selectedName,
                            const std::string &lookedAtText, const std::string &modeText,
                            float health01, float sprintStamina01, float fps,
-                           const std::string &compassText, const std::string &coordText,
+                           const std::string &compassText, const std::string &biomeText,
+                           const std::string &coordText,
                            const voxel::BlockRegistry &registry, const TextureAtlas &atlas) {
     init2D();
     initIcons();
     verts_.clear();
     iconVerts_.clear();
-    struct IconClipBatch {
-        std::size_t start = 0;
-        std::size_t count = 0;
-        float x = 0.0f;
-        float y = 0.0f;
-        float w = 0.0f;
-        float h = 0.0f;
-    };
     std::vector<IconClipBatch> iconClipBatches;
     auto beginIconClipBatch = [&](float x, float y, float w, float h) {
         iconClipBatches.push_back({iconVerts_.size(), 0, x, y, w, h});
@@ -1278,24 +456,9 @@ void HudRenderer::render2D(int width, int height, int selectedIndex,
             iconClipBatches[batchIndex].count = iconVerts_.size() - iconClipBatches[batchIndex].start;
         }
     };
-    std::string recipeHoverTipText;
-    float recipeHoverTipX = 0.0f;
-    float recipeHoverTipY = 0.0f;
-    struct RecipeNameLabel {
-        float x = 0.0f;
-        float y = 0.0f;
-        float w = 0.0f;
-        float h = 0.0f;
-        std::string text;
-    };
-    std::vector<RecipeNameLabel> recipeNameLabels;
-    bool dragIconActive = false;
-    voxel::BlockId dragIconId = voxel::AIR;
-    int dragIconCount = 0;
-    float dragIconX = 0.0f;
-    float dragIconY = 0.0f;
-    float dragIconSize = 0.0f;
-    std::string dragIconName;
+    app::menus::TooltipState tooltip;
+    std::vector<app::menus::RecipeNameLabel> recipeNameLabels;
+    app::menus::DragIconState dragIcon;
     auto appendItemIcon = [&](float x0, float y0, float x1, float y1, const glm::vec4 &uv,
                               float light) {
         iconVerts_.push_back({x0, y0, uv.x, uv.y, light});
@@ -1334,7 +497,7 @@ void HudRenderer::render2D(int width, int height, int selectedIndex,
         appendSkewQuad(t0, t1, t2, t3, uvTop, 1.00f);  // top
     };
     auto isFlatItemId = [](voxel::BlockId id) {
-        return id == voxel::TALL_GRASS || id == voxel::FLOWER || id == voxel::STICK ||
+        return voxel::isPlant(id) || id == voxel::STICK ||
                id == voxel::IRON_INGOT || id == voxel::COPPER_INGOT ||
                id == voxel::GOLD_INGOT ||
                voxel::isTorch(id);
@@ -1379,34 +542,17 @@ void HudRenderer::render2D(int width, int height, int selectedIndex,
         if (id == voxel::AIR || count <= 0) {
             return;
         }
-        recipeHoverTipText = game::blockName(id);
-        recipeHoverTipX = cursorX + 12.0f * uiScale;
-        recipeHoverTipY = cursorY - 8.0f * uiScale;
-    };
-    auto drawTooltipPanel = [&](const std::string &text, float rawX, float rawY) {
-        if (text.empty()) {
-            return;
-        }
-        const float padX = 8.0f * uiScale;
-        const float tipH = 16.0f * uiScale;
-        const float tipW = textWidthPx(text) + padX * 2.0f;
-        const float tipX =
-            std::clamp(rawX, 4.0f * uiScale, static_cast<float>(width) - tipW - 4.0f * uiScale);
-        const float tipY =
-            std::clamp(rawY, 4.0f * uiScale, static_cast<float>(height) - tipH - 4.0f * uiScale);
-        drawRect(tipX, tipY, tipW, tipH, 0.04f, 0.06f, 0.08f, 0.90f);
-        drawRect(tipX + 1.0f, tipY + 1.0f, tipW - 2.0f, tipH - 2.0f, 0.11f, 0.14f, 0.19f, 0.94f);
-        const float tx = tipX + (tipW - textWidthPx(text)) * 0.5f;
-        const float ty = tipY + (tipH - 8.0f) * 0.5f;
-        drawText(tx + 1.0f, ty + 1.0f, text, 14, 16, 20, 220);
-        drawText(tx, ty, text, 228, 234, 246, 255);
+        tooltip.text = game::blockName(id);
+        tooltip.x = cursorX + 12.0f * uiScale;
+        tooltip.y = cursorY - 8.0f * uiScale;
     };
     const float kArmGap = 3.0f * uiScale;
     const float kArmLen = 6.0f * uiScale;
     const float kArmThick = 2.0f * uiScale;
-
-    if (!showInventory) {
-        // Outline/shadow pass.
+    auto renderCrosshair = [&]() {
+        if (showInventory) {
+            return;
+        }
         drawRect(cx - 1.5f, cy - (kArmGap + kArmLen + 0.5f), 3.0f, kArmLen + 1.0f, 0.02f, 0.02f,
                  0.02f, 0.72f);
         drawRect(cx - 1.5f, cy + kArmGap - 0.5f, 3.0f, kArmLen + 1.0f, 0.02f, 0.02f, 0.02f, 0.72f);
@@ -1414,8 +560,6 @@ void HudRenderer::render2D(int width, int height, int selectedIndex,
                  0.02f, 0.72f);
         drawRect(cx + kArmGap - 0.5f, cy - 1.5f, kArmLen + 1.0f, 3.0f, 0.02f, 0.02f, 0.02f, 0.72f);
         drawRect(cx - 2.0f, cy - 2.0f, 4.0f, 4.0f, 0.02f, 0.02f, 0.02f, 0.72f);
-
-        // Main white pass.
         drawRect(cx - (kArmThick * 0.5f), cy - (kArmGap + kArmLen), kArmThick, kArmLen, 0.95f,
                  0.95f, 0.95f, 0.96f);
         drawRect(cx - (kArmThick * 0.5f), cy + kArmGap, kArmThick, kArmLen, 0.95f, 0.95f, 0.95f,
@@ -1425,7 +569,8 @@ void HudRenderer::render2D(int width, int height, int selectedIndex,
         drawRect(cx + kArmGap, cy - (kArmThick * 0.5f), kArmLen, kArmThick, 0.95f, 0.95f, 0.95f,
                  0.96f);
         drawRect(cx - 1.0f, cy - 1.0f, 2.0f, 2.0f, 1.0f, 1.0f, 1.0f, 0.98f);
-    }
+    };
+    renderCrosshair();
 
     const float slot = 48.0f * uiScale;
     const float gap = 10.0f * uiScale;
@@ -1442,90 +587,87 @@ void HudRenderer::render2D(int width, int height, int selectedIndex,
     const float staminaBarX = x0 + sideBarW + centerGap;
     const float staminaBarY = y0 - (16.0f * uiScale);
 
-    // Health bar
-    drawRect(healthBarX - 1.0f, staminaBarY - 1.0f, sideBarW + 2.0f, staminaBarH + 2.0f,
-             0.02f, 0.03f, 0.04f, 0.95f);
-    drawRect(healthBarX, staminaBarY, sideBarW, staminaBarH, 0.13f, 0.06f, 0.06f, 0.92f);
-    if (healthFill > 0.0f) {
-        const float fillW = sideBarW * healthFill;
-        drawRect(healthBarX, staminaBarY, fillW, staminaBarH, 0.82f, 0.19f, 0.16f, 0.98f);
-        drawRect(healthBarX, staminaBarY, fillW, staminaBarH * 0.45f, 0.96f, 0.44f, 0.38f, 0.74f);
-    }
-    const int healthPct = static_cast<int>(std::round(healthFill * 100.0f));
-    const std::string healthText = std::to_string(healthPct) + "%";
-    const float healthTextX = healthBarX + sideBarW * 0.5f - textWidthPx(healthText) * 0.5f;
-    const float healthTextY = staminaBarY - 11.0f;
-    drawText(healthTextX + 1.0f, healthTextY + 1.0f, healthText, 12, 8, 8, 220);
-    drawText(healthTextX, healthTextY, healthText, 248, 206, 202, 255);
-
-    // Stamina bar
-    drawRect(staminaBarX - 1.0f, staminaBarY - 1.0f, sideBarW + 2.0f, staminaBarH + 2.0f, 0.02f,
-             0.03f, 0.04f, 0.95f);
-    drawRect(staminaBarX, staminaBarY, sideBarW, staminaBarH, 0.14f, 0.10f, 0.06f, 0.92f);
-    if (staminaFill > 0.0f) {
-        const float fillW = sideBarW * staminaFill;
-        drawRect(staminaBarX, staminaBarY, fillW, staminaBarH, 0.88f, 0.54f, 0.12f, 0.98f);
-        drawRect(staminaBarX, staminaBarY, fillW, staminaBarH * 0.45f, 1.00f, 0.78f, 0.28f, 0.78f);
-    }
-    const int staminaPct = static_cast<int>(std::round(staminaFill * 100.0f));
-    const std::string staminaText = std::to_string(staminaPct) + "%";
-    const float staminaTextX = staminaBarX + sideBarW * 0.5f - textWidthPx(staminaText) * 0.5f;
-    const float staminaTextY = staminaBarY - 11.0f;
-    drawText(staminaTextX + 1.0f, staminaTextY + 1.0f, staminaText, 12, 10, 8, 220);
-    drawText(staminaTextX, staminaTextY, staminaText, 245, 224, 178, 255);
-    drawRect(x0 - 8.0f * uiScale, y0 - 6.0f * uiScale, totalW + 16.0f * uiScale,
-             slot + 12.0f * uiScale, 0.03f, 0.04f, 0.05f, 0.58f);
-
-    struct SlotLabel {
-        float x = 0.0f;
-        float y = 0.0f;
-        std::string text;
-    };
-    std::vector<SlotLabel> slotLabels;
+    std::vector<app::menus::SlotLabel> slotLabels;
     slotLabels.reserve(hotbar.size());
+    auto renderHotbar = [&]() {
+        drawRect(healthBarX - 1.0f, staminaBarY - 1.0f, sideBarW + 2.0f, staminaBarH + 2.0f, 0.02f,
+                 0.03f, 0.04f, 0.95f);
+        drawRect(healthBarX, staminaBarY, sideBarW, staminaBarH, 0.13f, 0.06f, 0.06f, 0.92f);
+        if (healthFill > 0.0f) {
+            const float fillW = sideBarW * healthFill;
+            drawRect(healthBarX, staminaBarY, fillW, staminaBarH, 0.82f, 0.19f, 0.16f, 0.98f);
+            drawRect(healthBarX, staminaBarY, fillW, staminaBarH * 0.45f, 0.96f, 0.44f, 0.38f, 0.74f);
+        }
+        const int healthPct = static_cast<int>(std::round(healthFill * 100.0f));
+        const std::string healthText = std::to_string(healthPct) + "%";
+        const float healthTextX = healthBarX + sideBarW * 0.5f - textWidthPx(healthText) * 0.5f;
+        const float healthTextY = staminaBarY - 11.0f;
+        drawText(healthTextX + 1.0f, healthTextY + 1.0f, healthText, 12, 8, 8, 220);
+        drawText(healthTextX, healthTextY, healthText, 248, 206, 202, 255);
 
-    for (int i = 0; i < static_cast<int>(hotbar.size()); ++i) {
-        const float x = x0 + i * (slot + gap);
-        drawRect(x + 2.0f, y0 + 2.0f, slot, slot, 0.0f, 0.0f, 0.0f, 0.35f);
-        drawRect(x, y0, slot, slot, 0.09f, 0.10f, 0.12f, 0.88f);
-        drawRect(x + 2.0f, y0 + 2.0f, slot - 4.0f, slot - 4.0f, 0.16f, 0.17f, 0.20f, 0.76f);
-        const voxel::BlockDef &def = registry.get(hotbar[i]);
-        const float ix = x + 8.0f * uiScale;
-        const float iy = y0 + 8.0f * uiScale;
-        const float iw = slot - 16.0f * uiScale;
-        const float ih = slot - 16.0f * uiScale;
-        if (isFlatItemId(hotbar[i])) {
-            const glm::vec4 uv = atlas.uvRect(def.sideTile);
-            appendItemIcon(ix, iy, ix + iw, iy + ih, uv, 1.0f);
-        } else {
-            const float cubeInset = 5.0f * uiScale;
-            appendCubeIcon(x + cubeInset, y0 + cubeInset, slot - 2.0f * cubeInset,
-                           slot - 2.0f * cubeInset, def);
+        drawRect(staminaBarX - 1.0f, staminaBarY - 1.0f, sideBarW + 2.0f, staminaBarH + 2.0f, 0.02f,
+                 0.03f, 0.04f, 0.95f);
+        drawRect(staminaBarX, staminaBarY, sideBarW, staminaBarH, 0.14f, 0.10f, 0.06f, 0.92f);
+        if (staminaFill > 0.0f) {
+            const float fillW = sideBarW * staminaFill;
+            drawRect(staminaBarX, staminaBarY, fillW, staminaBarH, 0.88f, 0.54f, 0.12f, 0.98f);
+            drawRect(staminaBarX, staminaBarY, fillW, staminaBarH * 0.45f, 1.00f, 0.78f, 0.28f, 0.78f);
         }
-        if (!showInventory && i == selectedIndex) {
-            drawSelectedOutline(x, y0, slot);
-        }
-        if (showInventory && hoveredSlotIndex == i) {
-            drawHoverOutline(x, y0, slot);
-            setHoverTip(hotbar[i], hotbarCounts[i]);
-        }
-        if (showInventory && hotbarCounts[i] > 0 &&
-            ((hintFurnaceInput && smeltRules.canSmelt(hotbar[i])) ||
-             (hintFurnaceFuel && smeltRules.isFuel(hotbar[i])))) {
-            drawValidHintOutline(x, y0, slot);
-        }
-        const int count = hotbarCounts[i];
-        if (count > 0) {
-            slotLabels.push_back(SlotLabel{x + 6.0f, y0 + slot - 13.0f, std::to_string(count)});
-        }
-        slotLabels.push_back(SlotLabel{x + slot - 11.0f, y0 + 4.0f, std::to_string(i + 1)});
-    }
+        const int staminaPct = static_cast<int>(std::round(staminaFill * 100.0f));
+        const std::string staminaText = std::to_string(staminaPct) + "%";
+        const float staminaTextX = staminaBarX + sideBarW * 0.5f - textWidthPx(staminaText) * 0.5f;
+        const float staminaTextY = staminaBarY - 11.0f;
+        drawText(staminaTextX + 1.0f, staminaTextY + 1.0f, staminaText, 12, 10, 8, 220);
+        drawText(staminaTextX, staminaTextY, staminaText, 245, 224, 178, 255);
+        drawRect(x0 - 8.0f * uiScale, y0 - 6.0f * uiScale, totalW + 16.0f * uiScale,
+                 slot + 12.0f * uiScale, 0.03f, 0.04f, 0.05f, 0.58f);
 
-    drawText(cx - 176.0f * uiScale, y0 + slot + 14.0f * uiScale,
-             "1-9 Select  |  LMB Mine  |  RMB Place  |  E Inventory  |  F Creative  |  F2 HUD",
-             200, 206, 222, 255);
+        for (int i = 0; i < static_cast<int>(hotbar.size()); ++i) {
+            const float x = x0 + i * (slot + gap);
+            drawRect(x + 2.0f, y0 + 2.0f, slot, slot, 0.0f, 0.0f, 0.0f, 0.35f);
+            drawRect(x, y0, slot, slot, 0.09f, 0.10f, 0.12f, 0.88f);
+            drawRect(x + 2.0f, y0 + 2.0f, slot - 4.0f, slot - 4.0f, 0.16f, 0.17f, 0.20f, 0.76f);
+            const voxel::BlockDef &def = registry.get(hotbar[i]);
+            const float ix = x + 8.0f * uiScale;
+            const float iy = y0 + 8.0f * uiScale;
+            const float iw = slot - 16.0f * uiScale;
+            const float ih = slot - 16.0f * uiScale;
+            if (isFlatItemId(hotbar[i])) {
+                const glm::vec4 uv = atlas.uvRect(def.sideTile);
+                appendItemIcon(ix, iy, ix + iw, iy + ih, uv, 1.0f);
+            } else {
+                const float cubeInset = 5.0f * uiScale;
+                appendCubeIcon(x + cubeInset, y0 + cubeInset, slot - 2.0f * cubeInset,
+                               slot - 2.0f * cubeInset, def);
+            }
+            if (!showInventory && i == selectedIndex) {
+                drawSelectedOutline(x, y0, slot);
+            }
+            if (showInventory && hoveredSlotIndex == i) {
+                drawHoverOutline(x, y0, slot);
+                setHoverTip(hotbar[i], hotbarCounts[i]);
+            }
+            if (showInventory && hotbarCounts[i] > 0 &&
+                ((hintFurnaceInput && smeltRules.canSmelt(hotbar[i])) ||
+                 (hintFurnaceFuel && smeltRules.isFuel(hotbar[i])))) {
+                drawValidHintOutline(x, y0, slot);
+            }
+            const int count = hotbarCounts[i];
+            if (count > 0) {
+                slotLabels.push_back(
+                    app::menus::SlotLabel{x + 6.0f, y0 + slot - 13.0f, std::to_string(count)});
+            }
+            slotLabels.push_back(
+                app::menus::SlotLabel{x + slot - 11.0f, y0 + 4.0f, std::to_string(i + 1)});
+        }
 
-    if (showInventory) {
+        drawText(cx - 176.0f * uiScale, y0 + slot + 14.0f * uiScale,
+                 "1-9 Select  |  LMB Mine  |  RMB Place  |  E Inventory  |  F Creative  |  F2 HUD",
+                 200, 206, 222, 255);
+    };
+    renderHotbar();
+
+    auto renderInventoryBody = [&]() {
         const int cols = game::Inventory::kColumns;
         const int rows =
             game::Inventory::kRows - 1; // Top inventory rows, hotbar rendered separately.
@@ -1597,165 +739,37 @@ void HudRenderer::render2D(int width, int height, int selectedIndex,
             drawRect(sx + 2.0f, sy + 2.0f, size - 4.0f, size - 4.0f, 0.16f, 0.17f, 0.20f, 0.76f);
         };
 
+        const app::menus::HudDrawContext panelDrawCtx{
+            [&](float x, float y, float w, float h, float r, float g, float b, float a) {
+                drawRect(x, y, w, h, r, g, b, a);
+            },
+            [&](float x, float y, const std::string &text, unsigned char r, unsigned char g,
+                unsigned char b, unsigned char a) { drawText(x, y, text, r, g, b, a); },
+            drawHoverOutline,
+            drawValidHintOutline,
+            drawSlotFrame,
+            {},
+            {},
+            [&](float x0, float y0, float x1, float y1, voxel::BlockId id, float light) {
+                const glm::vec4 uv = atlas.uvRect(registry.get(id).sideTile);
+                appendItemIcon(x0, y0, x1, y1, uv, light);
+            },
+            appendCubeIcon,
+            {},
+            {},
+            textWidthPx,
+            isFlatItemId,
+        };
+        static app::menus::CraftingMenu craftingMenu;
+        static app::menus::FurnaceMenu furnaceMenu;
         if (usingFurnace) {
-            const float furnaceInX = furnaceInXBase;
-            const float furnaceInY = furnaceInYBase;
-            const float furnaceFuelX = furnaceInX;
-            const float furnaceFuelY = furnaceFuelYBase;
-            const float furnaceOutX = craftOutX;
-            drawText(furnaceInX, furnaceInY - 11.0f * uiScale, "Input", 212, 222, 236, 255);
-            drawText(furnaceFuelX, furnaceFuelY - 11.0f * uiScale, "Fuel", 212, 222, 236, 255);
-            drawText(furnaceOutX, craftOutY - 11.0f * uiScale, "Output", 212, 222, 236, 255);
-            drawSlotFrame(furnaceInX, furnaceInY, craftSlot);
-            if (smeltInput.id != voxel::AIR && smeltInput.count > 0) {
-                const voxel::BlockDef &def = registry.get(smeltInput.id);
-                const float ix = furnaceInX + 8.0f * uiScale;
-                const float iy = furnaceInY + 8.0f * uiScale;
-                const float iw = craftSlot - 16.0f * uiScale;
-                const float ih = craftSlot - 16.0f * uiScale;
-                if (isFlatItemId(smeltInput.id)) {
-                    const glm::vec4 uv = atlas.uvRect(def.sideTile);
-                    appendItemIcon(ix, iy, ix + iw, iy + ih, uv, 1.0f);
-                } else {
-                    const float cubeInset = 5.0f * uiScale;
-                    appendCubeIcon(furnaceInX + cubeInset, furnaceInY + cubeInset,
-                                   craftSlot - 2.0f * cubeInset, craftSlot - 2.0f * cubeInset, def);
-                }
-                slotLabels.push_back(SlotLabel{furnaceInX + 5.0f, furnaceInY + craftSlot - 13.0f,
-                                               std::to_string(smeltInput.count)});
-            }
-            if (hoveredSlotIndex == furnaceInputIndex) {
-                drawHoverOutline(furnaceInX, furnaceInY, craftSlot);
-                setHoverTip(smeltInput.id, smeltInput.count);
-            }
-
-            drawSlotFrame(furnaceFuelX, furnaceFuelY, craftSlot);
-            if (smeltFuel.id != voxel::AIR && smeltFuel.count > 0) {
-                const voxel::BlockDef &def = registry.get(smeltFuel.id);
-                const float ix = furnaceFuelX + 8.0f * uiScale;
-                const float iy = furnaceFuelY + 8.0f * uiScale;
-                const float iw = craftSlot - 16.0f * uiScale;
-                const float ih = craftSlot - 16.0f * uiScale;
-                if (isFlatItemId(smeltFuel.id)) {
-                    const glm::vec4 uv = atlas.uvRect(def.sideTile);
-                    appendItemIcon(ix, iy, ix + iw, iy + ih, uv, 1.0f);
-                } else {
-                    const float cubeInset = 5.0f * uiScale;
-                    appendCubeIcon(furnaceFuelX + cubeInset, furnaceFuelY + cubeInset,
-                                   craftSlot - 2.0f * cubeInset, craftSlot - 2.0f * cubeInset, def);
-                }
-                slotLabels.push_back(SlotLabel{furnaceFuelX + 5.0f, furnaceFuelY + craftSlot - 13.0f,
-                                               std::to_string(smeltFuel.count)});
-            }
-            if (hoveredSlotIndex == furnaceFuelIndex) {
-                drawHoverOutline(furnaceFuelX, furnaceFuelY, craftSlot);
-                setHoverTip(smeltFuel.id, smeltFuel.count);
-            }
-
-            const float inputCenterX = furnaceInX + craftSlot * 0.5f;
-            const float outputCenterX = furnaceOutX + craftSlot * 0.5f;
-            const float flowCenterX = (inputCenterX + outputCenterX) * 0.5f;
-            const float progW = 38.0f * uiScale;
-            const float progX = flowCenterX - progW * 0.5f;
-            const float progY = furnaceInY + craftSlot * 0.44f;
-            const float progH = 8.0f * uiScale;
-            drawText(progX + progW * 0.5f - textWidthPx("Smelt") * 0.5f, progY - 10.0f * uiScale,
-                     "Smelt", 186, 200, 220, 255);
-            drawRect(progX, progY, progW, progH, 0.10f, 0.11f, 0.13f, 0.95f);
-            drawRect(progX + 1.0f, progY + 1.0f,
-                     (progW - 2.0f) * std::clamp(smeltProgress01, 0.0f, 1.0f), progH - 2.0f, 0.95f,
-                     0.62f, 0.22f, 0.95f);
-
-            const float burnX = furnaceMidX;
-            const float burnY = furnaceFuelY + craftSlot * 0.50f;
-            const float burnW = 30.0f * uiScale;
-            const float burnH = 7.0f * uiScale;
-            drawText(burnX + burnW * 0.5f - textWidthPx("Burn") * 0.5f, burnY - 10.0f * uiScale,
-                     "Burn", 186, 200, 220, 255);
-            drawRect(burnX, burnY, burnW, burnH, 0.10f, 0.11f, 0.13f, 0.95f);
-            drawRect(burnX + 1.0f, burnY + 1.0f,
-                     (burnW - 2.0f) * std::clamp(smeltFuel01, 0.0f, 1.0f), burnH - 2.0f, 0.98f,
-                     0.46f, 0.20f, 0.95f);
+            furnaceMenu.renderPanel(width, height, uiScale, hoveredSlotIndex, craftingGridSize,
+                                    smeltInput, smeltFuel, smeltOutput, smeltProgress01,
+                                    smeltFuel01, registry, panelDrawCtx, slotLabels, setHoverTip);
         } else {
-            for (int r = 0; r < craftGrid; ++r) {
-                for (int c = 0; c < craftGrid; ++c) {
-                    const int craftIdx = r * craftGrid + c;
-                    const int uiIdx = game::Inventory::kSlotCount + craftIdx;
-                    const float sx = craftX + c * (craftSlot + craftGap);
-                    const float sy = craftY + r * (craftSlot + craftGap);
-                    drawSlotFrame(sx, sy, craftSlot);
-                    const auto &slotData = craftInput[craftIdx];
-                    if (slotData.id != voxel::AIR && slotData.count > 0) {
-                        const voxel::BlockDef &def = registry.get(slotData.id);
-                        const float ix = sx + 8.0f * uiScale;
-                        const float iy = sy + 8.0f * uiScale;
-                        const float iw = craftSlot - 16.0f * uiScale;
-                        const float ih = craftSlot - 16.0f * uiScale;
-                        if (isFlatItemId(slotData.id)) {
-                            const glm::vec4 uv = atlas.uvRect(def.sideTile);
-                            appendItemIcon(ix, iy, ix + iw, iy + ih, uv, 1.0f);
-                        } else {
-                            const float cubeInset = 5.0f * uiScale;
-                            appendCubeIcon(sx + cubeInset, sy + cubeInset,
-                                           craftSlot - 2.0f * cubeInset,
-                                           craftSlot - 2.0f * cubeInset, def);
-                        }
-                        slotLabels.push_back(SlotLabel{sx + 5.0f, sy + craftSlot - 13.0f,
-                                                       std::to_string(slotData.count)});
-                    }
-                    if (hoveredSlotIndex == uiIdx) {
-                        drawHoverOutline(sx, sy, craftSlot);
-                        setHoverTip(slotData.id, slotData.count);
-                    }
-                }
-            }
-        }
-
-        drawSlotFrame(craftOutX, craftOutY, craftSlot);
-        const int craftOutputIndex = game::Inventory::kSlotCount +
-                                     static_cast<int>(craftInput.size());
-        const int trashIndex = craftOutputIndex + 1;
-        const game::Inventory::Slot &displayOutput = usingFurnace ? smeltOutput : craftOutput;
-        if (displayOutput.id != voxel::AIR && displayOutput.count > 0) {
-            const voxel::BlockDef &def = registry.get(displayOutput.id);
-            const float ix = craftOutX + 8.0f * uiScale;
-            const float iy = craftOutY + 8.0f * uiScale;
-            const float iw = craftSlot - 16.0f * uiScale;
-            const float ih = craftSlot - 16.0f * uiScale;
-            if (isFlatItemId(displayOutput.id)) {
-                const glm::vec4 uv = atlas.uvRect(def.sideTile);
-                appendItemIcon(ix, iy, ix + iw, iy + ih, uv, 1.0f);
-            } else {
-                const float cubeInset = 5.0f * uiScale;
-                appendCubeIcon(craftOutX + cubeInset, craftOutY + cubeInset,
-                               craftSlot - 2.0f * cubeInset, craftSlot - 2.0f * cubeInset, def);
-            }
-            slotLabels.push_back(SlotLabel{craftOutX + 5.0f, craftOutY + craftSlot - 13.0f,
-                                           std::to_string(displayOutput.count)});
-        }
-        if (hoveredSlotIndex == craftOutputIndex) {
-            drawHoverOutline(craftOutX, craftOutY, craftSlot);
-            setHoverTip(displayOutput.id, displayOutput.count);
-        }
-
-        const float trashX = craftX - 10.0f * uiScale;
-        const float invBorderBottomY = invY + invH + 10.0f * uiScale;
-        const float trashY = invBorderBottomY - craftSlot - 2.0f;
-        drawRect(trashX - 2.0f, trashY - 2.0f, craftSlot + 4.0f, craftSlot + 4.0f, 0.60f, 0.22f,
-                 0.22f, 0.78f);
-        drawSlotFrame(trashX, trashY, craftSlot);
-        drawRect(trashX + 8.0f * uiScale, trashY + 10.0f * uiScale, craftSlot - 16.0f * uiScale,
-                 5.0f * uiScale, 0.55f, 0.18f, 0.18f, 0.95f);
-        drawRect(trashX + 14.0f * uiScale, trashY + 15.0f * uiScale, craftSlot - 28.0f * uiScale,
-                 19.0f * uiScale, 0.78f, 0.24f, 0.24f, 0.95f);
-        drawRect(trashX + 18.0f * uiScale, trashY + 18.0f * uiScale, 2.0f * uiScale,
-                 12.0f * uiScale, 0.92f, 0.82f, 0.82f, 0.85f);
-        drawRect(trashX + 23.0f * uiScale, trashY + 18.0f * uiScale, 2.0f * uiScale,
-                 12.0f * uiScale, 0.92f, 0.82f, 0.82f, 0.85f);
-        drawRect(trashX + 28.0f * uiScale, trashY + 18.0f * uiScale, 2.0f * uiScale,
-                 12.0f * uiScale, 0.92f, 0.82f, 0.82f, 0.85f);
-        if (hoveredSlotIndex == trashIndex) {
-            drawHoverOutline(trashX, trashY, craftSlot);
+            craftingMenu.renderPanel(width, height, uiScale, usingCraftingTable, hoveredSlotIndex,
+                                     craftingGridSize, craftInput, craftOutput, registry, panelDrawCtx,
+                                     slotLabels, setHoverTip);
         }
 
         for (int row = 0; row < rows; ++row) {
@@ -1785,7 +799,7 @@ void HudRenderer::render2D(int width, int height, int selectedIndex,
                 const int count = allCounts[slotIndex];
                 if (count > 0) {
                     slotLabels.push_back(
-                        SlotLabel{sx + 5.0f, sy + invSlot - 13.0f, std::to_string(count)});
+                        app::menus::SlotLabel{sx + 5.0f, sy + invSlot - 13.0f, std::to_string(count)});
                 }
                 if (hoveredSlotIndex == slotIndex) {
                     drawHoverOutline(sx, sy, invSlot);
@@ -1803,650 +817,103 @@ void HudRenderer::render2D(int width, int height, int selectedIndex,
             const float dragSize = 34.0f * uiScale;
             const float dx = cursorX + 10.0f * uiScale;
             const float dy = cursorY + 8.0f * uiScale;
-            dragIconActive = true;
-            dragIconId = carryingId;
-            dragIconCount = carryingCount;
-            dragIconX = dx;
-            dragIconY = dy;
-            dragIconSize = dragSize;
-            dragIconName = carryingName;
+            dragIcon.active = true;
+            dragIcon.id = carryingId;
+            dragIcon.count = carryingCount;
+            dragIcon.x = dx;
+            dragIcon.y = dy;
+            dragIcon.size = dragSize;
+            dragIcon.name = carryingName;
         }
 
+        auto drawRectClipped = [&](float x, float y, float w, float h, float cx0, float cy0,
+                                   float cx1, float cy1, float r, float g, float b, float a) {
+            const float x0 = std::max(x, cx0);
+            const float y0 = std::max(y, cy0);
+            const float x1 = std::min(x + w, cx1);
+            const float y1 = std::min(y + h, cy1);
+            if (x1 <= x0 || y1 <= y0) {
+                return;
+            }
+            drawRect(x0, y0, x1 - x0, y1 - y0, r, g, b, a);
+        };
+        auto drawTextClipped = [&](float x, float y, const std::string &text, float cx0, float cy0,
+                                   float cx1, float cy1, unsigned char r, unsigned char g,
+                                   unsigned char b, unsigned char a) {
+            char buffer[99999];
+            unsigned char color[4] = {r, g, b, a};
+            const int quads =
+                stb_easy_font_print(x, y, const_cast<char *>(text.c_str()), color, buffer, sizeof(buffer));
+            struct StbVert {
+                float x;
+                float y;
+                float z;
+                unsigned char c[4];
+            };
+            const StbVert *q = reinterpret_cast<const StbVert *>(buffer);
+            for (int i = 0; i < quads; ++i) {
+                const StbVert &a0 = q[i * 4 + 0];
+                const StbVert &a2 = q[i * 4 + 2];
+                const float x0 = std::max(a0.x, cx0);
+                const float y0 = std::max(a0.y, cy0);
+                const float x1 = std::min(a2.x, cx1);
+                const float y1 = std::min(a2.y, cy1);
+                if (x1 <= x0 || y1 <= y0) {
+                    continue;
+                }
+                const float cr = r / 255.0f;
+                const float cg = g / 255.0f;
+                const float cb = b / 255.0f;
+                const float ca = a / 255.0f;
+                verts_.push_back(UiVertex{x0, y0, cr, cg, cb, ca});
+                verts_.push_back(UiVertex{x1, y0, cr, cg, cb, ca});
+                verts_.push_back(UiVertex{x1, y1, cr, cg, cb, ca});
+                verts_.push_back(UiVertex{x0, y0, cr, cg, cb, ca});
+                verts_.push_back(UiVertex{x1, y1, cr, cg, cb, ca});
+                verts_.push_back(UiVertex{x0, y1, cr, cg, cb, ca});
+            }
+        };
+        static app::menus::CreativeMenu creativeMenu;
+        static app::menus::RecipeMenu recipeMenu;
+        const app::menus::HudDrawContext drawCtx{
+            [&](float x, float y, float w, float h, float r, float g, float b, float a) {
+                drawRect(x, y, w, h, r, g, b, a);
+            },
+            [&](float x, float y, const std::string &text, unsigned char r, unsigned char g,
+                unsigned char b, unsigned char a) { drawText(x, y, text, r, g, b, a); },
+            drawHoverOutline,
+            drawValidHintOutline,
+            drawSlotFrame,
+            drawRectClipped,
+            drawTextClipped,
+            [&](float x0, float y0, float x1, float y1, voxel::BlockId id, float light) {
+                const glm::vec4 uv = atlas.uvRect(registry.get(id).sideTile);
+                appendItemIcon(x0, y0, x1, y1, uv, light);
+            },
+            appendCubeIcon,
+            beginIconClipBatch,
+            endIconClipBatch,
+            textWidthPx,
+            isFlatItemId,
+        };
         if (showCreativeMenu) {
-            auto drawRectClippedCreative = [&](float x, float y, float w, float h, float cx0,
-                                               float cy0, float cx1, float cy1, float r, float g,
-                                               float b, float a) {
-                const float x0 = std::max(x, cx0);
-                const float y0 = std::max(y, cy0);
-                const float x1 = std::min(x + w, cx1);
-                const float y1 = std::min(y + h, cy1);
-                if (x1 <= x0 || y1 <= y0) {
-                    return;
-                }
-                drawRect(x0, y0, x1 - x0, y1 - y0, r, g, b, a);
-            };
-            const float panelHeaderH = 34.0f * uiScale;
-            const float panelBodyH = 220.0f * uiScale;
-            const float panelH = panelHeaderH + panelBodyH;
-            const float panelX = menuInvX;
-            const float panelY = invY - panelH - 44.0f * uiScale;
-            const float panelW = totalPanelW;
-            drawRect(panelX, panelY, panelW, panelH, 0.03f, 0.04f, 0.05f, 0.78f);
-            drawText(panelX + 10.0f * uiScale, panelY + 10.0f * uiScale, "Creative", 244, 246, 252,
-                     255);
-            drawText(panelX + panelW - 36.0f * uiScale, panelY + 9.0f * uiScale, "F: Close", 182,
-                     190, 206, 255);
-
-            const float searchX = panelX + 88.0f * uiScale;
-            const float searchY = panelY + 6.0f * uiScale;
-            const float searchW = panelW - 188.0f * uiScale;
-            const float searchH = 22.0f * uiScale;
-            drawRect(searchX, searchY, searchW, searchH, 0.06f, 0.08f, 0.10f, 0.95f);
-            drawRect(searchX + 1.0f, searchY + 1.0f, searchW - 2.0f, searchH - 2.0f, 0.12f, 0.14f,
-                     0.18f, 0.95f);
-            const bool blinkOn = (static_cast<int>(std::floor(uiTimeSeconds * 2.0f)) % 2) == 0;
-            const std::string searchText =
-                creativeSearch.empty() ? "Search items..." : creativeSearch;
-            drawText(searchX + 6.0f * uiScale, searchY + 7.0f * uiScale,
-                     searchText + (blinkOn ? "_" : ""), creativeSearch.empty() ? 168 : 232,
-                     creativeSearch.empty() ? 176 : 238, creativeSearch.empty() ? 190 : 248, 255);
-
-            const float contentX = panelX + 10.0f * uiScale;
-            const float contentY = panelY + panelHeaderH;
-            const float contentW = panelW - 28.0f * uiScale;
-            const float contentH = panelBodyH - 10.0f * uiScale;
-            const std::size_t creativeIconClipBatch =
-                beginIconClipBatch(contentX, contentY, contentW, contentH);
-            drawRect(contentX, contentY, contentW, contentH, 0.09f, 0.10f, 0.12f, 0.70f);
-
-            const float cell = 40.0f * uiScale;
-            const float cellGap = 8.0f * uiScale;
-            const int columns =
-                std::max(1, std::min(9, static_cast<int>((contentW + cellGap) / (cell + cellGap))));
-            const float usedW =
-                static_cast<float>(columns) * cell + static_cast<float>(columns - 1) * cellGap;
-            const float gridInset = std::max(0.0f, (contentW - usedW) * 0.5f);
-            const float rowStride = cell + cellGap;
-            const int rowsCount =
-                (static_cast<int>(creativeItems.size()) + columns - 1) / columns;
-            const float totalContentH =
-                static_cast<float>(rowsCount) * cell +
-                static_cast<float>(std::max(0, rowsCount - 1)) * cellGap;
-            const float maxScroll = std::max(0.0f, totalContentH - contentH);
-            const float scroll = std::clamp(creativeScroll, 0.0f, maxScroll);
-
-            for (std::size_t i = 0; i < creativeItems.size(); ++i) {
-                const int row = static_cast<int>(i) / columns;
-                const int col = static_cast<int>(i) % columns;
-                const float sx = contentX + gridInset + static_cast<float>(col) * (cell + cellGap);
-                const float sy = contentY + static_cast<float>(row) * rowStride - scroll;
-                if (sy + cell < contentY || sy > (contentY + contentH)) {
-                    continue;
-                }
-
-                drawRectClippedCreative(sx + 2.0f, sy + 2.0f, cell, cell, contentX, contentY,
-                                        contentX + contentW, contentY + contentH, 0.0f, 0.0f, 0.0f,
-                                        0.32f);
-                drawRectClippedCreative(sx, sy, cell, cell, contentX, contentY, contentX + contentW,
-                                        contentY + contentH, 0.09f, 0.10f, 0.12f, 0.88f);
-                drawRectClippedCreative(sx + 2.0f, sy + 2.0f, cell - 4.0f, cell - 4.0f, contentX,
-                                        contentY, contentX + contentW, contentY + contentH, 0.16f,
-                                        0.17f, 0.20f, 0.76f);
-
-                const voxel::BlockId id = creativeItems[i];
-                const voxel::BlockDef &def = registry.get(id);
-                if (isFlatItemId(id)) {
-                    const float ix = sx + 7.0f * uiScale;
-                    const float iy = sy + 7.0f * uiScale;
-                    const float is = cell - 14.0f * uiScale;
-                    const glm::vec4 uv = atlas.uvRect(def.sideTile);
-                    appendItemIcon(ix, iy, ix + is, iy + is, uv, 1.0f);
-                } else {
-                    const float cubeInset = 4.0f * uiScale;
-                    appendCubeIcon(sx + cubeInset, sy + cubeInset, cell - 2.0f * cubeInset,
-                                   cell - 2.0f * cubeInset, def);
-                }
-                if (cursorX >= sx && cursorX <= (sx + cell) && cursorY >= sy && cursorY <= (sy + cell)) {
-                    recipeHoverTipText = game::blockName(id);
-                    recipeHoverTipX = cursorX + 12.0f * uiScale;
-                    recipeHoverTipY = cursorY - 8.0f * uiScale;
-                }
-            }
-
-            const float trackX = panelX + panelW - 12.0f * uiScale;
-            const float trackY = contentY;
-            const float trackH = contentH;
-            drawRect(trackX, trackY, 4.0f * uiScale, trackH, 0.14f, 0.16f, 0.18f, 0.95f);
-            if (maxScroll > 0.0f) {
-                const float thumbH = std::max(22.0f * uiScale, trackH * (contentH / totalContentH));
-                const float thumbTravel = std::max(0.0f, trackH - thumbH);
-                const float t = scroll / maxScroll;
-                const float thumbY = trackY + t * thumbTravel;
-                drawRect(trackX - 2.0f * uiScale, thumbY, 8.0f * uiScale, thumbH, 0.30f, 0.72f, 0.95f,
-                         0.95f);
-            } else {
-                drawRect(trackX - 2.0f * uiScale, trackY, 8.0f * uiScale, trackH, 0.24f, 0.28f, 0.33f,
-                         0.85f);
-            }
-            endIconClipBatch(creativeIconClipBatch);
+            creativeMenu.renderOverlay(width, height, uiScale, craftingGridSize, usingFurnace, cursorX,
+                                       cursorY, creativeScroll, uiTimeSeconds, creativeSearch,
+                                       creativeItems, registry, drawCtx, tooltip);
         }
-
         if (showRecipeMenu) {
-            auto drawRectClipped = [&](float x, float y, float w, float h, float cx0, float cy0,
-                                       float cx1, float cy1, float r, float g, float b, float a) {
-                const float x0 = std::max(x, cx0);
-                const float y0 = std::max(y, cy0);
-                const float x1 = std::min(x + w, cx1);
-                const float y1 = std::min(y + h, cy1);
-                if (x1 <= x0 || y1 <= y0) {
-                    return;
-                }
-                drawRect(x0, y0, x1 - x0, y1 - y0, r, g, b, a);
-            };
-            auto drawTextClipped = [&](float x, float y, const std::string &text, float cx0, float cy0,
-                                       float cx1, float cy1, unsigned char r, unsigned char g,
-                                       unsigned char b, unsigned char a) {
-                char buffer[99999];
-                unsigned char color[4] = {r, g, b, a};
-                const int quads = stb_easy_font_print(x, y, const_cast<char *>(text.c_str()), color,
-                                                      buffer, sizeof(buffer));
-                struct StbVert {
-                    float x;
-                    float y;
-                    float z;
-                    unsigned char c[4];
-                };
-                const StbVert *q = reinterpret_cast<const StbVert *>(buffer);
-                for (int i = 0; i < quads; ++i) {
-                    const StbVert &a0 = q[i * 4 + 0];
-                    const StbVert &a2 = q[i * 4 + 2];
-                    const float x0 = std::max(a0.x, cx0);
-                    const float y0 = std::max(a0.y, cy0);
-                    const float x1 = std::min(a2.x, cx1);
-                    const float y1 = std::min(a2.y, cy1);
-                    if (x1 <= x0 || y1 <= y0) {
-                        continue;
-                    }
-                    const float cr = r / 255.0f;
-                    const float cg = g / 255.0f;
-                    const float cb = b / 255.0f;
-                    const float ca = a / 255.0f;
-                    verts_.push_back(UiVertex{x0, y0, cr, cg, cb, ca});
-                    verts_.push_back(UiVertex{x1, y0, cr, cg, cb, ca});
-                    verts_.push_back(UiVertex{x1, y1, cr, cg, cb, ca});
-                    verts_.push_back(UiVertex{x0, y0, cr, cg, cb, ca});
-                    verts_.push_back(UiVertex{x1, y1, cr, cg, cb, ca});
-                    verts_.push_back(UiVertex{x0, y1, cr, cg, cb, ca});
-                }
-            };
-            if (usingFurnace) {
-                const float recipeHeaderH = 34.0f * uiScale;
-                const float recipeBodyH = 220.0f * uiScale;
-                const float recipeH = recipeHeaderH + recipeBodyH;
-                const float recipeX = menuInvX;
-                const float recipeY = invY - recipeH - 44.0f * uiScale;
-                const float recipeW = totalPanelW;
-                drawRect(recipeX, recipeY, recipeW, recipeH, 0.03f, 0.04f, 0.05f, 0.78f);
-                drawText(recipeX + 10.0f * uiScale, recipeY + 10.0f * uiScale, "Smelting", 244, 246,
-                         252, 255);
-                drawText(recipeX + recipeW - 36.0f * uiScale, recipeY + 9.0f * uiScale, "R: Close",
-                         182, 190, 206, 255);
-
-                const float searchX = recipeX + 88.0f * uiScale;
-                const float searchY = recipeY + 6.0f * uiScale;
-                const float searchW = recipeW - 372.0f * uiScale;
-                const float searchH = 22.0f * uiScale;
-                drawRect(searchX, searchY, searchW, searchH, 0.06f, 0.08f, 0.10f, 0.95f);
-                drawRect(searchX + 1.0f, searchY + 1.0f, searchW - 2.0f, searchH - 2.0f, 0.12f, 0.14f,
-                         0.18f, 0.95f);
-                const std::string searchText =
-                    recipeSearch.empty() ? "Search smelting..." : recipeSearch;
-                const bool blinkOn = (static_cast<int>(std::floor(uiTimeSeconds * 2.0f)) % 2) == 0;
-                const std::string cursorSuffix = blinkOn ? "_" : "";
-                drawText(searchX + 6.0f * uiScale, searchY + 7.0f * uiScale, searchText + cursorSuffix,
-                         recipeSearch.empty() ? 168 : 232, recipeSearch.empty() ? 176 : 238,
-                         recipeSearch.empty() ? 190 : 248, 255);
-                const float craftableFilterX = recipeX + recipeW - 124.0f * uiScale;
-                const float craftableFilterY = recipeY + 10.0f * uiScale;
-                const float craftableFilterS = 14.0f * uiScale;
-                drawRect(craftableFilterX, craftableFilterY, craftableFilterS, craftableFilterS, 0.09f,
-                         0.10f, 0.12f, 0.95f);
-                drawRect(craftableFilterX + 1.0f, craftableFilterY + 1.0f, craftableFilterS - 2.0f,
-                         craftableFilterS - 2.0f, recipeCraftableOnly ? 0.28f : 0.15f,
-                         recipeCraftableOnly ? 0.74f : 0.18f, recipeCraftableOnly ? 0.42f : 0.21f,
-                         0.95f);
-                if (recipeCraftableOnly) {
-                    const std::string checkText = "X";
-                    const float checkX =
-                        craftableFilterX + (craftableFilterS - textWidthPx(checkText)) * 0.5f;
-                    const float checkY = craftableFilterY + (craftableFilterS - 8.0f) * 0.5f;
-                    drawText(checkX, checkY, checkText, 242, 248, 255, 255);
-                }
-                drawText(craftableFilterX + craftableFilterS + 6.0f * uiScale,
-                         craftableFilterY + 4.0f * uiScale, "Smeltable", 198, 214, 236, 255);
-                if (recipeIngredientFilter.has_value()) {
-                    const std::string ingredientTag =
-                        std::string("Ingredient: ") + game::blockName(recipeIngredientFilter.value());
-                    const float tagX = craftableFilterX - 154.0f * uiScale;
-                    const float tagY = craftableFilterY - 1.0f * uiScale;
-                    const float tagW = 146.0f * uiScale;
-                    const float tagH = 16.0f * uiScale;
-                    const float closeS = 12.0f * uiScale;
-                    const float closeX = tagX + tagW - closeS - 2.0f * uiScale;
-                    const float closeY = tagY + 2.0f * uiScale;
-                    drawRect(tagX, tagY, tagW, tagH, 0.10f, 0.22f, 0.16f, 0.92f);
-                    drawRect(tagX + 1.0f, tagY + 1.0f, tagW - 2.0f, tagH - 2.0f, 0.14f, 0.30f, 0.22f,
-                             0.95f);
-                    drawRect(tagX + 1.0f, tagY + 1.0f, tagW - 2.0f, 2.0f, 0.22f, 0.44f, 0.32f, 0.88f);
-                    drawRect(closeX, closeY, closeS, closeS, 0.20f, 0.36f, 0.27f, 0.95f);
-                    drawRect(closeX + 1.0f, closeY + 1.0f, closeS - 2.0f, closeS - 2.0f, 0.16f, 0.26f,
-                             0.20f, 0.95f);
-                    const std::string clearText = "x";
-                    const float clearX = closeX + (closeS - textWidthPx(clearText)) * 0.5f;
-                    const float clearY = closeY + (closeS - 8.0f) * 0.5f;
-                    drawText(clearX, clearY, clearText, 228, 244, 234, 255);
-                    drawTextClipped(tagX + 6.0f * uiScale, tagY + 4.0f * uiScale, ingredientTag, tagX,
-                                    tagY, closeX - 2.0f * uiScale, tagY + tagH, 208, 236, 218, 255);
-                }
-
-                const float contentX = recipeX + 10.0f * uiScale;
-                const float contentY = recipeY + recipeHeaderH;
-                const float contentW = recipeW - 28.0f * uiScale;
-                const float contentH = recipeBodyH - 10.0f * uiScale;
-                const std::size_t recipeIconClipBatch =
-                    beginIconClipBatch(contentX, contentY, contentW, contentH);
-                drawRect(contentX, contentY, contentW, contentH, 0.09f, 0.10f, 0.12f, 0.70f);
-
-                const int columns = 2;
-                const float cellGapX = 10.0f * uiScale;
-                const float cellGapY = 10.0f * uiScale;
-                const float gridInsetRight = 30.0f * uiScale;
-                const float gridInsetLeft = gridInsetRight;
-                const float cellW = (contentW - gridInsetLeft - gridInsetRight - cellGapX) * 0.5f;
-                const float cellH = 74.0f * uiScale;
-                const float rowStride = cellH + cellGapY;
-                const int rowsCount =
-                    (static_cast<int>(smeltingRecipes.size()) + columns - 1) / columns;
-                const float totalContentH = static_cast<float>(rowsCount) * cellH +
-                                            static_cast<float>(std::max(0, rowsCount - 1)) * cellGapY;
-                const float maxScroll = std::max(0.0f, totalContentH - contentH);
-                const float scroll = std::clamp(recipeScroll, 0.0f, maxScroll);
-                std::string hoveredIngredientName;
-
-                for (std::size_t i = 0; i < smeltingRecipes.size(); ++i) {
-                    const auto &recipe = smeltingRecipes[i];
-                    const int row = static_cast<int>(i) / columns;
-                    const int col = static_cast<int>(i) % columns;
-                    const float rx =
-                        contentX + gridInsetLeft + static_cast<float>(col) * (cellW + cellGapX);
-                    const float ry = contentY + static_cast<float>(row) * rowStride - scroll;
-                    if (ry + cellH < contentY || ry > (contentY + contentH)) {
-                        continue;
-                    }
-                    const bool hovered = (cursorX >= rx && cursorX <= (rx + cellW) && cursorY >= ry &&
-                                          cursorY <= (ry + cellH));
-                    const bool craftable = i < recipeCraftable.size() && recipeCraftable[i];
-                    const float baseR = craftable ? 0.12f : 0.10f;
-                    const float baseG = craftable ? 0.20f : 0.12f;
-                    const float baseB = craftable ? 0.13f : 0.15f;
-                    const float glow = hovered ? 0.08f : 0.0f;
-                    drawRectClipped(rx, ry, cellW, cellH, contentX, contentY, contentX + contentW,
-                                    contentY + contentH, baseR + glow, baseG + glow, baseB + glow,
-                                    craftable ? 0.92f : 0.86f);
-                    drawRectClipped(rx + 2.0f * uiScale, ry + 2.0f * uiScale, cellW - 4.0f * uiScale,
-                                    cellH - 4.0f * uiScale, contentX, contentY, contentX + contentW,
-                                    contentY + contentH, craftable ? 0.18f : 0.14f,
-                                    craftable ? 0.22f : 0.16f, craftable ? 0.18f : 0.20f, 0.82f);
-
-                    const float iconS = 36.0f * uiScale;
-                    const float iconY = ry + 8.0f * uiScale;
-                    float iconX = rx + 10.0f * uiScale;
-                    const voxel::BlockDef &inDef = registry.get(recipe.input);
-                    drawRectClipped(iconX, iconY, iconS, iconS, contentX, contentY, contentX + contentW,
-                                    contentY + contentH, 0.08f, 0.10f, 0.12f, 0.95f);
-                    if (isFlatItemId(recipe.input)) {
-                        const glm::vec4 inUv = atlas.uvRect(inDef.sideTile);
-                        appendItemIcon(iconX + 4.0f * uiScale, iconY + 4.0f * uiScale,
-                                       iconX + iconS - 4.0f * uiScale, iconY + iconS - 4.0f * uiScale,
-                                       inUv, 1.0f);
-                    } else {
-                        const float inset = 2.0f * uiScale;
-                        appendCubeIcon(iconX + inset, iconY + inset, iconS - 2.0f * inset,
-                                       iconS - 2.0f * inset, inDef);
-                    }
-                    if (cursorX >= iconX && cursorX <= (iconX + iconS) && cursorY >= iconY &&
-                        cursorY <= (iconY + iconS)) {
-                        hoveredIngredientName = game::blockName(recipe.input);
-                    }
-                    iconX += 46.0f * uiScale;
-                    drawTextClipped(iconX, ry + 21.0f * uiScale, "->", contentX, contentY,
-                                    contentX + contentW, contentY + contentH, 230, 236, 248, 255);
-                    iconX += 18.0f * uiScale;
-                    const voxel::BlockDef &outDef = registry.get(recipe.output);
-                    drawRectClipped(iconX, iconY, iconS, iconS, contentX, contentY, contentX + contentW,
-                                    contentY + contentH, 0.08f, 0.10f, 0.12f, 0.95f);
-                    if (isFlatItemId(recipe.output)) {
-                        const glm::vec4 outUv = atlas.uvRect(outDef.sideTile);
-                        appendItemIcon(iconX + 4.0f * uiScale, iconY + 4.0f * uiScale,
-                                       iconX + iconS - 4.0f * uiScale, iconY + iconS - 4.0f * uiScale,
-                                       outUv, 1.0f);
-                    } else {
-                        const float inset = 2.0f * uiScale;
-                        appendCubeIcon(iconX + inset, iconY + inset, iconS - 2.0f * inset,
-                                       iconS - 2.0f * inset, outDef);
-                    }
-                    if (cursorX >= iconX && cursorX <= (iconX + iconS) && cursorY >= iconY &&
-                        cursorY <= (iconY + iconS)) {
-                        hoveredIngredientName = game::blockName(recipe.output);
-                    }
-                    drawTextClipped(iconX + 2.0f * uiScale, iconY + iconS - 10.0f * uiScale,
-                                    std::to_string(std::max(1, recipe.outputCount)), contentX,
-                                    contentY, contentX + contentW, contentY + contentH, 232, 236, 246,
-                                    255);
-                    const std::string label = game::blockName(recipe.output);
-                    const float labelW = std::clamp(textWidthPx(label) + 14.0f * uiScale,
-                                                    46.0f * uiScale, cellW - 14.0f * uiScale);
-                    const float labelX = rx + (cellW - labelW) * 0.5f;
-                    const float labelY = ry + cellH - 18.0f * uiScale;
-                    const bool labelFullyVisible =
-                        labelY >= contentY && (labelY + 14.0f * uiScale) <= (contentY + contentH);
-                    if (labelFullyVisible) {
-                        recipeNameLabels.push_back({labelX, labelY, labelW, 14.0f * uiScale, label});
-                    }
-                }
-                endIconClipBatch(recipeIconClipBatch);
-
-                const float trackX = recipeX + recipeW - 12.0f * uiScale;
-                const float trackY = contentY;
-                const float trackH = contentH;
-                drawRect(trackX, trackY, 4.0f * uiScale, trackH, 0.14f, 0.16f, 0.18f, 0.95f);
-                if (maxScroll > 0.0f) {
-                    const float thumbH =
-                        std::max(22.0f * uiScale, trackH * (contentH / totalContentH));
-                    const float thumbTravel = std::max(0.0f, trackH - thumbH);
-                    const float t = scroll / maxScroll;
-                    const float thumbY = trackY + t * thumbTravel;
-                    drawRect(trackX - 2.0f * uiScale, thumbY, 8.0f * uiScale, thumbH, 0.30f, 0.72f,
-                             0.95f, 0.95f);
-                } else {
-                    drawRect(trackX - 2.0f * uiScale, trackY, 8.0f * uiScale, trackH, 0.24f, 0.28f,
-                             0.33f, 0.85f);
-                }
-                if (!hoveredIngredientName.empty()) {
-                    recipeHoverTipText = hoveredIngredientName;
-                    recipeHoverTipX = cursorX + 12.0f * uiScale;
-                    recipeHoverTipY = cursorY - 8.0f * uiScale;
-                }
-            } else {
-            const float recipeHeaderH = 34.0f * uiScale;
-            const float recipeBodyH = 220.0f * uiScale;
-            const float recipeH = recipeHeaderH + recipeBodyH;
-            const float recipeX = menuInvX;
-            const float recipeY = invY - recipeH - 44.0f * uiScale;
-            const float recipeW = totalPanelW;
-            drawRect(recipeX, recipeY, recipeW, recipeH, 0.03f, 0.04f, 0.05f, 0.78f);
-            drawText(recipeX + 10.0f * uiScale, recipeY + 10.0f * uiScale, "Recipes", 244, 246, 252,
-                     255);
-            drawText(recipeX + recipeW - 36.0f * uiScale, recipeY + 9.0f * uiScale,
-                     "R: Close", 182, 190, 206, 255);
-
-            const float searchX = recipeX + 88.0f * uiScale;
-            const float searchY = recipeY + 6.0f * uiScale;
-            const float searchW = recipeW - 372.0f * uiScale;
-            const float searchH = 22.0f * uiScale;
-            drawRect(searchX, searchY, searchW, searchH, 0.06f, 0.08f, 0.10f, 0.95f);
-            drawRect(searchX + 1.0f, searchY + 1.0f, searchW - 2.0f, searchH - 2.0f, 0.12f, 0.14f,
-                     0.18f, 0.95f);
-            const std::string searchText =
-                recipeSearch.empty() ? "Search recipes..." : recipeSearch;
-            const bool blinkOn = (static_cast<int>(std::floor(uiTimeSeconds * 2.0f)) % 2) == 0;
-            const std::string cursorSuffix = blinkOn ? "_" : "";
-            drawText(searchX + 6.0f * uiScale, searchY + 7.0f * uiScale, searchText + cursorSuffix,
-                     recipeSearch.empty() ? 168 : 232, recipeSearch.empty() ? 176 : 238,
-                     recipeSearch.empty() ? 190 : 248, 255);
-            const float craftableFilterX = recipeX + recipeW - 124.0f * uiScale;
-            const float craftableFilterY = recipeY + 10.0f * uiScale;
-            const float craftableFilterS = 14.0f * uiScale;
-            drawRect(craftableFilterX, craftableFilterY, craftableFilterS, craftableFilterS, 0.09f,
-                     0.10f, 0.12f, 0.95f);
-            drawRect(craftableFilterX + 1.0f, craftableFilterY + 1.0f, craftableFilterS - 2.0f,
-                     craftableFilterS - 2.0f, recipeCraftableOnly ? 0.28f : 0.15f,
-                     recipeCraftableOnly ? 0.74f : 0.18f, recipeCraftableOnly ? 0.42f : 0.21f,
-                     0.95f);
-            if (recipeCraftableOnly) {
-                const std::string checkText = "X";
-                const float checkX =
-                    craftableFilterX + (craftableFilterS - textWidthPx(checkText)) * 0.5f;
-                const float checkY = craftableFilterY + (craftableFilterS - 8.0f) * 0.5f;
-                drawText(checkX, checkY, checkText, 242, 248, 255, 255);
-            }
-            drawText(craftableFilterX + craftableFilterS + 6.0f * uiScale,
-                     craftableFilterY + 4.0f * uiScale, "Craftable", 198, 214, 236, 255);
-            if (recipeIngredientFilter.has_value()) {
-                const std::string ingredientTag =
-                    std::string("Ingredient: ") + game::blockName(recipeIngredientFilter.value());
-                const float tagX = craftableFilterX - 154.0f * uiScale;
-                const float tagY = craftableFilterY - 1.0f * uiScale;
-                const float tagW = 146.0f * uiScale;
-                const float tagH = 16.0f * uiScale;
-                const float closeS = 12.0f * uiScale;
-                const float closeX = tagX + tagW - closeS - 2.0f * uiScale;
-                const float closeY = tagY + 2.0f * uiScale;
-                drawRect(tagX, tagY, tagW, tagH, 0.10f, 0.22f, 0.16f, 0.92f);
-                drawRect(tagX + 1.0f, tagY + 1.0f, tagW - 2.0f, tagH - 2.0f, 0.14f, 0.30f, 0.22f,
-                         0.95f);
-                drawRect(tagX + 1.0f, tagY + 1.0f, tagW - 2.0f, 2.0f, 0.22f, 0.44f, 0.32f, 0.88f);
-                drawRect(closeX, closeY, closeS, closeS, 0.20f, 0.36f, 0.27f, 0.95f);
-                drawRect(closeX + 1.0f, closeY + 1.0f, closeS - 2.0f, closeS - 2.0f, 0.16f, 0.26f,
-                         0.20f, 0.95f);
-                const std::string clearText = "x";
-                const float clearX = closeX + (closeS - textWidthPx(clearText)) * 0.5f;
-                const float clearY = closeY + (closeS - 8.0f) * 0.5f;
-                drawText(clearX, clearY, clearText, 228, 244, 234, 255);
-                drawTextClipped(tagX + 6.0f * uiScale, tagY + 4.0f * uiScale, ingredientTag, tagX,
-                                tagY, closeX - 2.0f * uiScale, tagY + tagH, 208, 236, 218, 255);
-            }
-
-            const float contentX = recipeX + 10.0f * uiScale;
-            const float contentY = recipeY + recipeHeaderH;
-            const float contentW = recipeW - 28.0f * uiScale;
-            const float contentH = recipeBodyH - 10.0f * uiScale;
-            const std::size_t recipeIconClipBatch =
-                beginIconClipBatch(contentX, contentY, contentW, contentH);
-            const int columns = 2;
-            const float cellGapX = 10.0f * uiScale;
-            const float cellGapY = 10.0f * uiScale;
-            const float gridInsetRight = 30.0f * uiScale;
-            const float gridInsetLeft = gridInsetRight;
-            const float cellW = (contentW - gridInsetLeft - gridInsetRight - cellGapX) * 0.5f;
-            const float cellH = 78.0f * uiScale;
-            const float rowStride = cellH + cellGapY;
-            const int rowsCount =
-                (static_cast<int>(recipes.size()) + columns - 1) / columns;
-            const float totalContentH = static_cast<float>(rowsCount) * cellH +
-                                        static_cast<float>(std::max(0, rowsCount - 1)) * cellGapY;
-            const float maxScroll = std::max(0.0f, totalContentH - contentH);
-            const float scroll = std::clamp(recipeScroll, 0.0f, maxScroll);
-            std::string hoveredIngredientName;
-
-            const std::array<voxel::BlockId, 3> woodCycle = {
-                voxel::WOOD,
-                voxel::SPRUCE_WOOD,
-                voxel::BIRCH_WOOD,
-            };
-            const std::array<voxel::BlockId, 3> plankCycle = {
-                voxel::OAK_PLANKS,
-                voxel::SPRUCE_PLANKS,
-                voxel::BIRCH_PLANKS,
-            };
-            const int cycleIndex =
-                static_cast<int>(std::floor(std::max(0.0f, uiTimeSeconds) * 0.6f)) %
-                static_cast<int>(woodCycle.size());
-
-            drawRect(contentX, contentY, contentW, contentH, 0.09f, 0.10f, 0.12f, 0.70f);
-            for (std::size_t i = 0; i < recipes.size(); ++i) {
-                const auto &recipe = recipes[i];
-                const int row = static_cast<int>(i) / columns;
-                const int col = static_cast<int>(i) % columns;
-                const float rx = contentX + gridInsetLeft + static_cast<float>(col) * (cellW + cellGapX);
-                const float ry = contentY + static_cast<float>(row) * rowStride - scroll;
-                if (ry + cellH < contentY || ry > (contentY + contentH)) {
-                    continue;
-                }
-                const bool hovered = (cursorX >= rx && cursorX <= (rx + cellW) && cursorY >= ry &&
-                                      cursorY <= (ry + cellH));
-                const bool craftable = i < recipeCraftable.size() && recipeCraftable[i];
-                const float baseR = craftable ? 0.12f : 0.10f;
-                const float baseG = craftable ? 0.20f : 0.12f;
-                const float baseB = craftable ? 0.13f : 0.15f;
-                const float glow = hovered ? 0.08f : 0.0f;
-                drawRectClipped(rx, ry, cellW, cellH, contentX, contentY, contentX + contentW,
-                                contentY + contentH, baseR + glow, baseG + glow, baseB + glow,
-                                craftable ? 0.92f : 0.86f);
-                drawRectClipped(rx + 2.0f * uiScale, ry + 2.0f * uiScale, cellW - 4.0f * uiScale,
-                                cellH - 4.0f * uiScale, contentX, contentY, contentX + contentW,
-                                contentY + contentH, craftable ? 0.18f : 0.14f,
-                                craftable ? 0.22f : 0.16f, craftable ? 0.18f : 0.20f, 0.82f);
-                if (hovered) {
-                    drawRectClipped(rx - 1.0f, ry - 1.0f, cellW + 2.0f, 2.0f, contentX, contentY,
-                                    contentX + contentW, contentY + contentH, 0.38f, 0.80f, 1.0f,
-                                    0.95f);
-                    drawRectClipped(rx - 1.0f, ry + cellH - 1.0f, cellW + 2.0f, 2.0f, contentX,
-                                    contentY, contentX + contentW, contentY + contentH, 0.38f, 0.80f,
-                                    1.0f, 0.95f);
-                    drawRectClipped(rx - 1.0f, ry, 2.0f, cellH, contentX, contentY, contentX + contentW,
-                                    contentY + contentH, 0.38f, 0.80f, 1.0f, 0.95f);
-                    drawRectClipped(rx + cellW - 1.0f, ry, 2.0f, cellH, contentX, contentY,
-                                    contentX + contentW, contentY + contentH, 0.38f, 0.80f, 1.0f,
-                                    0.95f);
-                }
-
-                float iconX = rx + 8.0f * uiScale;
-                const float iconY = ry + 7.0f * uiScale;
-                const float iconS = 36.0f * uiScale;
-
-                for (const auto &in : recipe.ingredients) {
-                    voxel::BlockId renderId = in.id;
-                    if (in.allowAnyWood) {
-                        renderId = woodCycle[cycleIndex];
-                    } else if (in.allowAnyPlanks) {
-                        renderId = plankCycle[cycleIndex];
-                    }
-                    const voxel::BlockDef &def = registry.get(renderId);
-                    drawRectClipped(iconX, iconY, iconS, iconS, contentX, contentY, contentX + contentW,
-                                    contentY + contentH, 0.08f, 0.10f, 0.12f, 0.95f);
-                    const float drawX = iconX + 4.0f * uiScale;
-                    const float drawY = iconY + 4.0f * uiScale;
-                    const float drawS = iconS - 8.0f * uiScale;
-                    if (isFlatItemId(renderId)) {
-                        const glm::vec4 uv = atlas.uvRect(def.sideTile);
-                        appendItemIcon(drawX, drawY, drawX + drawS, drawY + drawS, uv, 1.0f);
-                    } else {
-                        const float cubeInset = 2.0f * uiScale;
-                        appendCubeIcon(iconX + cubeInset, iconY + cubeInset, iconS - 2.0f * cubeInset,
-                                       iconS - 2.0f * cubeInset, def);
-                    }
-                    drawTextClipped(iconX + 2.0f * uiScale, iconY + iconS - 10.0f * uiScale,
-                                    std::to_string(in.count), contentX, contentY, contentX + contentW,
-                                    contentY + contentH, 232, 236, 246, 255);
-                    if (cursorX >= iconX && cursorX <= (iconX + iconS) && cursorY >= iconY &&
-                        cursorY <= (iconY + iconS)) {
-                        hoveredIngredientName =
-                            (in.allowAnyWood || in.allowAnyPlanks) ? game::blockName(renderId)
-                                                                    : game::blockName(in.id);
-                    }
-                    iconX += 48.0f * uiScale;
-                }
-
-                drawTextClipped(iconX, ry + 19.0f * uiScale, "->", contentX, contentY,
-                                contentX + contentW, contentY + contentH, 230, 236, 248, 255);
-                iconX += 20.0f * uiScale;
-
-                const voxel::BlockDef &outDef = registry.get(recipe.outputId);
-                drawRectClipped(iconX, iconY, iconS, iconS, contentX, contentY, contentX + contentW,
-                                contentY + contentH, 0.08f, 0.10f, 0.12f, 0.95f);
-                const float outDrawX = iconX + 4.0f * uiScale;
-                const float outDrawY = iconY + 4.0f * uiScale;
-                const float outDrawS = iconS - 8.0f * uiScale;
-                if (isFlatItemId(recipe.outputId)) {
-                    const glm::vec4 outUv = atlas.uvRect(outDef.sideTile);
-                    appendItemIcon(outDrawX, outDrawY, outDrawX + outDrawS, outDrawY + outDrawS,
-                                   outUv, 1.0f);
-                } else {
-                    const float outCubeInset = 2.0f * uiScale;
-                    appendCubeIcon(iconX + outCubeInset, iconY + outCubeInset,
-                                   iconS - 2.0f * outCubeInset, iconS - 2.0f * outCubeInset, outDef);
-                }
-                if (cursorX >= iconX && cursorX <= (iconX + iconS) && cursorY >= iconY &&
-                    cursorY <= (iconY + iconS)) {
-                    hoveredIngredientName = game::blockName(recipe.outputId);
-                }
-                drawTextClipped(iconX + 2.0f * uiScale, iconY + iconS - 10.0f * uiScale,
-                                std::to_string(recipe.outputCount), contentX, contentY,
-                                contentX + contentW, contentY + contentH, 232, 236, 246, 255);
-                const float labelPad = 7.0f * uiScale;
-                const float labelH = 14.0f * uiScale;
-                const float labelTextW = textWidthPx(recipe.label);
-                const float labelW = std::clamp(labelTextW + labelPad * 2.0f, 42.0f * uiScale,
-                                                cellW - 18.0f * uiScale);
-                const float labelX = rx + (cellW - labelW) * 0.5f;
-                const float labelY = ry + cellH - labelH - 4.0f * uiScale;
-                const bool labelFullyVisible = labelY >= contentY &&
-                                               (labelY + labelH) <= (contentY + contentH);
-                if (labelFullyVisible) {
-                    recipeNameLabels.push_back({labelX, labelY, labelW, labelH, recipe.label});
-                }
-            }
-            endIconClipBatch(recipeIconClipBatch);
-
-            const float trackX = recipeX + recipeW - 12.0f * uiScale;
-            const float trackY = contentY;
-            const float trackH = contentH;
-            drawRect(trackX, trackY, 4.0f * uiScale, trackH, 0.14f, 0.16f, 0.18f, 0.95f);
-            if (maxScroll > 0.0f) {
-                const float thumbH = std::max(22.0f * uiScale, trackH * (contentH / totalContentH));
-                const float thumbTravel = std::max(0.0f, trackH - thumbH);
-                const float t = scroll / maxScroll;
-                const float thumbY = trackY + t * thumbTravel;
-                drawRect(trackX - 2.0f * uiScale, thumbY, 8.0f * uiScale, thumbH, 0.30f, 0.72f, 0.95f,
-                         0.95f);
-            } else {
-                drawRect(trackX - 2.0f * uiScale, trackY, 8.0f * uiScale, trackH, 0.24f, 0.28f, 0.33f,
-                         0.85f);
-            }
-            if (!hoveredIngredientName.empty()) {
-                recipeHoverTipText = hoveredIngredientName;
-                recipeHoverTipX = cursorX + 12.0f * uiScale;
-                recipeHoverTipY = cursorY - 8.0f * uiScale;
-            }
-            }
+            recipeMenu.renderOverlay(width, height, uiScale, craftingGridSize, usingFurnace, cursorX,
+                                     cursorY, recipeScroll, uiTimeSeconds, recipeSearch,
+                                     recipeCraftableOnly, recipeIngredientFilter, recipes,
+                                     smeltingRecipes, recipeCraftable, registry, drawCtx,
+                                     recipeNameLabels, tooltip);
         }
+    };
+    if (showInventory) {
+        renderInventoryBody();
     }
 
-    // Context info panel (top-left): looked block, mode, compass, and player coordinates.
-    const float panelX = 14.0f * uiScale;
-    const float panelY = 14.0f * uiScale;
-    const float panelPadX = 8.0f;
-    const float panelPadY = 8.0f;
-    const float lineStep = 14.0f;
-    const float textH = 8.0f;
-    const std::string fpsText =
-        "FPS: " + std::to_string(static_cast<int>(std::lround(std::max(0.0f, fps))));
-    const float maxLineW = std::max(std::max(textWidthPx(lookedAtText), textWidthPx(modeText)),
-                                    std::max(std::max(textWidthPx(compassText), textWidthPx(coordText)),
-                                             textWidthPx(fpsText)));
-    const float panelW = maxLineW + panelPadX * 2.0f;
-    const float panelH = panelPadY * 2.0f + textH + lineStep * 4.0f;
-    drawRect(panelX, panelY, panelW, panelH, 0.03f, 0.04f, 0.05f, 0.58f);
-    drawText(panelX + panelPadX, panelY + panelPadY + lineStep * 0.0f, lookedAtText, 235, 239, 247,
-             255);
-    drawText(panelX + panelPadX, panelY + panelPadY + lineStep * 1.0f, modeText, 216, 222, 236,
-             255);
-    drawText(panelX + panelPadX, panelY + panelPadY + lineStep * 2.0f, compassText, 216, 222, 236,
-             255);
-    drawText(panelX + panelPadX, panelY + panelPadY + lineStep * 3.0f, coordText, 216, 222, 236,
-             255);
-    drawText(panelX + panelPadX, panelY + panelPadY + lineStep * 4.0f, fpsText, 216, 222, 236, 255);
+    drawInfoPanel(uiScale, fps, lookedAtText, modeText, compassText, biomeText, coordText);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glDisable(GL_DEPTH_TEST);
@@ -2460,93 +927,22 @@ void HudRenderer::render2D(int width, int height, int selectedIndex,
                  verts_.data(), GL_DYNAMIC_DRAW);
     glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(verts_.size()));
 
-    glUseProgram(iconShader_);
-    glUniform2f(glGetUniformLocation(iconShader_, "uScreen"), static_cast<float>(width),
-                static_cast<float>(height));
-    glUniform1i(glGetUniformLocation(iconShader_, "uAtlas"), 0);
-    atlas.bind(0);
-    glBindVertexArray(iconVao_);
-    glBindBuffer(GL_ARRAY_BUFFER, iconVbo_);
-    glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(iconVerts_.size() * sizeof(IconVertex)),
-                 iconVerts_.data(), GL_DYNAMIC_DRAW);
-    if (!iconClipBatches.empty()) {
-        int viewport[4] = {0, 0, width, height};
-        glGetIntegerv(GL_VIEWPORT, viewport);
-        const float sx =
-            (width > 0) ? (static_cast<float>(viewport[2]) / static_cast<float>(width)) : 1.0f;
-        const float sy =
-            (height > 0) ? (static_cast<float>(viewport[3]) / static_cast<float>(height)) : 1.0f;
-        std::size_t cursor = 0;
-        for (const IconClipBatch &batch : iconClipBatches) {
-            if (batch.start > cursor) {
-                glDrawArrays(GL_TRIANGLES, static_cast<GLint>(cursor),
-                             static_cast<GLsizei>(batch.start - cursor));
-            }
-            if (batch.count > 0) {
-                const int scX =
-                    viewport[0] + std::max(0, static_cast<int>(std::floor(batch.x * sx)));
-                const int scY = viewport[1] +
-                                std::max(0, static_cast<int>(std::floor(
-                                                  (static_cast<float>(height) - (batch.y + batch.h)) *
-                                                  sy)));
-                const int scW = std::max(0, static_cast<int>(std::ceil(batch.w * sx)));
-                const int scH = std::max(0, static_cast<int>(std::ceil(batch.h * sy)));
-                glEnable(GL_SCISSOR_TEST);
-                glScissor(scX, scY, scW, scH);
-                glDrawArrays(GL_TRIANGLES, static_cast<GLint>(batch.start),
-                             static_cast<GLsizei>(batch.count));
-                glDisable(GL_SCISSOR_TEST);
-            }
-            cursor = std::max(cursor, batch.start + batch.count);
-        }
-        if (cursor < iconVerts_.size()) {
-            glDrawArrays(GL_TRIANGLES, static_cast<GLint>(cursor),
-                         static_cast<GLsizei>(iconVerts_.size() - cursor));
-        }
-    } else {
-        glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(iconVerts_.size()));
-    }
+    flushIconPass(width, height, atlas, iconClipBatches);
+    drawLabelOverlay(width, height, uiScale, recipeNameLabels, slotLabels, tooltip, dragIcon.active);
 
-    // Draw recipe labels and slot numbers after icons so they overlay block textures.
-    verts_.clear();
-    for (const RecipeNameLabel &label : recipeNameLabels) {
-        drawRect(label.x, label.y, label.w, label.h, 0.04f, 0.06f, 0.08f, 0.86f);
-        drawRect(label.x + 1.0f, label.y + 1.0f, label.w - 2.0f, label.h - 2.0f, 0.11f, 0.14f,
-                 0.19f, 0.92f);
-        const float textX = label.x + (label.w - textWidthPx(label.text)) * 0.5f;
-        const float textY = label.y + (label.h - 8.0f) * 0.5f;
-        drawText(textX + 1.0f, textY + 1.0f, label.text, 14, 16, 20, 220);
-        drawText(textX, textY, label.text, 228, 234, 246, 255);
-    }
-    for (const SlotLabel &label : slotLabels) {
-        drawText(label.x + 1.0f, label.y + 1.0f, label.text, 20, 20, 24, 220);
-        drawText(label.x, label.y, label.text, 246, 247, 250, 255);
-    }
-    if (!recipeHoverTipText.empty() && !dragIconActive) {
-        drawTooltipPanel(recipeHoverTipText, recipeHoverTipX, recipeHoverTipY);
-    }
-    glUseProgram(uiShader_);
-    glUniform2f(glGetUniformLocation(uiShader_, "uScreen"), static_cast<float>(width),
-                static_cast<float>(height));
-    glBindVertexArray(uiVao_);
-    glBindBuffer(GL_ARRAY_BUFFER, uiVbo_);
-    glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(verts_.size() * sizeof(UiVertex)),
-                 verts_.data(), GL_DYNAMIC_DRAW);
-    glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(verts_.size()));
-
-    if (dragIconActive && dragIconId != voxel::AIR && dragIconCount > 0) {
+    if (dragIcon.active && dragIcon.id != voxel::AIR && dragIcon.count > 0) {
         verts_.clear();
-        drawRect(dragIconX - 4.0f * uiScale, dragIconY - 3.0f * uiScale, dragIconSize + 8.0f * uiScale,
-                 dragIconSize + 8.0f * uiScale, 0.0f, 0.0f, 0.0f, 0.38f);
-        drawRect(dragIconX - 1.0f * uiScale, dragIconY - 1.0f * uiScale, dragIconSize + 2.0f * uiScale,
-                 dragIconSize + 2.0f * uiScale, 0.08f, 0.10f, 0.12f, 0.92f);
-        drawRect(dragIconX, dragIconY, dragIconSize, dragIconSize, 0.16f, 0.18f, 0.22f, 0.78f);
+        drawRect(dragIcon.x - 4.0f * uiScale, dragIcon.y - 3.0f * uiScale, dragIcon.size + 8.0f * uiScale,
+                 dragIcon.size + 8.0f * uiScale, 0.0f, 0.0f, 0.0f, 0.38f);
+        drawRect(dragIcon.x - 1.0f * uiScale, dragIcon.y - 1.0f * uiScale, dragIcon.size + 2.0f * uiScale,
+                 dragIcon.size + 2.0f * uiScale, 0.08f, 0.10f, 0.12f, 0.92f);
+        drawRect(dragIcon.x, dragIcon.y, dragIcon.size, dragIcon.size, 0.16f, 0.18f, 0.22f, 0.78f);
 
-        const std::string dragCountText = std::to_string(dragIconCount);
+        const std::string dragCountText = std::to_string(dragIcon.count);
         const float chipW = textWidthPx(dragCountText) + 8.0f * uiScale;
         const float chipH = 12.0f * uiScale;
-        const float chipX = dragIconX + dragIconSize - chipW + 2.0f * uiScale;
-        const float chipY = dragIconY + dragIconSize - chipH + 1.0f * uiScale;
+        const float chipX = dragIcon.x + dragIcon.size - chipW + 2.0f * uiScale;
+        const float chipY = dragIcon.y + dragIcon.size - chipH + 1.0f * uiScale;
         drawRect(chipX, chipY, chipW, chipH, 0.04f, 0.06f, 0.08f, 0.92f);
         drawRect(chipX + 1.0f, chipY + 1.0f, chipW - 2.0f, chipH - 2.0f, 0.12f, 0.15f, 0.20f, 0.95f);
         const float countTx = chipX + (chipW - textWidthPx(dragCountText)) * 0.5f;
@@ -2554,21 +950,22 @@ void HudRenderer::render2D(int width, int height, int selectedIndex,
         drawText(countTx + 1.0f, countTy + 1.0f, dragCountText, 16, 18, 22, 220);
         drawText(countTx, countTy, dragCountText, 238, 244, 252, 255);
 
-        if (!dragIconName.empty()) {
-            drawTooltipPanel(dragIconName, dragIconX, dragIconY - 18.0f * uiScale);
+        if (!dragIcon.name.empty()) {
+            drawTooltipPanel(width, height, uiScale, dragIcon.name, dragIcon.x,
+                             dragIcon.y - 18.0f * uiScale);
         }
         glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(verts_.size() * sizeof(UiVertex)),
                      verts_.data(), GL_DYNAMIC_DRAW);
         glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(verts_.size()));
 
         iconVerts_.clear();
-        const voxel::BlockDef &dragDef = registry.get(dragIconId);
-        if (isFlatItemId(dragIconId)) {
+        const voxel::BlockDef &dragDef = registry.get(dragIcon.id);
+        if (isFlatItemId(dragIcon.id)) {
             const glm::vec4 uv = atlas.uvRect(dragDef.sideTile);
-            appendItemIcon(dragIconX, dragIconY, dragIconX + dragIconSize, dragIconY + dragIconSize, uv,
+            appendItemIcon(dragIcon.x, dragIcon.y, dragIcon.x + dragIcon.size, dragIcon.y + dragIcon.size, uv,
                            1.0f);
         } else {
-            appendCubeIcon(dragIconX, dragIconY, dragIconSize, dragIconSize, dragDef);
+            appendCubeIcon(dragIcon.x, dragIcon.y, dragIcon.size, dragIcon.size, dragDef);
         }
         glUseProgram(iconShader_);
         glUniform2f(glGetUniformLocation(iconShader_, "uScreen"), static_cast<float>(width),
@@ -2598,11 +995,11 @@ void HudRenderer::renderBreakOverlay(const glm::mat4 &proj, const glm::mat4 &vie
     initCrack();
 
     constexpr int kCrackTileBase = 48;
-    const bool isPlant =
-        (blockId == voxel::TALL_GRASS || blockId == voxel::FLOWER || voxel::isTorch(blockId));
+    const bool isPlant = (voxel::isPlant(blockId) || voxel::isTorch(blockId));
     // Plants look better with a lighter/faster crack progression.
     const float eased = std::pow(breakProgress, isPlant ? 1.10f : 1.35f);
-    const int stage0 = std::min(9, static_cast<int>(std::floor(eased * (isPlant ? 4.0f : 7.0f))));
+    const float stageSpan = isPlant ? 8.0f : 10.0f;
+    const int stage0 = std::min(9, static_cast<int>(std::floor(eased * stageSpan)));
 
     glm::mat4 model(1.0f);
     model = glm::translate(model, glm::vec3(block->x, block->y, block->z));

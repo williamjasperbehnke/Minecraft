@@ -17,30 +17,16 @@
 #include <glm/mat4x4.hpp>
 #include <glm/vec3.hpp>
 
+namespace app::menus {
+struct RecipeNameLabel;
+struct SlotLabel;
+struct TooltipState;
+} // namespace app::menus
+
 namespace gfx {
 
 class HudRenderer {
   public:
-    void renderTitleScreen(int width, int height, const std::vector<std::string> &worlds,
-                           int selectedWorld, bool createMode, bool editSeed,
-                           const std::string &createName, const std::string &createSeed,
-                           float cursorX, float cursorY);
-    void renderPauseMenu(int width, int height, float cursorX, float cursorY);
-    void renderMapOverlay(int width, int height, const game::MapSystem &map, int mapCenterWX,
-                          int mapCenterWZ, int playerWX, int playerWZ, float zoom, float cursorX,
-                          float cursorY, int selectedWaypoint, const std::string &waypointName,
-                          std::uint8_t waypointR, std::uint8_t waypointG,
-                          std::uint8_t waypointB, int waypointIcon, bool waypointVisible,
-                          float playerHeadingRad,
-                          bool waypointNameFocused,
-                          bool waypointEditorOpen,
-                          const voxel::BlockRegistry &registry, const TextureAtlas &atlas);
-    void renderMiniMap(int width, int height, const game::MapSystem &map, int playerWX,
-                       int playerWZ, float zoom, bool northLocked, bool showCompass,
-                       bool showWaypoints,
-                       float headingRad,
-                       const voxel::BlockRegistry &registry, const TextureAtlas &atlas);
-
     void render2D(int width, int height, int selectedIndex,
                   const std::array<voxel::BlockId, game::Inventory::kHotbarSize> &hotbar,
                   const std::array<int, game::Inventory::kHotbarSize> &hotbarCounts,
@@ -67,7 +53,8 @@ class HudRenderer {
                   const std::string &carryingName, const std::string &selectedName,
                   const std::string &lookedAtText, const std::string &modeText,
                   float health01, float sprintStamina01, float fps,
-                  const std::string &compassText, const std::string &coordText,
+                  const std::string &compassText, const std::string &biomeText,
+                  const std::string &coordText,
                   const voxel::BlockRegistry &registry, const TextureAtlas &atlas);
 
     void renderBreakOverlay(const glm::mat4 &proj, const glm::mat4 &view,
@@ -81,6 +68,15 @@ class HudRenderer {
                               const std::function<bool(int, int)> &isChunkLoadedAt);
 
   private:
+    struct IconClipBatch {
+        std::size_t start = 0;
+        std::size_t count = 0;
+        float x = 0.0f;
+        float y = 0.0f;
+        float w = 0.0f;
+        float h = 0.0f;
+    };
+
     struct UiVertex {
         float x;
         float y;
@@ -97,6 +93,18 @@ class HudRenderer {
     void drawRect(float x, float y, float w, float h, float r, float g, float b, float a);
     void drawText(float x, float y, const std::string &text, unsigned char r, unsigned char g,
                   unsigned char b, unsigned char a);
+    void drawTooltipPanel(int width, int height, float uiScale, const std::string &text, float rawX,
+                          float rawY);
+    void drawInfoPanel(float uiScale, float fps, const std::string &lookedAtText,
+                       const std::string &modeText, const std::string &compassText,
+                       const std::string &biomeText,
+                       const std::string &coordText);
+    void flushIconPass(int width, int height, const TextureAtlas &atlas,
+                       const std::vector<IconClipBatch> &iconClipBatches);
+    void drawLabelOverlay(int width, int height, float uiScale,
+                          const std::vector<app::menus::RecipeNameLabel> &recipeNameLabels,
+                          const std::vector<app::menus::SlotLabel> &slotLabels,
+                          const app::menus::TooltipState &tooltip, bool suppressTooltip);
     unsigned int uiShader_ = 0;
     unsigned int uiVao_ = 0;
     unsigned int uiVbo_ = 0;

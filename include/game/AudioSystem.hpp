@@ -33,6 +33,7 @@ class AudioSystem {
     bool loadPlaceSounds(SoundProfile profile, const std::vector<std::string> &paths);
     bool loadSwimSounds(const std::vector<std::string> &paths);
     bool loadWaterBobSounds(const std::vector<std::string> &paths);
+    bool loadDefaultAssets();
     void playPickup();
     void playBreak(SoundProfile profile);
     void playFootstep(SoundProfile profile);

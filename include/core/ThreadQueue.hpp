@@ -45,6 +45,23 @@ template <typename T> class ThreadQueue {
         return true;
     }
 
+    template <typename Better>
+    bool tryPopBest(T &out, Better better) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (queue_.empty()) {
+            return false;
+        }
+        auto bestIt = queue_.begin();
+        for (auto it = std::next(queue_.begin()); it != queue_.end(); ++it) {
+            if (better(*it, *bestIt)) {
+                bestIt = it;
+            }
+        }
+        out = std::move(*bestIt);
+        queue_.erase(bestIt);
+        return true;
+    }
+
     void stop() {
         {
             std::lock_guard<std::mutex> lock(mutex_);

@@ -5,7 +5,6 @@
 #include "gfx/TextureAtlas.hpp"
 #include "voxel/Block.hpp"
 #include "voxel/Chunk.hpp"
-#include "voxel/ChunkIO.hpp"
 #include "world/ChunkCoord.hpp"
 #include "world/FurnaceState.hpp"
 #include "world/WorldGen.hpp"
@@ -15,10 +14,13 @@
 #include <atomic>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <limits>
 #include <thread>
+#include <deque>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -61,13 +63,15 @@ class World {
     World &operator=(const World &) = delete;
 
     void updateStream(const glm::vec3 &playerPos);
+    void updateFluidSimulation(float dt);
     void uploadReadyMeshes();
     void draw() const;
-    void drawTransparent(const glm::vec3 &cameraPos) const;
+    void drawTransparent(const glm::vec3 &cameraPos, const glm::vec3 &cameraForward) const;
 
     bool isSolidBlock(int wx, int wy, int wz) const;
     bool isTargetBlock(int wx, int wy, int wz) const;
     bool isChunkLoadedAt(int wx, int wz) const;
+    std::string biomeLabelAt(int wx, int wz) const;
     voxel::BlockId getBlock(int wx, int wy, int wz) const;
     bool setBlock(int wx, int wy, int wz, voxel::BlockId id);
     bool getFurnaceState(int wx, int wy, int wz, FurnaceState &out) const;
@@ -86,6 +90,7 @@ class World {
     struct WorkerJob {
         JobType type = JobType::LoadOrGenerate;
         ChunkCoord coord;
+        bool urgent = false;
         std::shared_ptr<voxel::Chunk> chunkSnapshot;
         std::shared_ptr<voxel::Chunk> px;
         std::shared_ptr<voxel::Chunk> nx;
@@ -99,6 +104,7 @@ class World {
 
     struct WorkerResult {
         ChunkCoord coord;
+        bool urgent = false;
         std::shared_ptr<voxel::Chunk> chunk;
         gfx::CpuMesh mesh;
         bool replaceChunk = false;
@@ -109,11 +115,46 @@ class World {
         std::unique_ptr<gfx::ChunkMesh> mesh;
         int triangleCount = 0;
     };
+    struct FluidCoord {
+        int x = 0;
+        int y = 0;
+        int z = 0;
+        bool operator==(const FluidCoord &other) const {
+            return x == other.x && y == other.y && z == other.z;
+        }
+    };
+    struct FluidCoordHash {
+        std::size_t operator()(const FluidCoord &c) const {
+            std::size_t h = static_cast<std::size_t>(std::hash<int>{}(c.x));
+            h ^= static_cast<std::size_t>(std::hash<int>{}(c.y)) + 0x9e3779b97f4a7c15ull + (h << 6) +
+                 (h >> 2);
+            h ^= static_cast<std::size_t>(std::hash<int>{}(c.z)) + 0x9e3779b97f4a7c15ull + (h << 6) +
+                 (h >> 2);
+            return h;
+        }
+    };
+    struct FluidState {
+        std::uint8_t level = 0;
+        bool source = false;
+    };
 
     void enqueueLoadIfNeeded(ChunkCoord cc);
-    void enqueueRemesh(ChunkCoord cc, bool force);
+    void enqueueRemesh(ChunkCoord cc, bool force, bool urgent = false);
     void scheduleWorkerJob(WorkerJob job);
     void workerLoop();
+    voxel::BlockId getBlockLoadedLocked(int wx, int wy, int wz) const;
+    void enqueueFluidCellLocked(int wx, int wy, int wz);
+    void enqueueFluidNeighborsLocked(int wx, int wy, int wz);
+    void seedFluidFrontierForChunkLocked(ChunkCoord cc, const voxel::Chunk &chunk);
+    void appendFluidRemeshNeighborhoodLocked(ChunkCoord cc, bool waterLike,
+                                             std::unordered_set<ChunkCoord, ChunkCoordHash> &out) const;
+    int fluidLevelAtLocked(voxel::BlockId fluidId, int wx, int wy, int wz) const;
+    void setFluidStateLocked(voxel::BlockId fluidId, int wx, int wy, int wz, std::uint8_t level,
+                             bool source);
+    void clearFluidStateLocked(int wx, int wy, int wz);
+    void processFluidFrontierLocked(voxel::BlockId fluidId, int budget, std::deque<FluidCoord> &frontier,
+                                    std::unordered_set<FluidCoord, FluidCoordHash> &queued,
+                                    std::unordered_set<ChunkCoord, ChunkCoordHash> &remeshChunks);
 
     static int floorDiv(int a, int b);
     static int floorMod(int a, int b);
@@ -128,7 +169,7 @@ class World {
     const gfx::TextureAtlas &atlas_;
     voxel::BlockRegistry blockRegistry_;
     world::WorldGen gen_;
-    voxel::ChunkIO io_;
+    std::filesystem::path saveRoot_;
 
     std::unordered_map<ChunkCoord, ChunkEntry, ChunkCoordHash> chunks_;
     mutable std::mutex chunksMutex_;
@@ -143,6 +184,14 @@ class World {
     std::vector<std::thread> workers_;
     std::atomic<bool> running_ = true;
     std::atomic<bool> smoothLighting_{false};
+    std::deque<FluidCoord> waterFrontier_;
+    std::deque<FluidCoord> lavaFrontier_;
+    std::unordered_set<FluidCoord, FluidCoordHash> waterQueued_;
+    std::unordered_set<FluidCoord, FluidCoordHash> lavaQueued_;
+    std::unordered_map<FluidCoord, FluidState, FluidCoordHash> waterState_;
+    std::unordered_map<FluidCoord, FluidState, FluidCoordHash> lavaState_;
+    float waterStepAccum_ = 0.0f;
+    float lavaStepAccum_ = 0.0f;
 };
 
 } // namespace world

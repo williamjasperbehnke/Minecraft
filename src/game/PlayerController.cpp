@@ -72,7 +72,7 @@ bool PlayerController::isWaterAt(const world::World &world, const glm::vec3 &pos
     const int wx = static_cast<int>(std::floor(pos.x));
     const int wy = static_cast<int>(std::floor(pos.y));
     const int wz = static_cast<int>(std::floor(pos.z));
-    return world.getBlock(wx, wy, wz) == voxel::WATER;
+    return voxel::isWaterLike(world.getBlock(wx, wy, wz));
 }
 
 bool PlayerController::isOnIce(const world::World &world, const glm::vec3 &feet) const {

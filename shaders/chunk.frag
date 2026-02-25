@@ -127,6 +127,11 @@ void main() {
 
     if (uRenderMode == 0) {
         vec4 texel = texture(uAtlas, vUV);
+        // Cutout transparency (plants/foliage): prevent zero-alpha pixels from writing
+        // depth, which causes X-shaped holes/artifacts in water behind them.
+        if (texel.a <= 0.01) {
+            discard;
+        }
         bool isTransparent = texel.a < 0.99;
         if (uAlphaPass == 0 && isTransparent) {
             discard;

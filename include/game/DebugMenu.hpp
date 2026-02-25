@@ -1,5 +1,7 @@
 #pragma once
 
+#include "app/menus/BaseMenu.hpp"
+
 #include <string>
 #include <vector>
 
@@ -36,15 +38,19 @@ struct DebugConfig {
     float moonPhase01 = 0.0f;
 };
 
-class DebugMenu {
+class DebugMenu : public app::menus::BaseMenu {
   public:
+    const char *menuId() const override {
+        return "debug";
+    }
+
     void update(GLFWwindow *window, DebugConfig &cfg, const world::WorldDebugStats &stats,
                 float fps, float frameMs);
     void render(int width, int height);
     void updateWindowTitle(GLFWwindow *window, const DebugConfig &cfg,
                            const world::WorldDebugStats &stats, float fps, float frameMs) const;
 
-    bool isOpen() const {
+    bool isOpen() const override {
         return open_;
     }
 

@@ -1,5 +1,6 @@
 #include "game/ItemDropSystem.hpp"
 
+#include "app/util/ShaderProgramUtils.hpp"
 #include "world/World.hpp"
 
 #include <glad/glad.h>
@@ -11,8 +12,6 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
-#include <stdexcept>
-
 namespace game {
 namespace {
 
@@ -24,37 +23,6 @@ constexpr float kGroundDrag = 7.0f;
 constexpr float kAirDrag = 1.2f;
 constexpr float kPickupRadius = 1.20f;
 constexpr float kMaxLifetime = 180.0f;
-
-unsigned int compile(unsigned int type, const char *src) {
-    const unsigned int shader = glCreateShader(type);
-    glShaderSource(shader, 1, &src, nullptr);
-    glCompileShader(shader);
-    int ok = 0;
-    glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
-    if (!ok) {
-        char log[1024];
-        glGetShaderInfoLog(shader, sizeof(log), nullptr, log);
-        throw std::runtime_error(std::string("Item shader compile failed: ") + log);
-    }
-    return shader;
-}
-
-unsigned int link(unsigned int vs, unsigned int fs) {
-    const unsigned int prog = glCreateProgram();
-    glAttachShader(prog, vs);
-    glAttachShader(prog, fs);
-    glLinkProgram(prog);
-    int ok = 0;
-    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
-    glDeleteShader(vs);
-    glDeleteShader(fs);
-    if (!ok) {
-        char log[1024];
-        glGetProgramInfoLog(prog, sizeof(log), nullptr, log);
-        throw std::runtime_error(std::string("Item shader link failed: ") + log);
-    }
-    return prog;
-}
 
 float frand(float minV, float maxV) {
     const float t = static_cast<float>(std::rand()) / static_cast<float>(RAND_MAX);
@@ -112,7 +80,9 @@ void main() {
 }
 )";
 
-    shader_ = link(compile(GL_VERTEX_SHADER, vs), compile(GL_FRAGMENT_SHADER, fs));
+    shader_ = app::util::linkInLineProgram(
+        app::util::compileInlineShader(GL_VERTEX_SHADER, vs),
+        app::util::compileInlineShader(GL_FRAGMENT_SHADER, fs));
 
     glGenVertexArrays(1, &vao_);
     glGenBuffers(1, &vbo_);
@@ -274,8 +244,8 @@ void ItemDropSystem::render(const glm::mat4 &proj, const glm::mat4 &view,
         model = glm::translate(model, center);
         model = glm::rotate(model, ang, glm::vec3(0.0f, 1.0f, 0.0f));
 
-        const bool plantItem = (item.id == voxel::STICK || item.id == voxel::TALL_GRASS ||
-                                item.id == voxel::FLOWER || item.id == voxel::IRON_INGOT ||
+        const bool plantItem = (item.id == voxel::STICK || voxel::isPlant(item.id) ||
+                                item.id == voxel::IRON_INGOT ||
                                 item.id == voxel::COPPER_INGOT || item.id == voxel::GOLD_INGOT ||
                                 voxel::isTorch(item.id));
         if (plantItem) {

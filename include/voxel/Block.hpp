@@ -57,10 +57,40 @@ constexpr BlockId LIT_FURNACE_POS_X = 46;
 constexpr BlockId LIT_FURNACE_NEG_X = 47;
 constexpr BlockId LIT_FURNACE_POS_Z = 48;
 constexpr BlockId LIT_FURNACE_NEG_Z = 49;
+constexpr BlockId MUD = 50;
+constexpr BlockId MOSS = 51;
+constexpr BlockId BASALT = 52;
+constexpr BlockId RED_SAND = 53;
+constexpr BlockId WILDFLOWER = 54;
+constexpr BlockId FERN = 55;
+constexpr BlockId DRY_GRASS = 56;
+constexpr BlockId DEAD_BUSH = 57;
+constexpr BlockId SEAGRASS = 58;
+constexpr BlockId KELP = 59;
+constexpr BlockId CORAL = 60;
+constexpr BlockId LAVA = 61;
+constexpr BlockId BEDROCK = 62;
 
 inline bool isTorch(BlockId id) {
     return id == TORCH || id == TORCH_WALL_POS_X || id == TORCH_WALL_NEG_X ||
            id == TORCH_WALL_POS_Z || id == TORCH_WALL_NEG_Z;
+}
+
+inline bool isPlant(BlockId id) {
+    return id == TALL_GRASS || id == FLOWER || id == WILDFLOWER || id == FERN ||
+           id == DRY_GRASS || id == DEAD_BUSH || id == SEAGRASS || id == KELP || id == CORAL;
+}
+
+inline bool isWaterloggedPlant(BlockId id) {
+    return id == SEAGRASS || id == KELP || id == CORAL;
+}
+
+inline bool isWaterLike(BlockId id) {
+    return id == WATER || isWaterloggedPlant(id);
+}
+
+inline bool isFluid(BlockId id) {
+    return isWaterLike(id) || id == LAVA;
 }
 
 inline bool isWallTorch(BlockId id) {
@@ -118,6 +148,9 @@ inline std::uint8_t emittedBlockLight(BlockId id) {
     }
     if (isLitFurnace(id)) {
         return 13;
+    }
+    if (id == LAVA) {
+        return 12;
     }
     return 0;
 }
@@ -207,6 +240,19 @@ class BlockRegistry {
         defs_[IRON_INGOT] = {false, true, 45, 45, 45};
         defs_[COPPER_INGOT] = {false, true, 46, 46, 46};
         defs_[GOLD_INGOT] = {false, true, 47, 47, 47};
+        defs_[MUD] = {true, false, 58, 58, 58};
+        defs_[MOSS] = {true, false, 59, 60, 3};
+        defs_[BASALT] = {true, false, 61, 61, 61};
+        defs_[RED_SAND] = {true, false, 62, 62, 62};
+        defs_[LAVA] = {true, true, 63, 63, 63};
+        defs_[BEDROCK] = {true, false, 71, 71, 71};
+        defs_[WILDFLOWER] = {true, true, 64, 64, 64};
+        defs_[FERN] = {true, true, 65, 65, 65};
+        defs_[DRY_GRASS] = {true, true, 66, 66, 66};
+        defs_[DEAD_BUSH] = {true, true, 67, 67, 67};
+        defs_[SEAGRASS] = {true, true, 68, 68, 68};
+        defs_[KELP] = {true, true, 69, 69, 69};
+        defs_[CORAL] = {true, true, 70, 70, 70};
     }
 
     void set(BlockId id, BlockDef def) {

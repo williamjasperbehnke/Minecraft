@@ -48,6 +48,13 @@ class CraftingSystem {
 
     void updateOutput(State &state, int gridSize) const;
     bool consumeInputs(State &state, int gridSize) const;
+    bool recipeIngredientMatches(const RecipeInfo::IngredientInfo &ingredient,
+                                 voxel::BlockId id) const;
+    bool takeIngredientFromInventory(Inventory &inventory,
+                                     const RecipeInfo::IngredientInfo &ingredient,
+                                     voxel::BlockId &takenId) const;
+    bool tryAddRecipeSet(const RecipeInfo &recipe, Inventory &inventory, State &crafting,
+                         int activeInputs) const;
     const std::vector<RecipeInfo> &recipeInfos() const {
         return recipeInfos_;
     }

@@ -42,6 +42,14 @@ float SmeltingSystem::fuelSeconds(voxel::BlockId id) const {
     case voxel::SPRUCE_LEAVES:
     case voxel::BIRCH_LEAVES:
     case voxel::TALL_GRASS:
+    case voxel::FLOWER:
+    case voxel::WILDFLOWER:
+    case voxel::FERN:
+    case voxel::DRY_GRASS:
+    case voxel::DEAD_BUSH:
+    case voxel::SEAGRASS:
+    case voxel::KELP:
+    case voxel::CORAL:
         return 1.5f;
     case voxel::CACTUS:
         return 5.0f;

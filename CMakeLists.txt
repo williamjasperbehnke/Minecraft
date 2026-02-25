@@ -57,6 +57,8 @@ add_library(voxel_lib
   src/gfx/TextureAtlas.cpp
   src/gfx/ChunkMesh.cpp
   src/gfx/HudRenderer.cpp
+  src/gfx/SkyBodyRenderer.cpp
+  src/gfx/ChunkBorderRenderer.cpp
   src/game/Camera.cpp
   src/game/AudioSystem.cpp
   src/game/CraftingSystem.cpp
@@ -73,9 +75,9 @@ add_library(voxel_lib
   src/voxel/LightingSolver.cpp
   src/voxel/ChunkMesher.cpp
   src/voxel/Raycaster.cpp
-  src/voxel/ChunkIO.cpp
   src/world/WorldGen.cpp
   src/world/World.cpp
+  src/app/SaveManager.cpp
 )
 
 target_include_directories(voxel_lib PUBLIC
@@ -125,7 +127,6 @@ if(CLANG_TIDY_EXE)
             src/voxel/Chunk.cpp
             src/voxel/ChunkMesher.cpp
             src/voxel/Raycaster.cpp
-            src/voxel/ChunkIO.cpp
             src/world/WorldGen.cpp
             src/world/World.cpp
             src/main.cpp
@@ -155,7 +156,6 @@ if(CLANG_FORMAT_EXE)
             ${CMAKE_SOURCE_DIR}/include/game/Recipe.hpp
             ${CMAKE_SOURCE_DIR}/include/voxel/Block.hpp
             ${CMAKE_SOURCE_DIR}/include/voxel/Chunk.hpp
-            ${CMAKE_SOURCE_DIR}/include/voxel/ChunkIO.hpp
             ${CMAKE_SOURCE_DIR}/include/voxel/ChunkMesher.hpp
             ${CMAKE_SOURCE_DIR}/include/voxel/Raycaster.hpp
             ${CMAKE_SOURCE_DIR}/include/world/ChunkCoord.hpp
@@ -178,7 +178,6 @@ if(CLANG_FORMAT_EXE)
             ${CMAKE_SOURCE_DIR}/src/game/Recipe.cpp
             ${CMAKE_SOURCE_DIR}/src/main.cpp
             ${CMAKE_SOURCE_DIR}/src/voxel/Chunk.cpp
-            ${CMAKE_SOURCE_DIR}/src/voxel/ChunkIO.cpp
             ${CMAKE_SOURCE_DIR}/src/voxel/ChunkMesher.cpp
             ${CMAKE_SOURCE_DIR}/src/voxel/Raycaster.cpp
             ${CMAKE_SOURCE_DIR}/src/world/World.cpp
@@ -208,7 +207,6 @@ if(CLANG_FORMAT_EXE)
             ${CMAKE_SOURCE_DIR}/include/game/Recipe.hpp
             ${CMAKE_SOURCE_DIR}/include/voxel/Block.hpp
             ${CMAKE_SOURCE_DIR}/include/voxel/Chunk.hpp
-            ${CMAKE_SOURCE_DIR}/include/voxel/ChunkIO.hpp
             ${CMAKE_SOURCE_DIR}/include/voxel/ChunkMesher.hpp
             ${CMAKE_SOURCE_DIR}/include/voxel/Raycaster.hpp
             ${CMAKE_SOURCE_DIR}/include/world/ChunkCoord.hpp
@@ -231,7 +229,6 @@ if(CLANG_FORMAT_EXE)
             ${CMAKE_SOURCE_DIR}/src/game/Recipe.cpp
             ${CMAKE_SOURCE_DIR}/src/main.cpp
             ${CMAKE_SOURCE_DIR}/src/voxel/Chunk.cpp
-            ${CMAKE_SOURCE_DIR}/src/voxel/ChunkIO.cpp
             ${CMAKE_SOURCE_DIR}/src/voxel/ChunkMesher.cpp
             ${CMAKE_SOURCE_DIR}/src/voxel/Raycaster.cpp
             ${CMAKE_SOURCE_DIR}/src/world/World.cpp
@@ -261,7 +258,20 @@ else()
   message(FATAL_ERROR "glad target not found")
 endif()
 
-add_executable(voxel_clone src/main.cpp)
+add_executable(voxel_clone
+  src/main.cpp
+  src/app/GameSession.cpp
+  src/app/menus/TextInputMenu.cpp
+  src/app/menus/UiMenuRenderer.cpp
+  src/app/menus/PauseMenu.cpp
+  src/app/menus/WorldSelectionMenu.cpp
+  src/app/menus/RecipeMenu.cpp
+  src/app/menus/CreativeMenu.cpp
+  src/app/menus/CraftingMenu.cpp
+  src/app/menus/FurnaceMenu.cpp
+  src/app/menus/WorldMapMenu.cpp
+  src/app/menus/MiniMapMenu.cpp
+)
 target_link_libraries(voxel_clone PRIVATE voxel_lib)
 
 if(VOXEL_BUILD_TESTS)
