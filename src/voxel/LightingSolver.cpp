@@ -509,24 +509,38 @@ float LightingSolver::faceBlockLight(int adjX, int adjY, int adjZ) const {
 }
 
 float LightingSolver::smoothedSkyLight(int x, int y, int z) const {
-    int weighted = static_cast<int>(sampledSky(x, y, z)) * 4;
+    const std::uint8_t centerLevel = sampledSky(x, y, z);
+    if (centerLevel == 0) {
+        // Prevent smoothing from pulling skylight around sharp occluders.
+        return 0.0f;
+    }
+
+    int weighted = static_cast<int>(centerLevel) * 4;
     int weight = 4;
     for (const auto &d : kDirs) {
         weighted += static_cast<int>(sampledSky(x + d[0], y + d[1], z + d[2]));
         weight += 1;
     }
-    return (weight > 0) ? (static_cast<float>(weighted) / static_cast<float>(weight) / 15.0f)
-                        : 0.0f;
+    const float center = lightLevelToFloat(centerLevel);
+    const float blended = (weight > 0) ? (static_cast<float>(weighted) / static_cast<float>(weight) / 15.0f)
+                                       : 0.0f;
+    return std::max(center * 0.85f, blended * 0.90f);
 }
 
 float LightingSolver::smoothedBlockLight(int x, int y, int z) const {
-    int weighted = static_cast<int>(sampledBlock(x, y, z)) * 4;
+    const std::uint8_t centerLevel = sampledBlock(x, y, z);
+    if (centerLevel == 0) {
+        // Prevent smoothing from pulling light through occluders.
+        return 0.0f;
+    }
+
+    int weighted = static_cast<int>(centerLevel) * 4;
     int weight = 4;
     for (const auto &d : kDirs) {
         weighted += static_cast<int>(sampledBlock(x + d[0], y + d[1], z + d[2]));
         weight += 1;
     }
-    const float center = lightLevelToFloat(sampledBlock(x, y, z));
+    const float center = lightLevelToFloat(centerLevel);
     const float blended = (weight > 0) ? (static_cast<float>(weighted) / static_cast<float>(weight) / 15.0f)
                                        : 0.0f;
     return std::max(center * 0.80f, blended);

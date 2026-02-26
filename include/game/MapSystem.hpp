@@ -11,6 +11,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace world {
@@ -40,6 +41,8 @@ class MapSystem {
 
     void observeLoadedChunks(const world::World &world);
     bool sample(int wx, int wz, voxel::BlockId &outId) const;
+    bool sampleHeight(int wx, int wz, int &outY) const;
+    bool sampleWaterCover(int wx, int wz, bool &outCovered) const;
     const std::vector<Waypoint> &waypoints() const;
     std::vector<Waypoint> &waypoints();
 
@@ -54,7 +57,13 @@ class MapSystem {
 
     std::unordered_map<std::uint64_t, voxel::BlockId> tiles_;
     std::unordered_map<std::uint64_t, voxel::BlockId> liveTiles_;
+    std::unordered_map<std::uint64_t, std::uint8_t> heights_;
+    std::unordered_map<std::uint64_t, std::uint8_t> liveHeights_;
+    std::unordered_map<std::uint64_t, std::uint8_t> waterCover_;
+    std::unordered_map<std::uint64_t, std::uint8_t> liveWaterCover_;
+    std::unordered_set<world::ChunkCoord, world::ChunkCoordHash> knownLoadedChunks_;
     std::vector<Waypoint> waypoints_;
+    std::size_t refreshCursor_ = 0;
 
     std::thread worker_;
     std::mutex workerMutex_;
@@ -68,6 +77,8 @@ class MapSystem {
     std::mutex resultMutex_;
     bool hasResult_ = false;
     std::unordered_map<std::uint64_t, voxel::BlockId> resultLiveTiles_;
+    std::unordered_map<std::uint64_t, std::uint8_t> resultLiveHeights_;
+    std::unordered_map<std::uint64_t, std::uint8_t> resultLiveWaterCover_;
 
     std::chrono::steady_clock::time_point lastScanEnqueue_{};
 };

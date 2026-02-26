@@ -19,16 +19,23 @@ constexpr float kEyeOffset = 1.62f;
 constexpr float kStep = 0.05f;
 constexpr float kGroundSpeed = 7.0f;
 constexpr float kAirSpeed = 6.0f;
-constexpr float kSwimSpeed = 4.1f;
+constexpr float kSwimSpeed = 2.8f;
+constexpr float kLavaSpeed = 2.0f;
 constexpr float kGroundAccel = 40.0f;
 constexpr float kAirAccel = 14.0f;
-constexpr float kSwimAccel = 18.0f;
+constexpr float kSwimAccel = 10.0f;
+constexpr float kLavaAccel = 9.0f;
 constexpr float kIceAccel = 8.0f;
 constexpr float kGravity = 26.0f;
 constexpr float kJumpSpeed = 8.4f;
-constexpr float kSwimUpAccel = 26.0f;
-constexpr float kSwimDownAccel = 16.0f;
-constexpr float kSwimDrag = 2.6f;
+constexpr float kSwimUpAccel = 18.0f;
+constexpr float kSwimDownAccel = 22.0f;
+constexpr float kSwimDrag = 4.4f;
+constexpr float kLavaUpAccel = 14.0f;
+constexpr float kLavaDownAccel = 18.0f;
+constexpr float kLavaDrag = 5.5f;
+constexpr float kCrouchViewDrop = 0.22f;
+constexpr float kViewOffsetLerp = 12.0f;
 constexpr float kSprintMultiplier = 1.60f;
 constexpr float kCrouchMultiplier = 0.45f;
 constexpr float kGroundFrictionMove = 3.1f;
@@ -52,9 +59,11 @@ void PlayerController::setFromCamera(const glm::vec3 &cameraPos, const world::Wo
     velocity_ = glm::vec3(0.0f);
     grounded_ = false;
     inWater_ = false;
+    inLava_ = false;
     sprinting_ = false;
     crouching_ = false;
     landedImpactSpeed_ = 0.0f;
+    crouchViewOffset_ = 0.0f;
     initialized_ = true;
 
     if (resolveIntersections) {
@@ -65,7 +74,7 @@ void PlayerController::setFromCamera(const glm::vec3 &cameraPos, const world::Wo
 }
 
 glm::vec3 PlayerController::cameraPosition() const {
-    return feetPos_ + glm::vec3(0.0f, kEyeOffset, 0.0f);
+    return feetPos_ + glm::vec3(0.0f, kEyeOffset + crouchViewOffset_, 0.0f);
 }
 
 bool PlayerController::isWaterAt(const world::World &world, const glm::vec3 &pos) const {
@@ -73,6 +82,13 @@ bool PlayerController::isWaterAt(const world::World &world, const glm::vec3 &pos
     const int wy = static_cast<int>(std::floor(pos.y));
     const int wz = static_cast<int>(std::floor(pos.z));
     return voxel::isWaterLike(world.getBlock(wx, wy, wz));
+}
+
+bool PlayerController::isLavaAt(const world::World &world, const glm::vec3 &pos) const {
+    const int wx = static_cast<int>(std::floor(pos.x));
+    const int wy = static_cast<int>(std::floor(pos.y));
+    const int wz = static_cast<int>(std::floor(pos.z));
+    return voxel::isLavaLike(world.getBlock(wx, wy, wz));
 }
 
 bool PlayerController::isOnIce(const world::World &world, const glm::vec3 &feet) const {
@@ -156,7 +172,8 @@ void PlayerController::moveAxis(const world::World &world, int axis, float amoun
             velocity_[axis] = 0.0f;
             break;
         }
-        if (axis != 1 && crouching_ && grounded_ && !inWater_ && !hasGroundSupport(world, feetPos_)) {
+        if (axis != 1 && crouching_ && grounded_ && !inWater_ && !inLava_ &&
+            !hasGroundSupport(world, feetPos_)) {
             feetPos_[axis] -= step;
             velocity_[axis] = 0.0f;
             break;
@@ -187,6 +204,7 @@ void PlayerController::update(GLFWwindow *window, const world::World &world, con
     bool jumpDown = false;
     bool sprint = false;
     bool crouch = false;
+    bool shiftDown = false;
     bool descend = false;
     if (inputEnabled) {
         if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
@@ -198,11 +216,11 @@ void PlayerController::update(GLFWwindow *window, const world::World &world, con
         if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS)
             wish -= right;
         jumpDown = glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS;
-        sprint = (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS) ||
-                 (glfwGetKey(window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS);
+        shiftDown = (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS) ||
+                    (glfwGetKey(window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS);
+        sprint = shiftDown;
         crouch = (glfwGetKey(window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS) ||
                  (glfwGetKey(window, GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS);
-        descend = crouch;
     }
 
     if (glm::dot(wish, wish) > 1e-6f) {
@@ -213,26 +231,44 @@ void PlayerController::update(GLFWwindow *window, const world::World &world, con
     inWater_ = isWaterAt(world, feetPos_ + glm::vec3(0.0f, 0.10f, 0.0f)) ||
                isWaterAt(world, feetPos_ + glm::vec3(0.0f, 0.90f, 0.0f)) ||
                isWaterAt(world, feetPos_ + glm::vec3(0.0f, 1.45f, 0.0f));
-    const bool onIce = grounded_ && !inWater_ && isOnIce(world, feetPos_);
+    inLava_ = isLavaAt(world, feetPos_ + glm::vec3(0.0f, 0.10f, 0.0f)) ||
+              isLavaAt(world, feetPos_ + glm::vec3(0.0f, 0.90f, 0.0f)) ||
+              isLavaAt(world, feetPos_ + glm::vec3(0.0f, 1.45f, 0.0f));
+    const bool inFluid = inWater_ || inLava_;
+    // Shift should sink in water; crouch key still descends in any fluid.
+    descend = crouch || (shiftDown && inWater_);
+    const glm::vec3 fluidProbeA = feetPos_ + glm::vec3(0.0f, 0.20f, 0.0f);
+    const glm::vec3 fluidProbeB = feetPos_ + glm::vec3(0.0f, 0.95f, 0.0f);
+    const glm::vec3 fluidProbeC = feetPos_ + glm::vec3(0.0f, 1.55f, 0.0f);
+    const glm::vec3 fluidFlow =
+        (world.fluidCurrentAt(fluidProbeA) + world.fluidCurrentAt(fluidProbeB) +
+         world.fluidCurrentAt(fluidProbeC)) /
+        3.0f;
+    const bool onIce = grounded_ && !inFluid && isOnIce(world, feetPos_);
 
     if (crouch) {
         sprint = false;
     }
     crouching_ = crouch;
-    sprinting_ = allowSprint && sprint && !inWater_ && hasWish;
-    const float moveModifier = (!inWater_ && sprinting_) ? kSprintMultiplier
-                              : (!inWater_ && crouch) ? kCrouchMultiplier
+    sprinting_ = allowSprint && sprint && !inFluid && hasWish;
+    const float moveModifier = (!inFluid && sprinting_) ? kSprintMultiplier
+                              : (!inFluid && crouch) ? kCrouchMultiplier
                                                       : 1.0f;
-    const float maxSpeed = (inWater_ ? kSwimSpeed : (grounded_ ? kGroundSpeed : kAirSpeed)) *
-                           moveModifier;
-    const float accel =
-        inWater_ ? kSwimAccel : (grounded_ ? (onIce ? kIceAccel : kGroundAccel) : kAirAccel);
+    const float maxSpeed =
+        (inLava_ ? kLavaSpeed : (inWater_ ? kSwimSpeed : (grounded_ ? kGroundSpeed : kAirSpeed))) *
+        moveModifier;
+    const float crouchTargetOffset = (crouching_ && grounded_ && !inFluid) ? -kCrouchViewDrop : 0.0f;
+    crouchViewOffset_ =
+        approach(crouchViewOffset_, crouchTargetOffset, kViewOffsetLerp * dt);
+    const float accel = inLava_ ? kLavaAccel
+                       : (inWater_ ? kSwimAccel
+                                   : (grounded_ ? (onIce ? kIceAccel : kGroundAccel) : kAirAccel));
     const float targetX = wish.x * maxSpeed;
     const float targetZ = wish.z * maxSpeed;
     velocity_.x = approach(velocity_.x, targetX, accel * dt);
     velocity_.z = approach(velocity_.z, targetZ, accel * dt);
 
-    if (!inWater_) {
+    if (!inFluid) {
         const float friction =
             grounded_
                 ? (onIce ? kIceFriction : (hasWish ? kGroundFrictionMove : kGroundFrictionIdle))
@@ -241,6 +277,12 @@ void PlayerController::update(GLFWwindow *window, const world::World &world, con
         velocity_.x *= damp;
         velocity_.z *= damp;
     }
+
+    // Flowing water/lava can push hitbox entities.
+    constexpr float kPlayerFluidPush = 1.6f;
+    velocity_.x += fluidFlow.x * dt * kPlayerFluidPush;
+    velocity_.z += fluidFlow.z * dt * kPlayerFluidPush;
+    velocity_.y += fluidFlow.y * dt * 0.55f * kPlayerFluidPush;
 
     if (inWater_) {
         // Water movement: weaker gravity, buoyancy-like control, and drag.
@@ -254,6 +296,18 @@ void PlayerController::update(GLFWwindow *window, const world::World &world, con
         const float drag = std::max(0.0f, 1.0f - kSwimDrag * dt);
         velocity_ *= drag;
         velocity_.y = glm::clamp(velocity_.y, -3.8f, 4.6f);
+    } else if (inLava_) {
+        // Lava movement: very heavy drag and weak vertical control.
+        velocity_.y -= 5.0f * dt;
+        if (jumpDown) {
+            velocity_.y += kLavaUpAccel * dt;
+        }
+        if (descend) {
+            velocity_.y -= kLavaDownAccel * dt;
+        }
+        const float drag = std::max(0.0f, 1.0f - kLavaDrag * dt);
+        velocity_ *= drag;
+        velocity_.y = glm::clamp(velocity_.y, -3.0f, 3.2f);
     } else {
         // Hold-space auto-jump: if space is still held when we touch ground, jump
         // again.
@@ -272,7 +326,7 @@ void PlayerController::update(GLFWwindow *window, const world::World &world, con
     moveAxis(world, 2, velocity_.z * dt);
 
     landedImpactSpeed_ = 0.0f;
-    if (!inWater_ && !wasGrounded && grounded_ && preVerticalVelocity < 0.0f) {
+    if (!inFluid && !wasGrounded && grounded_ && preVerticalVelocity < 0.0f) {
         landedImpactSpeed_ = -preVerticalVelocity;
     }
 }

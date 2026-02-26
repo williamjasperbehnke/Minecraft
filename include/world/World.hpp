@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/ThreadQueue.hpp"
+#include "core/TickCounter.hpp"
 #include "gfx/ChunkMesh.hpp"
 #include "gfx/TextureAtlas.hpp"
 #include "voxel/Block.hpp"
@@ -10,6 +11,7 @@
 #include "world/WorldGen.hpp"
 
 #include <glm/vec3.hpp>
+#include <glm/mat4x4.hpp>
 
 #include <atomic>
 #include <cstdint>
@@ -67,15 +69,17 @@ class World {
     World(const World &) = delete;
     World &operator=(const World &) = delete;
 
-    void updateStream(const glm::vec3 &playerPos);
+    void updateStream(const glm::vec3 &playerPos, const glm::vec3 &cameraForward);
     void updateFluidSimulation(float dt);
     void uploadReadyMeshes();
-    void draw() const;
-    void drawTransparent(const glm::vec3 &cameraPos, const glm::vec3 &cameraForward) const;
+    void draw(const glm::vec3 &cameraPos, float maxDrawDistance, const glm::mat4 &viewProj) const;
+    void drawTransparent(const glm::vec3 &cameraPos, const glm::vec3 &cameraForward,
+                         float maxDrawDistance, const glm::mat4 &viewProj) const;
 
     bool isSolidBlock(int wx, int wy, int wz) const;
     bool isTargetBlock(int wx, int wy, int wz) const;
     bool isChunkLoadedAt(int wx, int wz) const;
+    glm::vec3 fluidCurrentAt(const glm::vec3 &pos) const;
     std::string biomeLabelAt(int wx, int wz) const;
     voxel::BlockId getBlock(int wx, int wy, int wz) const;
     bool setBlock(int wx, int wy, int wz, voxel::BlockId id);
@@ -132,7 +136,7 @@ class World {
         ChunkCoord coord;
         bool urgent = false;
         std::shared_ptr<voxel::Chunk> chunk;
-        gfx::CpuMesh mesh;
+        std::unique_ptr<gfx::CpuMesh> mesh;
         bool replaceChunk = false;
     };
 
@@ -140,6 +144,12 @@ class World {
         std::shared_ptr<voxel::Chunk> chunk;
         std::unique_ptr<gfx::ChunkMesh> mesh;
         int triangleCount = 0;
+    };
+    struct TransparentDrawItem {
+        const gfx::ChunkMesh *mesh = nullptr;
+        ChunkCoord coord{};
+        float depth = 0.0f;
+        float dist2 = 0.0f;
     };
     struct FluidState {
         std::uint8_t level = 0;
@@ -161,9 +171,11 @@ class World {
     void setFluidStateLocked(voxel::BlockId fluidId, int wx, int wy, int wz, std::uint8_t level,
                              bool source);
     void clearFluidStateLocked(int wx, int wy, int wz);
-    void processFluidFrontierLocked(voxel::BlockId fluidId, int budget, std::deque<FluidCoord> &frontier,
+    void processFluidFrontierLocked(voxel::BlockId fluidId, std::deque<FluidCoord> &frontier,
                                     std::unordered_set<FluidCoord, FluidCoordHash> &queued,
                                     std::unordered_set<ChunkCoord, ChunkCoordHash> &remeshChunks);
+    std::unique_ptr<gfx::CpuMesh> acquireMeshBuffer();
+    void recycleMeshBuffer(std::unique_ptr<gfx::CpuMesh> mesh);
 
     static int floorDiv(int a, int b);
     static int floorMod(int a, int b);
@@ -173,6 +185,7 @@ class World {
     int unloadRadius_ = 10;
     std::atomic<std::int64_t> playerChunkPacked_{0};
     std::atomic<std::int64_t> lastStreamChunkPacked_{std::numeric_limits<std::int64_t>::min()};
+    std::atomic<std::int64_t> lastStreamForwardPacked_{std::numeric_limits<std::int64_t>::min()};
     std::atomic<bool> streamDirty_{true};
 
     const gfx::TextureAtlas &atlas_;
@@ -188,9 +201,12 @@ class World {
 
     std::unordered_set<ChunkCoord, ChunkCoordHash> pendingLoad_;
     std::unordered_set<ChunkCoord, ChunkCoordHash> pendingRemesh_;
+    std::unordered_set<ChunkCoord, ChunkCoordHash> pendingRemeshDirty_;
     std::unordered_map<FurnaceCoordKey, FurnaceState, FurnaceCoordKeyHash> furnaceStates_;
 
     std::vector<std::thread> workers_;
+    std::mutex meshBufferPoolMutex_;
+    std::vector<std::unique_ptr<gfx::CpuMesh>> meshBufferPool_;
     std::atomic<bool> running_ = true;
     std::atomic<bool> smoothLighting_{false};
     std::deque<FluidCoord> waterFrontier_;
@@ -199,9 +215,24 @@ class World {
     std::unordered_set<FluidCoord, FluidCoordHash> lavaQueued_;
     std::unordered_map<FluidCoord, FluidState, FluidCoordHash> waterState_;
     std::unordered_map<FluidCoord, FluidState, FluidCoordHash> lavaState_;
+    std::unordered_map<ChunkCoord, std::unordered_set<FluidCoord, FluidCoordHash>, ChunkCoordHash>
+        waterStateByChunk_;
+    std::unordered_map<ChunkCoord, std::unordered_set<FluidCoord, FluidCoordHash>, ChunkCoordHash>
+        lavaStateByChunk_;
+    std::unordered_map<ChunkCoord, std::unordered_set<FurnaceCoordKey, FurnaceCoordKeyHash>,
+                       ChunkCoordHash>
+        furnaceStateByChunk_;
     std::vector<FluidDrop> pendingFluidDrops_;
-    float waterStepAccum_ = 0.0f;
-    float lavaStepAccum_ = 0.0f;
+    std::atomic<std::uint64_t> worldRevision_{1};
+    std::atomic<std::uint32_t> meshReserveVertices_{8192};
+    std::atomic<std::uint32_t> meshReserveIndices_{12288};
+    mutable std::vector<TransparentDrawItem> transparentDrawCache_;
+    mutable glm::vec3 transparentCachePos_{0.0f};
+    mutable glm::vec3 transparentCacheForward_{0.0f, 0.0f, -1.0f};
+    mutable float transparentCacheMaxDist_ = -1.0f;
+    mutable std::uint64_t transparentCacheRevision_ = 0;
+    mutable bool transparentCacheValid_ = false;
+    core::TickCounter fluidTicks_{1.0f / 20.0f, 0};
 };
 
 } // namespace world

@@ -45,6 +45,7 @@ class PlayerController {
     bool intersectsSolid(const world::World &world, const glm::vec3 &feet) const;
     bool hasGroundSupport(const world::World &world, const glm::vec3 &feet) const;
     bool isWaterAt(const world::World &world, const glm::vec3 &pos) const;
+    bool isLavaAt(const world::World &world, const glm::vec3 &pos) const;
     bool isOnIce(const world::World &world, const glm::vec3 &feet) const;
     void moveAxis(const world::World &world, int axis, float amount);
 
@@ -54,9 +55,11 @@ class PlayerController {
     bool initialized_ = false;
     bool grounded_ = false;
     bool inWater_ = false;
+    bool inLava_ = false;
     bool sprinting_ = false;
     bool crouching_ = false;
     float landedImpactSpeed_ = 0.0f;
+    float crouchViewOffset_ = 0.0f;
 };
 
 } // namespace game

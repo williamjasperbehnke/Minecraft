@@ -149,6 +149,12 @@ void ItemDropSystem::update(const world::World &world, const glm::vec3 &playerPo
         }
 
         it.vel.y -= kGravity * dt;
+        const glm::vec3 flowA = world.fluidCurrentAt(it.pos + glm::vec3(0.0f, 0.05f, 0.0f));
+        const glm::vec3 flowB = world.fluidCurrentAt(it.pos + glm::vec3(0.0f, 0.24f, 0.0f));
+        const glm::vec3 flow = (flowA + flowB) * 0.5f;
+        it.vel.x += flow.x * dt;
+        it.vel.z += flow.z * dt;
+        it.vel.y += flow.y * dt * 0.65f;
         const float drag =
             std::max(0.0f, 1.0f - (it.pos.y <= playerPos.y + 0.5f ? kGroundDrag : kAirDrag) * dt);
         it.vel.x *= drag;

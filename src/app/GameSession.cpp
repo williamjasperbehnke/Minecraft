@@ -50,6 +50,7 @@
 #include <vector>
 
 #include "app/Util.hpp"
+#include "core/TickCounter.hpp"
 
 namespace {
 
@@ -143,6 +144,7 @@ void renderOverlayMenus(GLFWwindow *window, gfx::HudRenderer &hud, int winW, int
                         float mapCenterWZ, float mapZoom, int selectedWaypointIndex,
                         bool waypointNameFocused, bool waypointEditorOpen, float miniMapZoom,
                         bool miniMapNorthLocked, bool miniMapShowCompass, bool miniMapShowWaypoints,
+                        bool worldMapShowChunkBorders,
                         voxel::BlockRegistry &hudRegistry, gfx::TextureAtlas &atlas,
                         game::DebugMenu &debugMenu) {
     if (pauseMenuOpen) {
@@ -180,7 +182,8 @@ void renderOverlayMenus(GLFWwindow *window, gfx::HudRenderer &hud, int winW, int
                             selectedWaypointIndex, waypointName, waypointR, waypointG, waypointB,
                             waypointIcon, waypointVisible,
                             std::atan2(camera.forward().x, -camera.forward().z),
-                            waypointNameFocused, waypointEditorOpen, hudRegistry, atlas);
+                            waypointNameFocused, waypointEditorOpen, worldMapShowChunkBorders,
+                            hudRegistry, atlas);
     } else if (hudVisible) {
         const glm::vec3 pos = camera.position();
         const int mapWX = static_cast<int>(std::floor(pos.x));
@@ -257,6 +260,7 @@ bool GameSession::run() {
     bool miniMapNorthLocked = true;
     bool miniMapShowCompass = true;
     bool miniMapShowWaypoints = true;
+    bool worldMapShowChunkBorders = true;
     int selectedWaypointIndex = -1;
     bool waypointNameFocused = false;
     bool waypointEditorOpen = false;
@@ -356,6 +360,8 @@ bool GameSession::run() {
     float titleAccum = 0.0f;
     float dayClockSeconds = 120.0f;
     constexpr float kDayLengthSeconds = 900.0f;
+    constexpr float kSimTickDt = 1.0f / 20.0f;
+    core::TickCounter simTicks(kSimTickDt, 0);
     gfx::SkyBodyRenderer skyBodyRenderer;
     gfx::ChunkBorderRenderer chunkBorderRenderer;
     world::WorldDebugStats stats{};
@@ -368,6 +374,7 @@ bool GameSession::run() {
     float stepCooldown = 0.0f;
     float swimCooldown = 0.0f;
     float bobCooldown = 0.0f;
+    float gameplayFov = debugCfg.fov;
 
     bool returnToTitle = false;
     auto handleWorldInteractionAndMovement = [&](float dt, bool blockInput,
@@ -724,6 +731,13 @@ bool GameSession::run() {
                 }
             }
             if (left && !prevLeft) {
+                if (mx >= mapLayout.chunkBtnX &&
+                    mx <= (mapLayout.chunkBtnX + mapLayout.chunkBtnW) &&
+                    my >= mapLayout.chunkBtnY &&
+                    my <= (mapLayout.chunkBtnY + mapLayout.chunkBtnH)) {
+                    worldMapShowChunkBorders = !worldMapShowChunkBorders;
+                    mapDragActive = false;
+                } else
                 if (waypointEditorOpen && inWaypointEditor && selectedWaypointIndex >= 0 &&
                     selectedWaypointIndex < static_cast<int>(mapSystem.waypoints().size())) {
                     auto &wp = mapSystem.waypoints()[selectedWaypointIndex];
@@ -1737,57 +1751,61 @@ bool GameSession::run() {
             }
         }
 
-        world.updateStream(camera.position());
-        world.updateFluidSimulation(dt);
+        world.updateStream(camera.position(), camera.forward());
+        const int simTickCount = simTicks.consume(dt);
+        if (debugCfg.overrideTime) {
+            dayClockSeconds = std::clamp(debugCfg.timeOfDay01, 0.0f, 1.0f) * kDayLengthSeconds;
+        } else if (simTickCount > 0) {
+            dayClockSeconds += static_cast<float>(simTickCount) * kSimTickDt;
+            if (dayClockSeconds >= kDayLengthSeconds) {
+                dayClockSeconds = std::fmod(dayClockSeconds, kDayLengthSeconds);
+            }
+            debugCfg.timeOfDay01 = dayClockSeconds / kDayLengthSeconds;
+        }
+
+        persistActiveFurnaceState();
+        for (int tick = 0; tick < simTickCount; ++tick) {
+            world.updateFluidSimulation(kSimTickDt);
+            mineCooldown = std::max(0.0f, mineCooldown - kSimTickDt);
+            itemDrops.update(world, camera.position(), kSimTickDt);
+            const auto loadedFurnaces = world.loadedFurnacePositions();
+            for (const glm::ivec3 &fpos : loadedFurnaces) {
+                world::FurnaceState wstate{};
+                if (!world.getFurnaceState(fpos.x, fpos.y, fpos.z, wstate)) {
+                    continue;
+                }
+                const voxel::BlockId furnaceBlockId = world.getBlock(fpos.x, fpos.y, fpos.z);
+                game::SmeltingSystem::State gstate = SaveManager::fromWorldFurnaceState(wstate);
+                smeltingSystem.update(gstate, kSimTickDt);
+                const bool furnaceActive = gstate.burnSecondsRemaining > 0.0f;
+                if (voxel::isFurnace(furnaceBlockId)) {
+                    const voxel::BlockId desiredId = furnaceActive
+                                                         ? voxel::toLitFurnace(furnaceBlockId)
+                                                         : voxel::toUnlitFurnace(furnaceBlockId);
+                    if (desiredId != furnaceBlockId) {
+                        world.setBlock(fpos.x, fpos.y, fpos.z, desiredId);
+                    }
+                }
+                const bool hasItems = (gstate.input.id != voxel::AIR && gstate.input.count > 0) ||
+                                      (gstate.fuel.id != voxel::AIR && gstate.fuel.count > 0) ||
+                                      (gstate.output.id != voxel::AIR && gstate.output.count > 0);
+                const bool hasWork = gstate.progressSeconds > 0.0f ||
+                                     gstate.burnSecondsRemaining > 0.0f ||
+                                     gstate.burnSecondsCapacity > 0.0f;
+                if (!hasItems && !hasWork) {
+                    world.clearFurnaceState(fpos.x, fpos.y, fpos.z);
+                } else {
+                    world.setFurnaceState(fpos.x, fpos.y, fpos.z,
+                                          SaveManager::toWorldFurnaceState(gstate));
+                }
+            }
+        }
         for (const auto &drop : world.consumeFluidDrops()) {
             itemDrops.spawn(drop.id, drop.pos, drop.count);
         }
         world.uploadReadyMeshes();
         stats = world.debugStats();
         mapSystem.observeLoadedChunks(world);
-        if (debugCfg.overrideTime) {
-            dayClockSeconds = std::clamp(debugCfg.timeOfDay01, 0.0f, 1.0f) * kDayLengthSeconds;
-        } else {
-            dayClockSeconds += dt;
-            if (dayClockSeconds >= kDayLengthSeconds) {
-                dayClockSeconds = std::fmod(dayClockSeconds, kDayLengthSeconds);
-            }
-            debugCfg.timeOfDay01 = dayClockSeconds / kDayLengthSeconds;
-        }
-        mineCooldown = std::max(0.0f, mineCooldown - dt);
-        itemDrops.update(world, camera.position(), dt);
-        persistActiveFurnaceState();
-        const auto loadedFurnaces = world.loadedFurnacePositions();
-        for (const glm::ivec3 &fpos : loadedFurnaces) {
-            world::FurnaceState wstate{};
-            if (!world.getFurnaceState(fpos.x, fpos.y, fpos.z, wstate)) {
-                continue;
-            }
-            const voxel::BlockId furnaceBlockId = world.getBlock(fpos.x, fpos.y, fpos.z);
-            game::SmeltingSystem::State gstate = SaveManager::fromWorldFurnaceState(wstate);
-            smeltingSystem.update(gstate, dt);
-            const bool furnaceActive = gstate.burnSecondsRemaining > 0.0f;
-            if (voxel::isFurnace(furnaceBlockId)) {
-                const voxel::BlockId desiredId = furnaceActive
-                                                     ? voxel::toLitFurnace(furnaceBlockId)
-                                                     : voxel::toUnlitFurnace(furnaceBlockId);
-                if (desiredId != furnaceBlockId) {
-                    world.setBlock(fpos.x, fpos.y, fpos.z, desiredId);
-                }
-            }
-            const bool hasItems = (gstate.input.id != voxel::AIR && gstate.input.count > 0) ||
-                                  (gstate.fuel.id != voxel::AIR && gstate.fuel.count > 0) ||
-                                  (gstate.output.id != voxel::AIR && gstate.output.count > 0);
-            const bool hasWork = gstate.progressSeconds > 0.0f ||
-                                 gstate.burnSecondsRemaining > 0.0f ||
-                                 gstate.burnSecondsCapacity > 0.0f;
-            if (!hasItems && !hasWork) {
-                world.clearFurnaceState(fpos.x, fpos.y, fpos.z);
-            } else {
-                world.setFurnaceState(fpos.x, fpos.y, fpos.z,
-                                      SaveManager::toWorldFurnaceState(gstate));
-            }
-        }
         loadActiveFurnaceState();
         for (const auto &pickup : itemDrops.consumePickups()) {
             if (inventory.add(pickup.id, pickup.count)) {
@@ -2530,13 +2548,26 @@ bool GameSession::run() {
 
         handleWorldInteractionAndMovement(dt, blockInput, currentHit, left, right);
 
+        // Stance feedback: slightly tighten FOV while crouched and widen while sprinting.
+        float targetFov = debugCfg.fov;
+        if (!ghostMode) {
+            if (player.sprinting()) {
+                targetFov += 7.0f;
+            } else if (player.crouching()) {
+                targetFov -= 6.0f;
+            }
+        }
+        const float fovLerp = glm::clamp(dt * 10.0f, 0.0f, 1.0f);
+        gameplayFov += (targetFov - gameplayFov) * fovLerp;
+
         int fbw = 1;
         int fbh = 1;
         glfwGetFramebufferSize(window, &fbw, &fbh);
         const float aspect =
             (fbh > 0) ? static_cast<float>(fbw) / static_cast<float>(fbh) : 16.0f / 9.0f;
-        const glm::mat4 proj = glm::perspective(glm::radians(debugCfg.fov), aspect, 0.1f, 500.0f);
+        const glm::mat4 proj = glm::perspective(glm::radians(gameplayFov), aspect, 0.1f, 500.0f);
         const glm::mat4 view = camera.view();
+        const glm::mat4 viewProj = proj * view;
 
         const float dayPhase = dayClockSeconds / kDayLengthSeconds;
         const float sunAngle = dayPhase * (glm::pi<float>() * 2.0f);
@@ -2679,7 +2710,15 @@ bool GameSession::run() {
             glDisable(GL_BLEND);
             glDepthMask(GL_TRUE);
             shader.setInt("uAlphaPass", 0);
-            world.draw();
+            world.draw(camera.position(), renderEdge, viewProj);
+            // Draw item entities before transparent surfaces so they remain
+            // visible through water/glass passes.
+            itemDrops.render(proj, view, atlas, hudRegistry);
+            // Item rendering uses its own shader; restore chunk shader state
+            // before transparent world passes.
+            shader.use();
+            atlas.bind(0);
+            shader.setInt("uAtlas", 0);
 
             // Pass 2a: transparent depth prepass (no color), so only nearest
             // transparent surface per pixel survives.
@@ -2687,7 +2726,7 @@ bool GameSession::run() {
             glDepthMask(GL_TRUE);
             glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
             shader.setInt("uAlphaPass", 1);
-            world.drawTransparent(camera.position(), camera.forward());
+            world.drawTransparent(camera.position(), camera.forward(), renderEdge, viewProj);
 
             // Pass 2b: transparent color pass, reading depth from prepass.
             glEnable(GL_BLEND);
@@ -2695,14 +2734,15 @@ bool GameSession::run() {
             glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
             glDepthFunc(GL_LEQUAL);
             shader.setInt("uAlphaPass", 1);
-            world.drawTransparent(camera.position(), camera.forward());
+            world.drawTransparent(camera.position(), camera.forward(), renderEdge, viewProj);
             glDepthFunc(GL_LESS);
             glDepthMask(GL_TRUE);
         } else {
             glDisable(GL_BLEND);
             glDepthMask(GL_TRUE);
             shader.setInt("uAlphaPass", 2);
-            world.draw();
+            world.draw(camera.position(), renderEdge, viewProj);
+            itemDrops.render(proj, view, atlas, hudRegistry);
         }
 
         if (debugCfg.showClouds && cloudVis > 0.01f) {
@@ -2819,7 +2859,6 @@ bool GameSession::run() {
             glLineWidth(1.0f);
             glDepthMask(GL_TRUE);
         }
-        itemDrops.render(proj, view, atlas, hudRegistry);
         std::optional<glm::ivec3> highlightedBlock;
         if (hudVisible && currentHit.has_value()) {
             highlightedBlock = currentHit->block;
@@ -2939,7 +2978,8 @@ bool GameSession::run() {
                            miniMapMenu, mapOpen, hudVisible, mapSystem, camera, mapCenterWX,
                            mapCenterWZ, mapZoom, selectedWaypointIndex, waypointNameFocused,
                            waypointEditorOpen, miniMapZoom, miniMapNorthLocked, miniMapShowCompass,
-                           miniMapShowWaypoints, hudRegistry, atlas, debugMenu);
+                           miniMapShowWaypoints, worldMapShowChunkBorders, hudRegistry, atlas,
+                           debugMenu);
         maybeUpdateWindowTitle(window, debugMenu, debugCfg, stats, fps, dt, titleAccum);
     }
 

@@ -4,6 +4,7 @@
 #include "gfx/HudRenderer.hpp"
 #include "gfx/TextureAtlas.hpp"
 #include "voxel/Block.hpp"
+#include "voxel/Chunk.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -16,8 +17,35 @@ namespace {
 
 glm::vec3 mapColorForBlock(voxel::BlockId id, const voxel::BlockRegistry &registry,
                            const gfx::TextureAtlas &atlas) {
+    if (voxel::isWaterLike(id)) {
+        return {0.18f, 0.44f, 0.86f};
+    }
+    if (id == voxel::SEAGRASS) {
+        return {0.22f, 0.64f, 0.34f};
+    }
+    if (id == voxel::KELP) {
+        return {0.16f, 0.56f, 0.26f};
+    }
+    if (id == voxel::CORAL) {
+        return {0.94f, 0.58f, 0.40f};
+    }
+    if (voxel::isLavaLike(id)) {
+        return {0.94f, 0.39f, 0.14f};
+    }
+    if (voxel::isPlant(id) || id == voxel::LEAVES || id == voxel::SPRUCE_LEAVES ||
+        id == voxel::BIRCH_LEAVES || id == voxel::MOSS) {
+        return {0.24f, 0.64f, 0.30f};
+    }
     const voxel::BlockDef &def = registry.get(id);
-    return atlas.tileAverageColor(def.topTile);
+    glm::vec3 c = atlas.tileAverageColor(def.topTile);
+    if (id == voxel::SAND || id == voxel::RED_SAND || id == voxel::SANDSTONE) {
+        c = glm::mix(c, glm::vec3(0.90f, 0.82f, 0.52f), 0.45f);
+    } else if (id == voxel::SNOW_BLOCK || id == voxel::ICE) {
+        c = glm::mix(c, glm::vec3(0.86f, 0.94f, 1.00f), 0.42f);
+    } else if (id == voxel::STONE || id == voxel::BASALT || id == voxel::BEDROCK) {
+        c = glm::mix(c, glm::vec3(0.46f, 0.50f, 0.54f), 0.30f);
+    }
+    return c;
 }
 
 } // namespace
@@ -35,7 +63,12 @@ MapOverlayLayout WorldMapMenu::computeLayout(int width, int height, float zoom) 
     const float gridW = panelW - innerPad * 2.0f;
     const float gridH = panelH - innerPad * 2.0f - 24.0f;
     const float cell = std::clamp(4.0f * zoom, 2.0f, 14.0f);
-    return {panelX, panelY, panelW, panelH, gridX, gridY, gridW, gridH, cell};
+    const float chunkBtnW = 94.0f;
+    const float chunkBtnH = 18.0f;
+    const float chunkBtnX = panelX + panelW - 298.0f;
+    const float chunkBtnY = panelY + 6.0f;
+    return {panelX, panelY, panelW, panelH, gridX, gridY, gridW, gridH, cell,
+            chunkBtnX, chunkBtnY, chunkBtnW, chunkBtnH};
 }
 
 WaypointEditorLayout WorldMapMenu::computeWaypointEditorLayout(const MapOverlayLayout &mapLayout) const {
@@ -77,7 +110,8 @@ void WorldMapMenu::render(gfx::HudRenderer &hud, int width, int height, const ga
                           const std::string &waypointName, std::uint8_t waypointR,
                           std::uint8_t waypointG, std::uint8_t waypointB, int waypointIcon,
                           bool waypointVisible, float playerHeadingRad, bool waypointNameFocused,
-                          bool waypointEditorOpen, const voxel::BlockRegistry &registry,
+                          bool waypointEditorOpen, bool showChunkBorders,
+                          const voxel::BlockRegistry &registry,
                           const gfx::TextureAtlas &atlas) const {
     (void)hud;
     ui_.begin(width, height);
@@ -94,6 +128,10 @@ void WorldMapMenu::render(gfx::HudRenderer &hud, int width, int height, const ga
     const float gridW = panelW - innerPad * 2.0f;
     const float gridH = panelH - innerPad * 2.0f - 24.0f;
     const float cell = std::clamp(4.0f * zoom, 2.0f, 14.0f);
+    const float chunkBtnW = 94.0f;
+    const float chunkBtnH = 18.0f;
+    const float chunkBtnX = panelX + panelW - 298.0f;
+    const float chunkBtnY = panelY + 6.0f;
     const int drawCols = std::max(1, static_cast<int>(std::ceil(gridW / cell)));
     const int drawRows = std::max(1, static_cast<int>(std::ceil(gridH / cell)));
     const float centerIx = (static_cast<float>(drawCols) - 1.0f) * 0.5f;
@@ -163,7 +201,32 @@ void WorldMapMenu::render(gfx::HudRenderer &hud, int width, int height, const ga
             if (!map.sample(mapCenterWX + dx, mapCenterWZ + dz, id)) {
                 continue;
             }
-            const glm::vec3 c = mapColorForBlock(id, registry, atlas);
+            glm::vec3 c = mapColorForBlock(id, registry, atlas);
+            int y = voxel::Chunk::SY / 2;
+            if (map.sampleHeight(mapCenterWX + dx, mapCenterWZ + dz, y)) {
+                int yX1 = y;
+                int yX0 = y;
+                int yZ1 = y;
+                int yZ0 = y;
+                (void)map.sampleHeight(mapCenterWX + dx + 1, mapCenterWZ + dz, yX1);
+                (void)map.sampleHeight(mapCenterWX + dx - 1, mapCenterWZ + dz, yX0);
+                (void)map.sampleHeight(mapCenterWX + dx, mapCenterWZ + dz + 1, yZ1);
+                (void)map.sampleHeight(mapCenterWX + dx, mapCenterWZ + dz - 1, yZ0);
+                const float slope = static_cast<float>((yX1 - yX0) - (yZ1 - yZ0));
+                const float shade = std::clamp(0.84f + slope * 0.025f, 0.68f, 1.16f);
+                const float altitude = std::clamp(0.90f + (static_cast<float>(y) / 127.0f) * 0.22f,
+                                                  0.88f, 1.16f);
+                c *= shade * altitude;
+            }
+            bool waterCovered = false;
+            if (map.sampleWaterCover(mapCenterWX + dx, mapCenterWZ + dz, waterCovered) &&
+                waterCovered) {
+                const glm::vec3 waterTint(0.22f, 0.46f, 0.86f);
+                const float tintMix = voxel::isWaterloggedPlant(id) ? 0.10f
+                                     : (voxel::isPlant(id) ? 0.22f : 0.44f);
+                c = glm::mix(c, waterTint, tintMix);
+            }
+            c = glm::clamp(c, glm::vec3(0.0f), glm::vec3(1.0f));
             const float px = gridX + static_cast<float>(ix) * cell;
             const float py = gridY + static_cast<float>(iz) * cell;
             const float pw = std::min(cell, (gridX + gridW) - px);
@@ -172,6 +235,88 @@ void WorldMapMenu::render(gfx::HudRenderer &hud, int width, int height, const ga
                 continue;
             }
             ui_.drawRect(px, py, pw, ph, c.r, c.g, c.b, 0.96f);
+        }
+    }
+    // Chunk grid overlay and hovered chunk highlight.
+    auto floorMod = [](int a, int b) {
+        const int m = a % b;
+        return (m < 0) ? (m + b) : m;
+    };
+    auto floorDiv = [](int a, int b) {
+        int q = a / b;
+        const int r = a % b;
+        if (r != 0 && ((r > 0) != (b > 0))) {
+            --q;
+        }
+        return q;
+    };
+    if (showChunkBorders && cell >= 2.0f) {
+        for (int ix = 0; ix < drawCols; ++ix) {
+            const int dx = static_cast<int>(std::floor(static_cast<float>(ix) - centerIx));
+            const int wx = mapCenterWX + dx;
+            if (floorMod(wx, voxel::Chunk::SX) != 0) {
+                continue;
+            }
+            const float px = gridX + static_cast<float>(ix) * cell;
+            ui_.drawRect(px, gridY, 1.0f, gridH, 0.18f, 0.22f, 0.30f, 0.28f);
+        }
+        for (int iz = 0; iz < drawRows; ++iz) {
+            const int dz = static_cast<int>(std::floor(static_cast<float>(iz) - centerIz));
+            const int wz = mapCenterWZ + dz;
+            if (floorMod(wz, voxel::Chunk::SZ) != 0) {
+                continue;
+            }
+            const float py = gridY + static_cast<float>(iz) * cell;
+            ui_.drawRect(gridX, py, gridW, 1.0f, 0.18f, 0.22f, 0.30f, 0.28f);
+        }
+        if (cursorX >= gridX && cursorX <= (gridX + gridW) && cursorY >= gridY &&
+            cursorY <= (gridY + gridH)) {
+            const int gx = static_cast<int>(std::floor((cursorX - gridX) / cell));
+            const int gz = static_cast<int>(std::floor((cursorY - gridY) / cell));
+            const int dx = static_cast<int>(std::floor(static_cast<float>(gx) - centerIx));
+            const int dz = static_cast<int>(std::floor(static_cast<float>(gz) - centerIz));
+            const int wx = mapCenterWX + dx;
+            const int wz = mapCenterWZ + dz;
+            const int cX = floorDiv(wx, voxel::Chunk::SX);
+            const int cZ = floorDiv(wz, voxel::Chunk::SZ);
+            int minIx = drawCols;
+            int maxIx = -1;
+            for (int ix = 0; ix < drawCols; ++ix) {
+                const int cdx = static_cast<int>(std::floor(static_cast<float>(ix) - centerIx));
+                const int cwx = mapCenterWX + cdx;
+                if (floorDiv(cwx, voxel::Chunk::SX) != cX) {
+                    continue;
+                }
+                minIx = std::min(minIx, ix);
+                maxIx = std::max(maxIx, ix);
+            }
+            int minIz = drawRows;
+            int maxIz = -1;
+            for (int iz = 0; iz < drawRows; ++iz) {
+                const int cdz = static_cast<int>(std::floor(static_cast<float>(iz) - centerIz));
+                const int cwz = mapCenterWZ + cdz;
+                if (floorDiv(cwz, voxel::Chunk::SZ) != cZ) {
+                    continue;
+                }
+                minIz = std::min(minIz, iz);
+                maxIz = std::max(maxIz, iz);
+            }
+            if (minIx <= maxIx && minIz <= maxIz) {
+                const float minX = gridX + static_cast<float>(minIx) * cell;
+                const float maxX = gridX + static_cast<float>(maxIx + 1) * cell;
+                const float minY = gridY + static_cast<float>(minIz) * cell;
+                const float maxY = gridY + static_cast<float>(maxIz + 1) * cell;
+                const float hx = std::floor(std::clamp(minX, gridX, gridX + gridW));
+                const float hy = std::floor(std::clamp(minY, gridY, gridY + gridH));
+                const float hw = std::ceil(std::clamp(maxX, gridX, gridX + gridW)) - hx;
+                const float hh = std::ceil(std::clamp(maxY, gridY, gridY + gridH)) - hy;
+                if (hw > 1.0f && hh > 1.0f) {
+                    ui_.drawRect(hx, hy, hw, 1.0f, 0.98f, 0.92f, 0.30f, 0.95f);
+                    ui_.drawRect(hx, hy + hh - 1.0f, hw, 1.0f, 0.98f, 0.92f, 0.30f, 0.95f);
+                    ui_.drawRect(hx, hy, 1.0f, hh, 0.98f, 0.92f, 0.30f, 0.95f);
+                    ui_.drawRect(hx + hw - 1.0f, hy, 1.0f, hh, 0.98f, 0.92f, 0.30f, 0.95f);
+                }
+            }
         }
     }
 
@@ -244,6 +389,19 @@ void WorldMapMenu::render(gfx::HudRenderer &hud, int width, int height, const ga
     ui_.drawText(panelX + 10.0f, panelY + 10.0f, "World Map", 240, 244, 252, 255);
     const std::string zoomText = "Zoom: " + std::to_string(static_cast<int>(std::round(zoom * 100.0f))) + "%";
     ui_.drawText(panelX + 96.0f, panelY + 10.0f, zoomText, 208, 216, 232, 255);
+    ui_.drawRect(chunkBtnX, chunkBtnY, chunkBtnW, chunkBtnH, 0.09f, 0.11f, 0.14f, 0.95f);
+    ui_.drawRect(chunkBtnX + 1.0f, chunkBtnY + 1.0f, chunkBtnW - 2.0f, chunkBtnH - 2.0f,
+                 showChunkBorders ? 0.22f : 0.14f, showChunkBorders ? 0.34f : 0.20f,
+                 showChunkBorders ? 0.56f : 0.28f, 0.98f);
+    ui_.drawRect(chunkBtnX + 6.0f, chunkBtnY + 5.0f, 9.0f, 1.0f, 0.92f, 0.95f, 0.99f, 0.95f);
+    ui_.drawRect(chunkBtnX + 6.0f, chunkBtnY + 8.0f, 9.0f, 1.0f, 0.92f, 0.95f, 0.99f, 0.95f);
+    ui_.drawRect(chunkBtnX + 6.0f, chunkBtnY + 11.0f, 9.0f, 1.0f, 0.92f, 0.95f, 0.99f, 0.95f);
+    ui_.drawRect(chunkBtnX + 6.0f, chunkBtnY + 5.0f, 1.0f, 7.0f, 0.92f, 0.95f, 0.99f, 0.95f);
+    ui_.drawRect(chunkBtnX + 10.0f, chunkBtnY + 5.0f, 1.0f, 7.0f, 0.92f, 0.95f, 0.99f, 0.95f);
+    ui_.drawRect(chunkBtnX + 14.0f, chunkBtnY + 5.0f, 1.0f, 7.0f, 0.92f, 0.95f, 0.99f, 0.95f);
+    ui_.drawText(chunkBtnX + 20.0f, chunkBtnY + 5.0f, showChunkBorders ? "Chunks On" : "Chunks Off",
+                 showChunkBorders ? 236 : 210, showChunkBorders ? 242 : 218,
+                 showChunkBorders ? 252 : 226, 255);
     ui_.drawText(panelX + panelW - 196.0f, panelY + 10.0f, "M: Close  +/-: Zoom", 192, 200, 214, 255);
 
     if (waypointEditorOpen) {

@@ -14,7 +14,9 @@ namespace {
 constexpr char kMapMagicV1[4] = {'V', 'X', 'M', '1'};
 constexpr char kMapMagicV2[4] = {'V', 'X', 'M', '2'};
 constexpr char kMapMagicV3[4] = {'V', 'X', 'M', '3'};
-constexpr auto kScanEnqueueInterval = std::chrono::milliseconds(350);
+constexpr auto kScanEnqueueInterval = std::chrono::milliseconds(180);
+constexpr int kNewChunkScanBudget = 96;
+constexpr int kRefreshChunkScanBudget = 20;
 
 bool isMapSurfaceCandidate(voxel::BlockId id) {
     if (id == voxel::AIR) {
@@ -69,8 +71,12 @@ void MapSystem::workerLoop() {
         }
 
         std::unordered_map<std::uint64_t, voxel::BlockId> localLiveTiles;
+        std::unordered_map<std::uint64_t, std::uint8_t> localLiveHeights;
+        std::unordered_map<std::uint64_t, std::uint8_t> localLiveWaterCover;
         if (world != nullptr) {
             localLiveTiles.reserve(chunks.size() * voxel::Chunk::SX * voxel::Chunk::SZ);
+            localLiveHeights.reserve(chunks.size() * voxel::Chunk::SX * voxel::Chunk::SZ);
+            localLiveWaterCover.reserve(chunks.size() * voxel::Chunk::SX * voxel::Chunk::SZ);
             for (const auto &cc : chunks) {
                 const int baseX = cc.x * voxel::Chunk::SX;
                 const int baseZ = cc.z * voxel::Chunk::SZ;
@@ -79,16 +85,39 @@ void MapSystem::workerLoop() {
                         const int wx = baseX + lx;
                         const int wz = baseZ + lz;
                         voxel::BlockId id = voxel::AIR;
+                        int surfaceY = 0;
+                        bool sawWater = false;
                         for (int y = voxel::Chunk::SY - 1; y >= 0; --y) {
                             const voxel::BlockId s = world->getBlock(wx, y, wz);
                             if (!isMapSurfaceCandidate(s)) {
                                 continue;
                             }
+                            if (voxel::isWaterloggedPlant(s)) {
+                                // Keep underwater flora visible on the map while still
+                                // preserving a water-cover tint for the column.
+                                sawWater = true;
+                                id = s;
+                                surfaceY = y;
+                                break;
+                            }
+                            if (voxel::isWaterLike(s)) {
+                                sawWater = true;
+                                continue;
+                            }
                             id = s;
+                            surfaceY = y;
                             break;
                         }
+                        if (id == voxel::AIR && sawWater) {
+                            // Column is water-only (or water over void): keep water visible.
+                            id = voxel::WATER;
+                        }
                         if (id != voxel::AIR) {
-                            localLiveTiles[keyFor(wx, wz)] = id;
+                            const std::uint64_t key = keyFor(wx, wz);
+                            localLiveTiles[key] = id;
+                            localLiveHeights[key] = static_cast<std::uint8_t>(
+                                std::clamp(surfaceY, 0, voxel::Chunk::SY - 1));
+                            localLiveWaterCover[key] = sawWater ? 1u : 0u;
                         }
                     }
                 }
@@ -98,6 +127,8 @@ void MapSystem::workerLoop() {
         {
             std::lock_guard<std::mutex> lock(resultMutex_);
             resultLiveTiles_ = std::move(localLiveTiles);
+            resultLiveHeights_ = std::move(localLiveHeights);
+            resultLiveWaterCover_ = std::move(localLiveWaterCover);
             hasResult_ = true;
         }
         {
@@ -117,18 +148,32 @@ void MapSystem::enqueueScan(const world::World &world, std::vector<world::ChunkC
 
 void MapSystem::consumeWorkerResult() {
     std::unordered_map<std::uint64_t, voxel::BlockId> local;
+    std::unordered_map<std::uint64_t, std::uint8_t> localHeights;
+    std::unordered_map<std::uint64_t, std::uint8_t> localWaterCover;
     {
         std::lock_guard<std::mutex> lock(resultMutex_);
         if (!hasResult_) {
             return;
         }
         local = std::move(resultLiveTiles_);
+        localHeights = std::move(resultLiveHeights_);
+        localWaterCover = std::move(resultLiveWaterCover_);
         resultLiveTiles_.clear();
+        resultLiveHeights_.clear();
+        resultLiveWaterCover_.clear();
         hasResult_ = false;
     }
     liveTiles_ = std::move(local);
+    liveHeights_ = std::move(localHeights);
+    liveWaterCover_ = std::move(localWaterCover);
     for (const auto &[key, id] : liveTiles_) {
         tiles_[key] = id;
+    }
+    for (const auto &[key, y] : liveHeights_) {
+        heights_[key] = y;
+    }
+    for (const auto &[key, covered] : liveWaterCover_) {
+        waterCover_[key] = covered;
     }
 }
 
@@ -144,6 +189,36 @@ bool MapSystem::sample(int wx, int wz, voxel::BlockId &outId) const {
         return false;
     }
     outId = it->second;
+    return true;
+}
+
+bool MapSystem::sampleHeight(int wx, int wz, int &outY) const {
+    const std::uint64_t key = keyFor(wx, wz);
+    const auto liveIt = liveHeights_.find(key);
+    if (liveIt != liveHeights_.end()) {
+        outY = static_cast<int>(liveIt->second);
+        return true;
+    }
+    const auto it = heights_.find(key);
+    if (it == heights_.end()) {
+        return false;
+    }
+    outY = static_cast<int>(it->second);
+    return true;
+}
+
+bool MapSystem::sampleWaterCover(int wx, int wz, bool &outCovered) const {
+    const std::uint64_t key = keyFor(wx, wz);
+    const auto liveIt = liveWaterCover_.find(key);
+    if (liveIt != liveWaterCover_.end()) {
+        outCovered = (liveIt->second != 0u);
+        return true;
+    }
+    const auto it = waterCover_.find(key);
+    if (it == waterCover_.end()) {
+        return false;
+    }
+    outCovered = (it->second != 0u);
     return true;
 }
 
@@ -170,16 +245,68 @@ void MapSystem::observeLoadedChunks(const world::World &world) {
     }
     auto loaded = world.loadedChunkCoords();
     if (loaded.empty()) {
+        knownLoadedChunks_.clear();
+        refreshCursor_ = 0;
         return;
     }
+
+    std::unordered_set<world::ChunkCoord, world::ChunkCoordHash> loadedSet;
+    loadedSet.reserve(loaded.size() * 2u + 1u);
+    for (const world::ChunkCoord &cc : loaded) {
+        loadedSet.insert(cc);
+    }
+    for (auto it = knownLoadedChunks_.begin(); it != knownLoadedChunks_.end();) {
+        if (loadedSet.find(*it) == loadedSet.end()) {
+            it = knownLoadedChunks_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    std::vector<world::ChunkCoord> scanChunks;
+    scanChunks.reserve(static_cast<std::size_t>(kNewChunkScanBudget + kRefreshChunkScanBudget));
+
+    for (const world::ChunkCoord &cc : loaded) {
+        if (knownLoadedChunks_.find(cc) != knownLoadedChunks_.end()) {
+            continue;
+        }
+        knownLoadedChunks_.insert(cc);
+        scanChunks.push_back(cc);
+        if (static_cast<int>(scanChunks.size()) >= kNewChunkScanBudget) {
+            break;
+        }
+    }
+
+    if (scanChunks.empty()) {
+        const int loadedCount = static_cast<int>(loaded.size());
+        const int refreshCount = std::min(kRefreshChunkScanBudget, loadedCount);
+        if (loadedCount > 0) {
+            refreshCursor_ %= loaded.size();
+            for (int i = 0; i < refreshCount; ++i) {
+                const std::size_t idx = (refreshCursor_ + static_cast<std::size_t>(i)) % loaded.size();
+                scanChunks.push_back(loaded[idx]);
+            }
+            refreshCursor_ = (refreshCursor_ + static_cast<std::size_t>(refreshCount)) % loaded.size();
+        }
+    }
+    if (scanChunks.empty()) {
+        return;
+    }
+
     lastScanEnqueue_ = now;
-    enqueueScan(world, std::move(loaded));
+    enqueueScan(world, std::move(scanChunks));
 }
 
 bool MapSystem::load(const std::filesystem::path &worldDir) {
     tiles_.clear();
     liveTiles_.clear();
+    heights_.clear();
+    liveHeights_.clear();
+    waterCover_.clear();
+    liveWaterCover_.clear();
+    knownLoadedChunks_.clear();
     waypoints_.clear();
+    refreshCursor_ = 0;
     std::ifstream in(worldDir / "map.dat", std::ios::binary);
     if (!in) {
         return false;
@@ -216,6 +343,8 @@ bool MapSystem::load(const std::filesystem::path &worldDir) {
         if (id != voxel::AIR) {
             tiles_[keyFor(static_cast<int>(x), static_cast<int>(z))] =
                 static_cast<voxel::BlockId>(id);
+            heights_[keyFor(static_cast<int>(x), static_cast<int>(z))] =
+                static_cast<std::uint8_t>(voxel::Chunk::SY / 2);
         }
     }
     if (isV2 || isV3) {

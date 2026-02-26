@@ -149,12 +149,22 @@ void appendTorchCross(gfx::CpuMesh &mesh, float x0, float z0, float x1, float z1
 
 } // namespace
 
-gfx::CpuMesh ChunkMesher::buildFaceCulled(const Chunk &chunk, const gfx::TextureAtlas &atlas,
-                                          const BlockRegistry &registry, glm::ivec2 chunkXZ,
-                                          const NeighborChunks &neighbors, bool smoothLighting,
-                                          const std::function<int(BlockId, int, int, int)>
-                                              &fluidLevelLookup) {
-    gfx::CpuMesh out;
+void ChunkMesher::buildFaceCulledInto(gfx::CpuMesh &out, const Chunk &chunk,
+                                      const gfx::TextureAtlas &atlas,
+                                      const BlockRegistry &registry, glm::ivec2 chunkXZ,
+                                      const NeighborChunks &neighbors, bool smoothLighting,
+                                      const std::function<int(BlockId, int, int, int)>
+                                          &fluidLevelLookup,
+                                      std::size_t reserveVertices,
+                                      std::size_t reserveIndices) {
+    out.vertices.clear();
+    out.indices.clear();
+    if (reserveVertices > out.vertices.capacity()) {
+        out.vertices.reserve(reserveVertices);
+    }
+    if (reserveIndices > out.indices.capacity()) {
+        out.indices.reserve(reserveIndices);
+    }
 
     auto neighborAt = [&](int x, int y, int z) -> BlockId {
         if (y < 0 || y >= Chunk::SY) {
@@ -611,6 +621,18 @@ gfx::CpuMesh ChunkMesher::buildFaceCulled(const Chunk &chunk, const gfx::Texture
             }
         }
     }
+}
+
+gfx::CpuMesh ChunkMesher::buildFaceCulled(const Chunk &chunk, const gfx::TextureAtlas &atlas,
+                                          const BlockRegistry &registry, glm::ivec2 chunkXZ,
+                                          const NeighborChunks &neighbors, bool smoothLighting,
+                                          const std::function<int(BlockId, int, int, int)>
+                                              &fluidLevelLookup,
+                                          std::size_t reserveVertices,
+                                          std::size_t reserveIndices) {
+    gfx::CpuMesh out;
+    buildFaceCulledInto(out, chunk, atlas, registry, chunkXZ, neighbors, smoothLighting,
+                        fluidLevelLookup, reserveVertices, reserveIndices);
     return out;
 }
 

@@ -29,6 +29,10 @@ struct MapOverlayLayout {
     float gridW = 0.0f;
     float gridH = 0.0f;
     float cell = 4.0f;
+    float chunkBtnX = 0.0f;
+    float chunkBtnY = 0.0f;
+    float chunkBtnW = 0.0f;
+    float chunkBtnH = 0.0f;
 };
 
 struct WaypointEditorLayout {
@@ -76,7 +80,8 @@ class WorldMapMenu : public BaseMenu {
                 const std::string &waypointName, std::uint8_t waypointR,
                 std::uint8_t waypointG, std::uint8_t waypointB, int waypointIcon,
                 bool waypointVisible, float playerHeadingRad, bool waypointNameFocused,
-                bool waypointEditorOpen, const voxel::BlockRegistry &registry,
+                bool waypointEditorOpen, bool showChunkBorders,
+                const voxel::BlockRegistry &registry,
                 const gfx::TextureAtlas &atlas) const;
 
   private:

@@ -3,6 +3,7 @@
 #include "gfx/HudRenderer.hpp"
 #include "gfx/TextureAtlas.hpp"
 #include "voxel/Block.hpp"
+#include "voxel/Chunk.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -15,8 +16,35 @@ namespace {
 
 glm::vec3 mapColorForBlock(voxel::BlockId id, const voxel::BlockRegistry &registry,
                            const gfx::TextureAtlas &atlas) {
+    if (voxel::isWaterLike(id)) {
+        return {0.18f, 0.44f, 0.86f};
+    }
+    if (id == voxel::SEAGRASS) {
+        return {0.22f, 0.64f, 0.34f};
+    }
+    if (id == voxel::KELP) {
+        return {0.16f, 0.56f, 0.26f};
+    }
+    if (id == voxel::CORAL) {
+        return {0.94f, 0.58f, 0.40f};
+    }
+    if (voxel::isLavaLike(id)) {
+        return {0.94f, 0.39f, 0.14f};
+    }
+    if (voxel::isPlant(id) || id == voxel::LEAVES || id == voxel::SPRUCE_LEAVES ||
+        id == voxel::BIRCH_LEAVES || id == voxel::MOSS) {
+        return {0.24f, 0.64f, 0.30f};
+    }
     const voxel::BlockDef &def = registry.get(id);
-    return atlas.tileAverageColor(def.topTile);
+    glm::vec3 c = atlas.tileAverageColor(def.topTile);
+    if (id == voxel::SAND || id == voxel::RED_SAND || id == voxel::SANDSTONE) {
+        c = glm::mix(c, glm::vec3(0.90f, 0.82f, 0.52f), 0.45f);
+    } else if (id == voxel::SNOW_BLOCK || id == voxel::ICE) {
+        c = glm::mix(c, glm::vec3(0.86f, 0.94f, 1.00f), 0.42f);
+    } else if (id == voxel::STONE || id == voxel::BASALT || id == voxel::BEDROCK) {
+        c = glm::mix(c, glm::vec3(0.46f, 0.50f, 0.54f), 0.30f);
+    }
+    return c;
 }
 
 } // namespace
@@ -137,7 +165,31 @@ void MiniMapMenu::render(gfx::HudRenderer &hud, int width, int height, const gam
             if (!map.sample(playerWX + sdx, playerWZ + sdz, id)) {
                 continue;
             }
-            const glm::vec3 c = mapColorForBlock(id, registry, atlas);
+            glm::vec3 c = mapColorForBlock(id, registry, atlas);
+            int y = voxel::Chunk::SY / 2;
+            if (map.sampleHeight(playerWX + sdx, playerWZ + sdz, y)) {
+                int yX1 = y;
+                int yX0 = y;
+                int yZ1 = y;
+                int yZ0 = y;
+                (void)map.sampleHeight(playerWX + sdx + 1, playerWZ + sdz, yX1);
+                (void)map.sampleHeight(playerWX + sdx - 1, playerWZ + sdz, yX0);
+                (void)map.sampleHeight(playerWX + sdx, playerWZ + sdz + 1, yZ1);
+                (void)map.sampleHeight(playerWX + sdx, playerWZ + sdz - 1, yZ0);
+                const float slope = static_cast<float>((yX1 - yX0) - (yZ1 - yZ0));
+                const float shade = std::clamp(0.86f + slope * 0.026f, 0.68f, 1.18f);
+                const float altitude =
+                    std::clamp(0.90f + (static_cast<float>(y) / 127.0f) * 0.22f, 0.88f, 1.16f);
+                c *= shade * altitude;
+            }
+            bool waterCovered = false;
+            if (map.sampleWaterCover(playerWX + sdx, playerWZ + sdz, waterCovered) && waterCovered) {
+                const glm::vec3 waterTint(0.22f, 0.46f, 0.86f);
+                const float tintMix = voxel::isWaterloggedPlant(id) ? 0.10f
+                                     : (voxel::isPlant(id) ? 0.22f : 0.44f);
+                c = glm::mix(c, waterTint, tintMix);
+            }
+            c = glm::clamp(c, glm::vec3(0.0f), glm::vec3(1.0f));
             const float px = gridX + static_cast<float>(ix) * cell;
             const float py = gridY + static_cast<float>(iz) * cell;
             const float pw = std::min(cell, (gridX + gridW) - px);
